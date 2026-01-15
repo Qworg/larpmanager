@@ -108,17 +108,17 @@ urlpatterns = (
             name="api_tickets_list_create",
         ),
         path(
-            "api/v1/tickets/<uuid:ticket_uuid>/",
+            "api/v1/tickets/<slug:ticket_uuid>/",
             ticket_detail,
             name="api_ticket_detail",
         ),
         path(
-            "api/v1/tickets/<uuid:ticket_uuid>/close/",
+            "api/v1/tickets/<slug:ticket_uuid>/close/",
             ticket_close,
             name="api_ticket_close",
         ),
         path(
-            "api/v1/tickets/<uuid:ticket_uuid>/reopen/",
+            "api/v1/tickets/<slug:ticket_uuid>/reopen/",
             ticket_reopen,
             name="api_ticket_reopen",
         ),

@@ -126,16 +126,36 @@ class BaseTestCase(TestCase):
         return User.objects.create_user(**defaults)
 
     def create_member(self, user: Any = None, **kwargs: Any) -> Any:
-        """Create a new member with defaults"""
+        """Create a new member with defaults.
+
+        Note: A post_save signal on User automatically creates a Member,
+        so this method gets or updates the existing member instead of
+        creating a new one when a user is provided or created.
+        """
         from decimal import Decimal
 
         from larpmanager.models.member import Membership
 
         if user is None:
             user = self.create_user()
-        defaults = {"user": user, "name": "Test", "surname": "Member"}
-        defaults.update(kwargs)
-        member = Member.objects.create(**defaults)
+
+        # User post_save signal creates a Member automatically,
+        # so get the existing one and update it
+        try:
+            member = user.member
+            # Update with any provided kwargs
+            for key, value in kwargs.items():
+                setattr(member, key, value)
+            if not member.name:
+                member.name = "Test"
+            if not member.surname:
+                member.surname = "Member"
+            member.save()
+        except Member.DoesNotExist:
+            # Fallback: create member if signal didn't fire (e.g., in some test scenarios)
+            defaults = {"user": user, "name": "Test", "surname": "Member"}
+            defaults.update(kwargs)
+            member = Member.objects.create(**defaults)
 
         # Create a membership for this member
         association = self.get_association()

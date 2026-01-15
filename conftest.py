@@ -342,8 +342,8 @@ def _get_applied_migrations() -> set[str]:
                 WHERE app = 'larpmanager'
             """)
             return {row[0] for row in cursor.fetchall()}
-    except (OSError, RuntimeError) as e:
-        # If query fails, return empty set (schema needs reload)
+    except (OSError, RuntimeError, Exception) as e:
+        # If query fails (table doesn't exist, etc), return empty set (schema needs reload)
         logger = logging.getLogger(__name__)
         logger.debug("Failed to get applied migrations: %s", e)
         return set()

@@ -76,11 +76,9 @@ class TestDiscordAPI(BaseTestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    @override_settings(
-        DISCORD_CLIENT_ID="test-client-id",
-        DISCORD_CLIENT_SECRET="test-secret",
-        DISCORD_REDIRECT_URI="http://localhost/callback",
-    )
+    @patch('larpmanager.views.api_discord.DISCORD_REDIRECT_URI', 'http://localhost/callback')
+    @patch('larpmanager.views.api_discord.DISCORD_CLIENT_SECRET', 'test-secret')
+    @patch('larpmanager.views.api_discord.DISCORD_CLIENT_ID', 'test-client-id')
     def test_get_oauth_url_success(self):
         """Test that OAuth URL endpoint returns valid URL with state."""
         response = self.client.get(
