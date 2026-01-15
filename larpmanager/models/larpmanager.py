@@ -356,6 +356,53 @@ class LarpManagerTicket(UuidMixin, BaseModel):
 
     analysis = models.CharField(max_length=10000, verbose_name=_("Analysis"), default="")
 
+    # Discord integration fields
+    discord_channel_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        unique=True,
+        db_index=True,
+        verbose_name=_("Discord Channel ID"),
+        help_text=_("The Discord channel ID where this ticket conversation takes place"),
+    )
+
+    discord_creator_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        verbose_name=_("Discord Creator ID"),
+        help_text=_("The Discord user ID of the ticket creator"),
+    )
+
+    assigned_staff_discord_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("Assigned Staff Discord ID"),
+        help_text=_("The Discord user ID of the assigned staff member"),
+    )
+
+    subject = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        verbose_name=_("Subject"),
+        help_text=_("Short subject line for the ticket"),
+    )
+
+    transcript = models.TextField(
+        null=True,
+        blank=True,
+        verbose_name=_("Transcript"),
+        help_text=_("Full conversation transcript from Discord"),
+    )
+
+    closed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Closed at"),
+        help_text=_("Timestamp when the ticket was closed"),
+    )
+
     def show_thumb(self) -> Any:
         """Generate HTML for displaying screenshot thumbnail.
 
@@ -370,4 +417,6 @@ class LarpManagerTicket(UuidMixin, BaseModel):
 
     def __str__(self) -> str:
         """Return string representation of the ticket."""
+        if self.subject:
+            return f"Ticket #{self.id}: {self.subject}"
         return f"Ticket #{self.id}: {self.reason or 'No reason'}"

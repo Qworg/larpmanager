@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% load i18n static %}
+{% block title %}
+    Discord Link Error
+{% endblock title %}
+{% block content %}
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card border-danger">
+                <div class="card-header bg-danger text-white">
+                    <h4 class="mb-0">Discord Link Failed</h4>
+                </div>
+                <div class="card-body text-center">
+                    <p class="lead text-danger">
+                        {{ error }}
+                    </p>
+                    <p class="text-muted">
+                        Please return to Discord and try linking your account again. If the problem persists, contact support.
+                    </p>
+                    <hr>
+                    <a href="/" class="btn btn-primary">Go to Homepage</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}

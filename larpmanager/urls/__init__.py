@@ -27,6 +27,21 @@ from django.conf.urls.static import static
 from django.urls import path
 
 from larpmanager.views.api import published_events
+from larpmanager.views.api_discord import (
+    discord_link_complete,
+    discord_member_check,
+    discord_oauth_callback,
+    discord_oauth_url,
+    discord_unlink,
+)
+from larpmanager.views.api_tickets import (
+    list_associations,
+    ticket_by_channel,
+    ticket_close,
+    ticket_detail,
+    ticket_reopen,
+    tickets_list_create,
+)
 from larpmanager.views.user import event as views_ue
 
 from .event import urlpatterns as event_urls
@@ -55,6 +70,64 @@ urlpatterns = (
             published_events,
             name="api_published_events",
         ),
+        # Discord OAuth and linking endpoints
+        path(
+            "api/v1/discord/member/<int:discord_id>/",
+            discord_member_check,
+            name="api_discord_member_check",
+        ),
+        path(
+            "api/v1/discord/link/<int:discord_id>/",
+            discord_oauth_url,
+            name="api_discord_oauth_url",
+        ),
+        path(
+            "api/v1/discord/unlink/",
+            discord_unlink,
+            name="api_discord_unlink",
+        ),
+        path(
+            "discord/callback/",
+            discord_oauth_callback,
+            name="discord_oauth_callback",
+        ),
+        path(
+            "discord/link/complete/",
+            discord_link_complete,
+            name="discord_link_complete",
+        ),
+        # Ticket API endpoints
+        path(
+            "api/v1/associations/",
+            list_associations,
+            name="api_list_associations",
+        ),
+        path(
+            "api/v1/tickets/",
+            tickets_list_create,
+            name="api_tickets_list_create",
+        ),
+        path(
+            "api/v1/tickets/<uuid:ticket_uuid>/",
+            ticket_detail,
+            name="api_ticket_detail",
+        ),
+        path(
+            "api/v1/tickets/<uuid:ticket_uuid>/close/",
+            ticket_close,
+            name="api_ticket_close",
+        ),
+        path(
+            "api/v1/tickets/<uuid:ticket_uuid>/reopen/",
+            ticket_reopen,
+            name="api_ticket_reopen",
+        ),
+        path(
+            "api/v1/tickets/channel/<int:channel_id>/",
+            ticket_by_channel,
+            name="api_ticket_by_channel",
+        ),
+        # Event redirect (must be last - catches all slugs)
         path(
             "<slug:event_slug>/",
             views_ue.event_redirect,

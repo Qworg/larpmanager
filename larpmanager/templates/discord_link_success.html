@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% load i18n static %}
+{% block title %}
+    Discord Account Linked
+{% endblock title %}
+{% block content %}
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card border-success">
+                <div class="card-header bg-success text-white">
+                    <h4 class="mb-0">Discord Account Linked Successfully</h4>
+                </div>
+                <div class="card-body text-center">
+                    <p class="lead">
+                        Your Discord account <strong>{{ discord_username }}</strong> has been successfully linked to your larpmanager account <strong>{{ member_name }}</strong>.
+                    </p>
+                    <p class="text-muted">
+                        You can now close this window and return to Discord to create support tickets.
+                    </p>
+                    <hr>
+                    <a href="/" class="btn btn-primary">Go to Homepage</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock content %}
