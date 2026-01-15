@@ -480,3 +480,52 @@ class BaseTestCase(TestCase):
         # This can return the same as member().user for simplicity
         # or create a specific user with permissions if needed
         return self.get_member().user
+
+    def create_larpmanager_ticket(self, association: Any = None, member: Any = None, **kwargs: Any) -> Any:
+        """Create a LarpManagerTicket for testing.
+
+        Args:
+            association: Association for the ticket (defaults to test association)
+            member: Member creating the ticket (optional)
+            **kwargs: Additional ticket field overrides
+
+        Returns:
+            Created LarpManagerTicket instance
+
+        """
+        from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus
+
+        if association is None:
+            association = self.get_association()
+
+        defaults = {
+            "association": association,
+            "member": member,
+            "reason": "Test Ticket",
+            "content": "Test ticket content",
+            "status": TicketStatus.OPEN,
+            "priority": TicketPriority.LOW,
+        }
+        defaults.update(kwargs)
+        return LarpManagerTicket.objects.create(**defaults)
+
+    def create_discord_linked_member(self, discord_id: int = 123456789, **kwargs: Any) -> Any:
+        """Create a member with a Discord ID linked via MemberConfig.
+
+        Args:
+            discord_id: The Discord user ID to link
+            **kwargs: Additional member field overrides
+
+        Returns:
+            Created Member instance with Discord ID linked
+
+        """
+        from larpmanager.models.member import MemberConfig
+
+        member = self.create_member(**kwargs)
+        MemberConfig.objects.create(
+            member=member,
+            name="discord_id",
+            value=str(discord_id),
+        )
+        return member
