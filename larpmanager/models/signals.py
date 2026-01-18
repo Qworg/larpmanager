@@ -90,6 +90,20 @@ from larpmanager.cache.permission import (
     clear_event_permission_cache,
     clear_index_permission_cache,
 )
+from larpmanager.cache.px import (
+    on_ability_characters_m2m_changed,
+    on_ability_prerequisites_m2m_changed,
+    on_ability_requirements_m2m_changed,
+    on_delivery_characters_m2m_changed,
+    on_modifier_prerequisites_m2m_changed,
+    on_modifier_requirements_m2m_changed,
+)
+from larpmanager.cache.px import (
+    on_modifier_abilities_m2m_changed as on_modifier_abilities_m2m_changed_cache,
+)
+from larpmanager.cache.px import (
+    on_rule_abilities_m2m_changed as on_rule_abilities_m2m_changed_cache,
+)
 from larpmanager.cache.registration import clear_registration_counts_cache, on_character_update_registration_cache
 from larpmanager.cache.rels import (
     clear_event_relationships_cache,
@@ -118,9 +132,8 @@ from larpmanager.cache.run import (
 )
 from larpmanager.cache.skin import clear_skin_cache
 from larpmanager.cache.text_fields import update_text_fields_cache
-from larpmanager.cache.widget import (
-    reset_widgets,
-)
+from larpmanager.cache.warehouse import on_warehouse_item_tags_m2m_changed
+from larpmanager.cache.widget import reset_widgets
 from larpmanager.cache.wwyltd import reset_features_cache, reset_guides_cache, reset_tutorials_cache
 from larpmanager.mail.accounting import (
     send_collection_activation_email,
@@ -1716,6 +1729,18 @@ m2m_changed.connect(on_association_roles_m2m_changed, sender=AssociationRole.mem
 m2m_changed.connect(on_event_roles_m2m_changed, sender=EventRole.members.through)
 
 m2m_changed.connect(on_member_badges_m2m_changed, sender=Badge.members.through)
+
+m2m_changed.connect(on_warehouse_item_tags_m2m_changed, sender=WarehouseItem.tags.through)
+
+# PX caching signals - cache relationship data in Redis
+m2m_changed.connect(on_ability_characters_m2m_changed, sender=AbilityPx.characters.through)
+m2m_changed.connect(on_ability_prerequisites_m2m_changed, sender=AbilityPx.prerequisites.through)
+m2m_changed.connect(on_ability_requirements_m2m_changed, sender=AbilityPx.requirements.through)
+m2m_changed.connect(on_delivery_characters_m2m_changed, sender=DeliveryPx.characters.through)
+m2m_changed.connect(on_modifier_abilities_m2m_changed_cache, sender=ModifierPx.abilities.through)
+m2m_changed.connect(on_modifier_prerequisites_m2m_changed, sender=ModifierPx.prerequisites.through)
+m2m_changed.connect(on_modifier_requirements_m2m_changed, sender=ModifierPx.requirements.through)
+m2m_changed.connect(on_rule_abilities_m2m_changed_cache, sender=RulePx.abilities.through)
 
 m2m_changed.connect(on_event_features_m2m_changed, sender=Event.features.through)
 
