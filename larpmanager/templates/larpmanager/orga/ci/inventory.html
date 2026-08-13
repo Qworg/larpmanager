@@ -1,7 +1,7 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Character Inventory" %}: {{ inventory.name }}
+    {% trans "Character Inventory:" %} {{ inventory.name }}
 {% endblock title %}
 {% block content %}
     <style>
@@ -134,8 +134,8 @@
             <tr>
                 <th>{% trans "Time" %}</th>
                 <th>{% trans "Actor" %}</th>
-                <th>{% trans "From" %}</th>
-                <th>{% trans "To" %}</th>
+                <th>{% trans "Source" %}</th>
+                <th>{% trans "Destination" %}</th>
                 <th>{% trans "Resource" %}</th>
                 <th>{% trans "Amount" %}</th>
                 <th>{% trans "Reason" %}</th>
@@ -154,7 +154,7 @@
                 </tr>
             {% empty %}
                 <tr>
-                    <td colspan="7" class="ci-empty-row">{% trans "No transfers yet." %}</td>
+                    <td colspan="7" class="ci-empty-row">{% trans "No inventory transfers yet." %}</td>
                 </tr>
             {% endfor %}
         </tbody>

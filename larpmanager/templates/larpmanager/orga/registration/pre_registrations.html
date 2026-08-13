@@ -1,17 +1,17 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Pre registrations" %} - {{ run }}
+    {% trans "Pre registrations" %} - {{ run.search }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows the pre-signups for the event" %}
+    {% trans "Review pre-registered members and track which ones have not yet completed a full registration" %}
 {% endblock info %}
 {% block content %}
     <a href="{% url 'pre_register' run.event.slug %}">{% trans "Pre-registration link" %}</a>
     <br />
     <br />
     <h2>
-        {% trans "Unconverted pre-registrations" %}: <b>{{ dc.pred | length }}</b>
+        {% trans "Unconverted pre-registrations:" %} <b>{{ dc.pred | length }}</b>
     </h2>
     <p>
         {% for el in dc.pred %}
@@ -21,11 +21,12 @@
     </p>
     <hr class="c" />
     <h2>
-        {% trans "Pre registrations total" %}: <b>{{ dc.list | length }}</b>
+        {% trans "Pre registrations total:" %} <b>{{ dc.list | length }}</b>
     </h2>
     <table id="pre_registrations" class="go_datatable">
         <thead>
             <tr>
+                <th></th>
                 <th>{% trans "Participant" %}</th>
                 <th>{% trans "Mail" %}</th>
                 {% if preferences %}

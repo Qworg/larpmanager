@@ -1,23 +1,23 @@
 {% extends "utils.html" %}
 {% load show_tags i18n static compress %}
 {% block title %}
-    {% trans "Casting" %} {{ gl_name }} - {{ run }}
+    {% trans "Casting" %} {{ gl_name }} - {{ run.search | truncatechars:50 }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows the casting preferences expressed by participants, and allows them to be assigned through an optimization algorithm" %}
+    {% trans "Assign participants to roles by reviewing their preferences and running the casting optimization algorithm" %}
 {% endblock info %}
 {% block content %}
     <div id="main_casting">
         {% if features.questbuilder %}
             <p>
-                {% trans "Casting management for" %}:
-                {% if typ == 0 %}
+                {% trans "Casting management for:" %}
+                {% if not typ %}
                     <strong>{% trans "characters" %}</strong>
                 {% else %}
-                    <a href="{% url 'orga_casting' run.get_slug 0 %}">{% trans "characters" %}</a>
+                    <a href="{% url 'orga_casting' run.get_slug %}">{% trans "characters" %}</a>
                 {% endif %}
                 {% for idx, qt in quest_types.items %}
-                    {% if typ == idx %}
+                    {% if typ == qt.uuid %}
                         | <strong>{{ qt.name }}</strong>
                     {% else %}
                         | <a href="{% url 'orga_casting' run.get_slug qt.uuid %}">{{ qt.name }}</a>
@@ -60,7 +60,7 @@
                 </table>
             </div>
             <p class="hide">
-                {% trans "Participants" %}: <span id="num_pl"></span>, {% trans "Characters" %}: <span id="num_ch"></span>
+                {% trans "Participants:" %} <span id="num_pl"></span>, {% trans "Characters:" %} <span id="num_ch"></span>
             </p>
             <hr />
             <div class="centerized">
@@ -70,7 +70,7 @@
             <i>({% trans "The optimal allocation based on the set values is simulated; you can run it as many times as you like before final loading" %})</i>
             <hr />
             <p>
-                <i>{% trans "Legend" %}:
+                <i>{% trans "Guide:" %}
                     <span class="YES">YES</span> - {% trans "Choice available, click to lock" %},
                     <span class="NO">NO</span> - {% trans "Choice locked, click to make it available" %},
                     <span class="MR">MR</span> - {% trans "Mirror type character, not selectable" %},
@@ -79,7 +79,9 @@
                 </i>
             </p>
             <hr />
-            <table id="main_grid" class="tablesorter">
+            <table id="main_grid">
+                <thead>
+                </thead>
                 <tbody>
                     <!-- filled later -->
                 </tbody>
@@ -91,12 +93,12 @@
                 <input type="submit"
                        id="go"
                        name="submit"
-                       onclick="return confirm('Confermi davvero? Non si torna indietro')"
+                       onclick="return window.lmTesting ? true : confirm('Are you sure? There's no coming back!')"
                        value="{% trans "Upload" %}" />
                 <p>
-                    {% trans "Assign selected characters to participants" %}.
+                    {% trans "Assign selected characters to participants." %}
                     <br />
-                    <i>({% trans "Attention: the operation is final, please double-check the assignments before uploading" %}!)</i>
+                    <i>({% trans "Attention: the operation is final, please double-check the assignments before uploading!" %})</i>
                 </p>
             </div>
         </form>
@@ -119,17 +121,19 @@ window['mirrors'] = {{ mirrors | safe }};
 window['casting_avoid'] = {{ casting_avoid | yesno:"true,false" }};
 window['avoids'] = {{ avoids | safe }};
 window['csrf_token'] = "{{ csrf_token }}";
-window['tick'] = "{{ tick }}";
-window['tipo'] = "{{ typ }}";
-window['toggle_url'] = "{% url 'orga_casting_toggle' run.get_slug typ %}";
-window['orga_casting_url'] = "{% url 'orga_casting' run.get_slug typ %}";
+{% if quest_type %}
+window['toggle_url'] = "{% url 'orga_casting_toggle' run.get_slug quest_type.uuid %}";
+window['orga_casting_url'] = "{% url 'orga_casting' run.get_slug quest_type.uuid %}";
+{% else %}
+window['toggle_url'] = "{% url 'orga_casting_toggle' run.get_slug %}";
+window['orga_casting_url'] = "{% url 'orga_casting' run.get_slug %}";
+{% endif %}
 
 window['reg_priority'] = {{ reg_priority }};
 window['pay_priority'] = {{ pay_priority }};
 
 window['trads'] = {
     'g': '{% filter escapejs %}{% trans "Player" %}{% endfilter %}',
-    'a': '{% filter escapejs %}{% trans "Seniority" %}{% endfilter %}',
     'p': '{% filter escapejs %}{% trans "Priority" %}{% endfilter %}',
     'e': '{% filter escapejs %}{% trans "Avoid" %}{% endfilter %}',
     'ne': '{% filter escapejs %}{% trans "Elements NOT chosen" %}{% endfilter %}',

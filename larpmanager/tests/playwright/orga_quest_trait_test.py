@@ -23,19 +23,26 @@ Test: Quests and Traits system with casting integration.
 Verifies quest types, quest creation, trait creation with character references,
 and casting algorithm integration with quest/trait assignments.
 """
-
+import re
 from typing import Any
 
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import (just_wait,
+from larpmanager.tests.utils import (
+    _select2_search_and_pick,
+    _wait_lm_ready,
     check_feature,
+    expect_normalized,
     fill_tinymce,
+    get_modal_iframe,
     go_to,
     login_orga,
+    save_modal,
+    sidebar,
     submit_confirm,
-    expect_normalized,
+    submit_inline_edit,
+    wait_for_inline_edit,
 )
 
 pytestmark = pytest.mark.e2e
@@ -55,26 +62,28 @@ def test_quest_trait(pw_page: Any) -> None:
     casting(page, live_server)
 
     # check result
-    go_to(page, live_server, "/test")
+    go_to(page, live_server, "/test/gallery/")
     page.get_by_role("link", name="Test Character").nth(1).click()
+    _wait_lm_ready(page)
     expect_normalized(page,
         page.locator("#one"),
-        "player: admin test presentation test teaser text test text torta - nonna saleee anotheraliame con torta - nonna another player: user test",
+        "player: admin test presentation test teaser text test text torta - nonna saleee aliame con another torta - nonna another player: user test",
     )
-    go_to(page, live_server, "test/1/")
-    page.get_by_role("link", name="Another").click()
+    go_to(page, live_server, "/test/gallery/")
+    page.get_by_role("link", name="Another").first.click()
+    _wait_lm_ready(page)
     expect_normalized(page,
         page.locator("#one"),
-        "your character is test character player: user test torta - strudel saleee test characterveronese torta - strudel test character player: admin test",
+        "player: user test torta - strudel saleee test character veronese torta - strudel test character player: admin test",
     )
     page.get_by_role("heading", name="Torta - Strudel").first.click()
+    _wait_lm_ready(page)
 
 
 def quests(page: Any, live_server: Any) -> None:
     # Activate features
-    page.get_by_role("link", name="").click()
-    page.get_by_role("link", name=" Test Larp").click()
-    page.get_by_role("link", name="Features").first.click()
+    go_to(page, live_server, "/test/manage/")
+    sidebar(page, "Features")
     check_feature(page, "Characters")
     check_feature(page, "Casting algorithm")
     check_feature(page, "Quests and Traits")
@@ -83,24 +92,27 @@ def quests(page: Any, live_server: Any) -> None:
     # create quest type
     page.get_by_role("link", name="Quest type").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Lore")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Lore")
+    save_modal(page, edit_iframe)
 
     # create two quests
-    page.get_by_role("link", name="Quest", exact=True).click(force=True)
+    sidebar(page, "Quest")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").fill("Torta")
-    fill_tinymce(page, "id_teaser", "zucchero")
-    fill_tinymce(page, "id_text", "saleee")
-    page.get_by_text("After confirmation, add").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").fill("Torta")
+    fill_tinymce(edit_iframe, "id_teaser", "zucchero")
+    fill_tinymce(edit_iframe, "id_text", "saleee")
+    save_modal(page, edit_iframe)
 
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Pizza")
-    fill_tinymce(page, "id_teaser", "mozzarella")
-    fill_tinymce(page, "id_text", "americano")
-    submit_confirm(page)
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Pizza")
+    fill_tinymce(edit_iframe, "id_teaser", "mozzarella")
+    fill_tinymce(edit_iframe, "id_text", "americano")
+    save_modal(page, edit_iframe)
 
     # check
     expect_normalized(page, page.locator("#one"), "Q1 Torta Lore zucchero saleee Q2 Pizza Lore mozzarella americano")
@@ -108,94 +120,101 @@ def quests(page: Any, live_server: Any) -> None:
 
 def traits(page: Any, live_server: Any) -> None:
     # create traits
-    page.locator("#orga_traits").get_by_role("link", name="Traits").click()
+    sidebar(page, "Traits")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Strudel")
-    fill_tinymce(page, "id_teaser", "trentina")
-    fill_tinymce(page, "id_text", "veronese")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Strudel")
+    fill_tinymce(edit_iframe, "id_teaser", "trentina")
+    fill_tinymce(edit_iframe, "id_text", "veronese")
+    save_modal(page, edit_iframe)
 
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Nonna")
-    fill_tinymce(page, "id_teaser", "amelia")
-    fill_tinymce(page, "id_text", "aliame con ")
-    frame_locator = page.frame_locator("iframe#id_text_ifr")
-    editor = frame_locator.locator("body#tinymce")
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Nonna")
+    fill_tinymce(edit_iframe, "id_teaser", "amelia")
+    fill_tinymce(edit_iframe, "id_text", "aliame con ")
+    editor = edit_iframe.locator("#id_text")
     editor.press("#")
-    page.get_by_role("searchbox").fill("stru")
-    page.locator(".select2-results__option").first.click()
-    submit_confirm(page)
+    _select2_search_and_pick(edit_iframe.get_by_role("searchbox"), edit_iframe, "stru")
+    expect(edit_iframe.locator("#id_text")).to_have_value(re.compile(r'.*#\d+'))
+
+    save_modal(page, edit_iframe)
 
     # excel char finder
     page.get_by_role("cell", name="veronese").dblclick()
-    frame = page.locator('iframe[title="Rich Text Area"]').content_frame
-    frame.get_by_label("Rich Text Area").press("#")
-    page.get_by_role("searchbox").fill("non")
-    page.locator(".select2-results__option").first.click()
-    just_wait(page)
-    submit_confirm(page)
+    panel = wait_for_inline_edit(page)
+    panel.locator("textarea").press("#")
+    _select2_search_and_pick(page.get_by_role("searchbox"), page, "non")
+    submit_inline_edit(page)
 
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_quest").select_option("u2")
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Capriciossa")
-    fill_tinymce(page, "id_teaser", "normale")
-    fill_tinymce(page, "id_text", "senza pomodoro")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_quest").select_option("u2")
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Capriciossa")
+    fill_tinymce(edit_iframe, "id_teaser", "normale")
+    fill_tinymce(edit_iframe, "id_text", "senza pomodoro")
+    save_modal(page, edit_iframe)
 
     page.get_by_role("link", name="New").click()
-    page.locator("#id_quest").select_option("u2")
-    page.locator("#id_quest").press("Tab")
-    page.locator("#id_name").fill("Mare")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_quest").select_option("u2")
+    edit_iframe.locator("#id_quest").press("Tab")
+    edit_iframe.locator("#id_name").fill("Mare")
+    save_modal(page, edit_iframe)
 
     # check how they appear on user side
     go_to(page, live_server, "/test")
     page.get_by_role("link", name="Quest").click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "Name Quest Lore Torta | Pizza")
     page.get_by_role("link", name="Torta").click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "Presentation zucchero Traits Strudel - trentina Nonna - amelia")
 
 
 def signups(page: Any, live_server: Any) -> None:
     # create signup for my char
     go_to(page, live_server, "/test/manage/")
-    page.get_by_role("link", name="Registrations", exact=True).click()
+    sidebar(page, "Registrations")
     page.get_by_role("link", name="New").click()
-    page.locator("#select2-id_member-container").click()
-    page.get_by_role("searchbox").nth(1).fill("org")
-    page.get_by_role("option", name="Admin Test - orga@test.it").click()
-    page.get_by_role("list").click()
-    page.get_by_role("searchbox").fill("te")
-    page.get_by_role("option", name="#1 Test Character").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#select2-id_member-container").click()
+    edit_iframe.get_by_role("searchbox").nth(1).fill("org")
+    edit_iframe.get_by_role("option", name="Admin Test - orga@test.it").click()
+    edit_iframe.get_by_role("list").click()
+    edit_iframe.get_by_role("searchbox").fill("te")
+    edit_iframe.get_by_role("option", name="Test Character").click()
+    save_modal(page, edit_iframe)
 
     # create another char
-    page.get_by_role("link", name="Characters").click()
+    sidebar(page, "Characters")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Another")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Another")
+    save_modal(page, edit_iframe)
 
     # create signup for another
-    page.get_by_role("link", name="Registrations", exact=True).click()
+    sidebar(page, "Registrations")
     page.get_by_role("link", name="New").click()
-    page.locator("#select2-id_member-container").click()
-    page.get_by_role("searchbox").nth(1).fill("user")
-    page.get_by_role("option", name="User Test - user@test.it").click()
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("an")
-    page.get_by_role("option", name="#2 Another").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#select2-id_member-container").click()
+    edit_iframe.get_by_role("searchbox").nth(1).fill("user")
+    edit_iframe.get_by_role("option", name="User Test - user@test.it").click()
+    edit_iframe.get_by_role("searchbox").click()
+    edit_iframe.get_by_role("searchbox").fill("an")
+    edit_iframe.get_by_role("option", name="Another").click()
+    save_modal(page, edit_iframe)
 
 
 def casting(page: Any, live_server: Any) -> None:
     # config casting
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Casting ").click()
+    page.get_by_role("link", name=re.compile(r"^Casting ")).click()
     page.get_by_text("Maximum number of preferences").click()
     page.locator("#id_casting_max").click()
     page.locator("#id_casting_max").fill("3")
@@ -205,42 +224,56 @@ def casting(page: Any, live_server: Any) -> None:
 
     # perform casting
     go_to(page, live_server, "/test")
-    page.get_by_role("link", name="Casting", exact=True).click()
+    page.get_by_role("link", name="Casting").click()
     page.get_by_role("link", name="Lore").click()
-    page.locator("#faction0").select_option("Torta")
-    page.locator("#choice0").select_option("u2")
-    page.locator("#faction1").select_option("Torta")
-    page.locator("#choice1").select_option("u1")
-    page.locator("#faction2").select_option("Pizza")
-    page.locator("#choice2").select_option("u3")
+    _wait_lm_ready(page)
+    page.locator("#char-list .char-card").filter(has_text="Nonna").click()
+    page.locator("#char-list .char-card").filter(has_text="Strudel").click()
+    page.locator("#char-list .char-card").filter(has_text="Capriciossa").click()
     submit_confirm(page)
+
+    # test toggle casting
+    go_to(page, live_server, "/test/manage/casting")
+    page.get_by_role("link", name="Lore").click()
+    _wait_lm_ready(page)
+    expect_normalized(page, page.locator(".change").first, "YES")
+    page.locator(".change").first.click()
+    expect(page.locator(".change").first).to_have_text("NO")
+
+    go_to(page, live_server, "/test/manage/casting")
+    page.get_by_role("link", name="Lore").click()
+    _wait_lm_ready(page)
+    expect_normalized(page, page.locator(".change").first, "NO")
+    page.locator(".change").first.click()
+    expect(page.locator(".change").first).to_have_text("YES")
 
     # make casting
     go_to(page, live_server, "/test/manage/")
-    page.get_by_role("link", name="Casting", exact=True).click()
+    sidebar(page, "Casting")
     page.get_by_role("link", name="Lore").click()
     page.get_by_role("button", name="Start algorithm").click()
-    just_wait(page)
     page.get_by_role("button", name="Upload").click()
 
     # check signups
-    page.get_by_role("link", name="Registrations", exact=True).click()
+    sidebar(page, "Registrations")
     page.get_by_role("link", name="Lore").click()
+    _wait_lm_ready(page)
     expect_normalized(page,
-        page.locator("#one"), "User Test #2 Another Standard "
+        page.locator("#one"), "User Test Another Standard "
     )
     expect_normalized(page,
-        page.locator("#one"), "Admin Test #1 Test Character Torta - Nonna Standard"
+        page.locator("#one"), "Admin Test Test Character Torta - Nonna Standard"
     )
 
     # manual trait assignments
-    page.locator('[id="u2"]').get_by_role("link", name="").click()
-    page.locator("#id_qt_u1").select_option("u1")
-    submit_confirm(page)
+    page.locator('[id="u2"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_qt_u1").select_option("u1")
+    save_modal(page, edit_iframe)
 
     # check result
-    page.get_by_role("link", name="Lore").click()
+    _wait_lm_ready(page)
     expect_normalized(page,
         page.locator("#one"),
-        "User Test #2 Another Torta - Strudel Standard Admin Test #1 Test Character Torta - Nonna Standard",
+        "User Test Another Torta - Strudel Standard Admin Test Test Character Torta - Nonna Standard",
     )

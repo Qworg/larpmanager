@@ -28,9 +28,9 @@ import re
 from typing import Any
 
 import pytest
-from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, go_to, login_orga, expect_normalized, submit_confirm
+from larpmanager.tests.utils import go_to, login_orga, expect_normalized, submit_confirm, sidebar, get_modal_iframe, \
+    save_modal, _wait_lm_ready, drag_reorder
 
 pytestmark = pytest.mark.e2e
 
@@ -51,46 +51,50 @@ def test_orga_form_writing_config(pw_page: Any) -> None:
 
 def feature_fields(page: Any) -> None:
     # set feature
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Characters").check()
     submit_confirm(page)
 
     # reorder test
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     expect_normalized(page, page.locator("#one"), "Name Name Presentation Presentation Text Sheet")
-    page.locator('[id="u3"]').get_by_role("link", name="").click()
+    drag_reorder(
+        page,
+        page.locator('tr[id="u3"] td.reorder-handle'),
+        page.locator('tr[id="u3"]').locator("xpath=preceding-sibling::tr[1]"),
+    )
     expect_normalized(page, page.locator("#one"), "Name Name Text Sheet Presentation Presentation")
 
     # add config fields - title
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Writing ").click()
+    page.get_by_role("link", name=re.compile(r"^Characters ")).click()
     page.locator("#id_writing_title").check()
     submit_confirm(page)
 
     # check
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     expect_normalized(page, page.locator("#one"), "Name Name Text Sheet Presentation Presentation Title Title Hidden")
 
     # add config fields - cover, assigned
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Writing ").click()
+    page.get_by_role("link", name=re.compile(r"^Characters")).click()
     page.locator("#id_writing_title").uncheck()
     page.locator("#id_writing_cover").check()
     page.locator("#id_writing_assigned").check()
     submit_confirm(page)
 
     # check
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     expect_normalized(page,
         page.locator("#one"),
-        "Name Name Text Sheet Presentation Presentation Assigned Assigned Hidden Cover Cover Hidden",
+        "Name Name Text Sheet Presentation Presentation Assigned Assignment Hidden Cover Cover Hidden",
     )
 
 
 def feature_fields2(page: Any, live_server: Any) -> None:
     # add config hide, assigned
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Writing ").click()
+    page.get_by_role("link", name=re.compile(r"^Characters")).click()
     page.locator("#id_writing_assigned").uncheck()
     page.locator("#id_writing_cover").uncheck()
     page.locator("#id_writing_hide").check()
@@ -98,73 +102,76 @@ def feature_fields2(page: Any, live_server: Any) -> None:
     submit_confirm(page)
 
     # check
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     expect_normalized(page,
-        page.locator("#one"), "Name Name Text Sheet Presentation Presentation Assigned Assigned Hidden Hide Hide Hidden"
+        page.locator("#one"), "Name Name Text Sheet Presentation Presentation Assigned Assignment Hidden Hide Hide Hidden"
     )
 
     # set experience point
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Experience points").check()
     submit_confirm(page)
 
     go_to(page, live_server, "/test/manage/config/")
     page.get_by_role("link", name=re.compile(r"^Experience points\s.+")).click()
-    page.locator("#id_px_rules").check()
+    page.locator("#id_exp_rules").check()
     submit_confirm(page)
 
     # add field computed
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("c")
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("comp")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("c")
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("comp")
+    save_modal(page, edit_iframe)
 
     # test save
-    page.get_by_role("link", name="Event").click()
+    sidebar(page, "Event")
     submit_confirm(page)
 
     # check it has not been deleted
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     expect_normalized(page,
         page.locator("#one"),
-        "Name Name Text Sheet Presentation Presentation Assigned Assigned Hidden Hide Hide Hidden comp Computed Private",
+        "Name Name Text Sheet Presentation Presentation Assigned Assignment Hidden Hide Hide Hidden comp Computed Private",
     )
 
-    # remove px
-    page.get_by_role("link", name="Features").first.click()
+    # remove experience
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Experience points").uncheck()
     submit_confirm(page)
 
     # check
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     expect_normalized(page,
-        page.locator("#one"), "Name Name Text Sheet Presentation Presentation Assigned Assigned Hidden Hide Hide Hidden"
+        page.locator("#one"), "Name Name Text Sheet Presentation Presentation Assigned Assignment Hidden Hide Hide Hidden"
     )
 
 
 def form_other_writing(page: Any) -> None:
     # add other writing elements
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Plots").check()
     page.get_by_role("checkbox", name="Factions").check()
     page.get_by_role("checkbox", name="Quests and Traits").check()
     submit_confirm(page)
 
     # check
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
-    page.get_by_role("link", name="Plot", exact=True).click()
-    page.get_by_role("link", name="Character", exact=True).click()
+    sidebar(page, "Sheet")
     expect_normalized(page,
         page.locator("#one"),
-        "Name Name Text Sheet Presentation Presentation Assigned Assigned Hidden Hide Hide Hidden Faction Factions Hidden",
+        "Name Name Text Sheet Presentation Presentation Assigned Assignment Hidden Hide Hide Hidden Faction Factions Hidden",
     )
     page.get_by_role("link", name="Plot", exact=True).click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "Name Name Concept Presentation Text Sheet")
     page.get_by_role("link", name="Faction", exact=True).click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "Name Name Presentation Presentation Text Sheet")
     page.locator("#one").get_by_role("link", name="Quest").click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "Name Name Presentation Presentation Text Sheet")
     page.get_by_role("link", name="Trait", exact=True).click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "Name Name Presentation Presentation Text Sheet")

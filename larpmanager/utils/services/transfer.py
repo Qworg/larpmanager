@@ -25,6 +25,8 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from larpmanager.cache.accounting import refresh_member_accounting_cache
+from larpmanager.cache.question import get_cached_registration_questions
+from larpmanager.cache.registration import get_registration_tickets
 from larpmanager.models.accounting import (
     AccountingItemOther,
     AccountingItemPayment,
@@ -82,9 +84,12 @@ def transfer_registration_between_runs(
         msg = "Registration is already in the target run"
         raise ValidationError(msg)
 
-    # Check that the member doesn't already have a registration in the target run
+    # Check that the member doesn't already have an active registration in the target run
     existing_reg = Registration.objects.filter(
-        run=target_run, member=registration.member, cancellation_date__isnull=True
+        run=target_run,
+        member=registration.member,
+        cancellation_date__isnull=True,
+        redeem_code__isnull=True,
     ).first()
 
     if existing_reg:
@@ -160,22 +165,29 @@ def _find_matching_ticket(
         return None
 
     target_event = target_run.event
+    target_tickets = get_registration_tickets(target_event.id)
 
     # Manual mapping
     if ticket_mapping and source_ticket.id in ticket_mapping:
         target_ticket_id = ticket_mapping[source_ticket.id]
-        return RegistrationTicket.objects.filter(id=target_ticket_id, event=target_event).first()
+        matched_ticket = next((t for t in target_tickets if t["id"] == target_ticket_id), None)
+        if matched_ticket:
+            return RegistrationTicket.objects.get(id=matched_ticket["id"])
+        return None
 
     # Match by tier and name
-    exact_match = RegistrationTicket.objects.filter(
-        event=target_event, tier=source_ticket.tier, name=source_ticket.name
-    ).first()
-
+    exact_match = next(
+        (t for t in target_tickets if t["tier"] == source_ticket.tier and t["name"] == source_ticket.name), None
+    )
     if exact_match:
-        return exact_match
+        return RegistrationTicket.objects.get(id=exact_match["id"])
 
     # Match by tier only
-    return RegistrationTicket.objects.filter(event=target_event, tier=source_ticket.tier).first()
+    tier_match = next((t for t in target_tickets if t["tier"] == source_ticket.tier), None)
+    if tier_match:
+        return RegistrationTicket.objects.get(id=tier_match["id"])
+
+    return None
 
 
 def _transfer_choices(source_reg: Registration, target_reg: Registration) -> list[RegistrationChoice]:
@@ -198,7 +210,7 @@ def _transfer_choices(source_reg: Registration, target_reg: Registration) -> lis
 
         # Create the new choice
         new_choice = RegistrationChoice.objects.create(
-            question=target_question, option=target_option, registration=target_reg
+            question_id=target_question["id"], option=target_option, registration=target_reg
         )
         transferred_choices.append(new_choice)
 
@@ -221,7 +233,7 @@ def _transfer_answers(source_reg: Registration, target_reg: Registration) -> lis
 
         # Create the new answer
         new_answer = RegistrationAnswer.objects.create(
-            question=target_question, text=answer.text, registration=target_reg
+            question_id=target_question["id"], text=answer.text, registration=target_reg
         )
         transferred_answers.append(new_answer)
 
@@ -236,10 +248,11 @@ def _find_matching_question(source_question: RegistrationQuestion, target_event:
     2. Match by type only (if it's a special type like TICKET, QUOTA, etc.)
     3. Match by name only
     """
-    # Exact match by type and name
-    exact_match = RegistrationQuestion.objects.filter(
-        event=target_event, typ=source_question.typ, name=source_question.name
-    ).first()
+    # Get question by type and name
+    target_questions = get_cached_registration_questions(target_event)
+    exact_match = next(
+        (q for q in target_questions if q["typ"] == source_question.typ and q["name"] == source_question.name), None
+    )
 
     if exact_match:
         return exact_match
@@ -254,13 +267,13 @@ def _find_matching_question(source_question: RegistrationQuestion, target_event:
     ]
 
     if source_question.typ in special_types:
-        type_match = RegistrationQuestion.objects.filter(event=target_event, typ=source_question.typ).first()
+        type_match = next((q for q in target_questions if q["typ"] == source_question.typ), None)
 
         if type_match:
             return type_match
 
     # Match by name
-    return RegistrationQuestion.objects.filter(event=target_event, name=source_question.name).first()
+    return next((q for q in target_questions if q["name"] == source_question.name), None)
 
 
 def _find_matching_option(
@@ -268,13 +281,15 @@ def _find_matching_option(
 ) -> RegistrationOption | None:
     """Find the corresponding option in the destination question."""
     # Match by exact name
-    exact_match = RegistrationOption.objects.filter(question=target_question, name=source_option.name).first()
+    exact_match = RegistrationOption.objects.filter(question_id=target_question["id"], name=source_option.name).first()
 
     if exact_match:
         return exact_match
 
     # Match by description if name doesn't match
-    return RegistrationOption.objects.filter(question=target_question, description=source_option.description).first()
+    return RegistrationOption.objects.filter(
+        question_id=target_question["id"], description=source_option.description
+    ).first()
 
 
 def _transfer_character_relations(source_reg: Registration, target_reg: Registration) -> None:
@@ -409,23 +424,26 @@ def get_suggested_ticket_mapping(source_run: Run, target_run: Run) -> dict[int, 
     Returns:
         Dictionary mapping source ticket IDs to target ticket IDs
     """
-    source_tickets = RegistrationTicket.objects.filter(event=source_run.event)
-    target_tickets = RegistrationTicket.objects.filter(event=target_run.event)
+    source_tickets = get_registration_tickets(source_run.event_id)
+    target_tickets = get_registration_tickets(target_run.event_id)
 
     mapping = {}
 
     for source_ticket in source_tickets:
         # Look for exact match
-        exact_match = target_tickets.filter(tier=source_ticket.tier, name=source_ticket.name).first()
+        exact_match = next(
+            (t for t in target_tickets if t["tier"] == source_ticket["tier"] and t["name"] == source_ticket["name"]),
+            None,
+        )
 
         if exact_match:
-            mapping[source_ticket.id] = exact_match.id
+            mapping[source_ticket["id"]] = exact_match["id"]
             continue
 
         # Look for tier match
-        tier_match = target_tickets.filter(tier=source_ticket.tier).first()
+        tier_match = next((t for t in target_tickets if t["tier"] == source_ticket["tier"]), None)
         if tier_match:
-            mapping[source_ticket.id] = tier_match.id
+            mapping[source_ticket["id"]] = tier_match["id"]
 
     return mapping
 
@@ -447,9 +465,12 @@ def validate_transfer_feasibility(registration: Registration, target_run: Run) -
     """
     result = {"errors": [], "warnings": [], "info": []}
 
-    # Check if member already has registration in target run
+    # Check if member already has an active registration in target run
     existing_reg = Registration.objects.filter(
-        run=target_run, member=registration.member, cancellation_date__isnull=True
+        run=target_run,
+        member=registration.member,
+        cancellation_date__isnull=True,
+        redeem_code__isnull=True,
     ).first()
 
     if existing_reg:
@@ -458,12 +479,12 @@ def validate_transfer_feasibility(registration: Registration, target_run: Run) -
     _validate_ticket(registration, result, target_run)
 
     # Check question matching
-    source_questions = RegistrationQuestion.objects.filter(event=registration.run.event).count()
+    source_questions = len(get_cached_registration_questions(registration.run.event))
 
-    target_questions = RegistrationQuestion.objects.filter(event=target_run.event).count()
+    target_questions = len(get_cached_registration_questions(target_run.event))
 
     if source_questions != target_questions:
-        result["info"].append(f"Number of questions differs: {source_questions} → {target_questions}")
+        result["info"].append(f"Number of questions differs: {source_questions} -> {target_questions}")
 
     _validate_character(registration, result, target_run)
 
@@ -541,24 +562,7 @@ def move_registration_between_runs(
     preserve_answers: bool = True,
     preserve_accounting: bool = True,
 ) -> Registration:
-    """Move a registration from one run to another, deleting the original.
-
-    This is a convenience wrapper around transfer_registration_between_runs with move_registration=True.
-
-    Args:
-        registration: The registration to move
-        target_run: The destination run
-        ticket_mapping: Manual mapping between ticket IDs (source_ticket_id -> target_ticket_id)
-        preserve_choices: Whether to preserve multiple choice selections
-        preserve_answers: Whether to preserve text answers
-        preserve_accounting: Whether to preserve accounting items (payments and other items)
-
-    Returns:
-        The new registration created in the target run
-
-    Raises:
-        ValidationError: If the move is not possible
-    """
+    """Move a registration from one run to another, deleting the original."""
     return transfer_registration_between_runs(
         registration=registration,
         target_run=target_run,

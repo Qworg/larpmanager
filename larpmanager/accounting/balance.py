@@ -428,7 +428,7 @@ def get_run_accounting(run: Run, context: dict) -> tuple[dict, dict]:
     details["registration"] = get_accounting_registration_detail(
         _("Registrations"),
         run,
-        _("Theoretical total of income due to participation fees selected by the participants"),
+        _("Expected total income from participation fees selected by participants"),
     )
 
     # Calculate final financial figures
@@ -445,9 +445,7 @@ def get_run_accounting(run: Run, context: dict) -> tuple[dict, dict]:
     # Apply organization tax if enabled
     summary["tax"] = 0
     if "organization_tax" in features:
-        tax_percentage = int(
-            get_association_config(run.event.association_id, "organization_tax_perc", default_value="10")
-        )
+        tax_percentage = int(get_association_config(run.event.association_id, "organization_tax_perc"))
         summary["tax"] = summary["revenue"] * tax_percentage / 100
 
     return summary, details
@@ -485,22 +483,7 @@ def check_accounting(association_id: int) -> None:
 
 
 def check_run_accounting(run: Run) -> None:
-    """Perform run-specific accounting check and record results.
-
-    This function performs accounting calculations for a specific run and records
-    the results in the database for audit purposes.
-
-    Args:
-        run: Run instance to check accounting for. Must have an associated event
-             with an organization (association).
-
-    Returns:
-        None
-
-    Side Effects:
-        - Creates a new RecordAccounting entry in the database
-
-    """
+    """Perform run-specific accounting check and record results."""
     # Perform accounting calculations
     summary, _details = get_run_accounting(run, {})
 
@@ -672,6 +655,20 @@ def association_accounting(context: dict) -> None:
         Plus all fields from association_accounting_data()
 
     """
+    association_accounting_summary(context)
+
+    # Build year range dictionary from current year to association creation
+    association = Association.objects.only("created").get(pk=context["association_id"])
+    start_year = int(association.created.year)
+    end_year = int(timezone.now().date().year)
+    context["sum_year"] = {}
+    while end_year >= start_year:
+        context["sum_year"][end_year] = 1
+        end_year -= 1
+
+
+def association_accounting_summary(context: dict) -> dict:
+    """Computes association global financial position."""
     # Initialize member balance tracking
     context.update({"list": [], "tokens_sum": 0, "credits_sum": 0, "balance_sum": 0})
 
@@ -706,20 +703,6 @@ def association_accounting(context: dict) -> None:
         if run.development == DevelopStatus.DONE:
             context["balance_sum"] += run.balance
 
-    association_accounting_summary(context)
-
-    # Build year range dictionary from current year to association creation
-    association = Association.objects.only("created").get(pk=context["association_id"])
-    start_year = int(association.created.year)
-    end_year = int(timezone.now().date().year)
-    context["sum_year"] = {}
-    while end_year >= start_year:
-        context["sum_year"][end_year] = 1
-        end_year -= 1
-
-
-def association_accounting_summary(context: dict) -> dict:
-    """Computes association global financial position."""
     # Fetch detailed accounting data (inflows, outflows, memberships, etc.)
     association_accounting_data(context)
 

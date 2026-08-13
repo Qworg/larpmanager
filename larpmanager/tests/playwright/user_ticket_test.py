@@ -23,12 +23,11 @@ Test: Technical support ticket system.
 Verifies ticket submission with and without login, with and without screenshots,
 and email change requests through the support system.
 """
-import re
 from typing import Any
 
 import pytest
 
-from larpmanager.tests.utils import just_wait, go_to, load_image, login_user, submit_confirm
+from larpmanager.tests.utils import go_to, load_image, login_user, submit_confirm, sidebar, topbar
 
 pytestmark = pytest.mark.e2e
 
@@ -39,7 +38,7 @@ def test_user_ticket(pw_page: Any) -> None:
     go_to(page, live_server, "/")
 
     # no member
-    page.get_by_role("link", name="Technical Support").click()
+    sidebar(page, "Tech Support")
     page.get_by_role("textbox", name="Email").click()
     page.get_by_role("textbox", name="Email").fill("dudi")
     page.get_by_role("textbox", name="Email").press("Tab")
@@ -49,7 +48,7 @@ def test_user_ticket(pw_page: Any) -> None:
     submit_confirm(page)
 
     # no member - screenshot
-    page.get_by_role("link", name="Technical Support").click()
+    sidebar(page, "Tech Support")
     page.get_by_role("textbox", name="Email").click()
     page.get_by_role("textbox", name="Email").fill("sadsa@sadsa.itsad")
     page.get_by_role("textbox", name="Request").click()
@@ -61,7 +60,7 @@ def test_user_ticket(pw_page: Any) -> None:
     login_user(page, live_server)
 
     # user
-    page.get_by_role("link", name="Technical Support").click()
+    sidebar(page, "Tech Support")
     page.get_by_role("textbox", name="Email").click()
     page.get_by_role("textbox", name="Email").fill("wwww@ewew.itsa")
     page.get_by_role("textbox", name="Request").click()
@@ -69,7 +68,7 @@ def test_user_ticket(pw_page: Any) -> None:
     submit_confirm(page)
 
     # user - screenshot
-    page.get_by_role("link", name="Technical Support").click()
+    sidebar(page, "Tech Support")
     page.get_by_role("textbox", name="Email").click()
     page.get_by_role("textbox", name="Email").fill("eee@re.it")
     page.get_by_role("textbox", name="Email").press("Tab")
@@ -79,7 +78,8 @@ def test_user_ticket(pw_page: Any) -> None:
     submit_confirm(page)
 
     # change email
-    page.get_by_role("link", name=re.compile("Profile")).click()
+    topbar(page, "Profile")
+    sidebar(page, "Personal info")
     page.get_by_role("link", name="Would you like to change it?").click()
     page.get_by_role("textbox", name="Email").click()
     page.get_by_role("textbox", name="Email").fill("asdsa@dasasd.it")

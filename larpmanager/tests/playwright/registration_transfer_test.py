@@ -34,12 +34,13 @@ from playwright.sync_api import expect
 
 from larpmanager.tests.utils import (
     expect_normalized,
+    fill_date,
+    get_modal_iframe,
     go_to,
-    just_wait,
     login_orga,
     login_user,
     logout,
-    submit_confirm,
+    submit_confirm, new_option, submit_option, sidebar, save_modal,
 )
 
 pytestmark = pytest.mark.e2e
@@ -75,112 +76,115 @@ def create_event_a(page: Any, live_server: Any) -> None:
     """Create Event A with ticket and registration questions."""
     go_to(page, live_server, "/manage/events/")
     page.get_by_role("link", name="New event").click()
-    page.locator("#id_form1-name").fill("Event A")
-
-    page.locator("#id_form2-development").select_option("1")
-    page.locator("#id_form2-start").fill("2055-06-11")
-    page.locator("#id_form2-start").click()
-    just_wait(page)
-    page.locator("#id_form2-end").fill("2055-06-13")
-    page.locator("#id_form2-end").click()
-    just_wait(page)
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_form1-name").click()
+    edit_iframe.locator("#id_form1-name").fill("Event A")
+    edit_iframe.locator("#id_form1-name").press("Tab")
+    edit_iframe.locator('label[for="id_form2-development_1"]').click()
+    edit_iframe.locator('label[for="id_form2-registration_status_1"]').click()
+    fill_date(edit_iframe, "#id_form2-start", "2055-06-11")
+    fill_date(edit_iframe, "#id_form2-end", "2055-06-13")
+    save_modal(page, edit_iframe)
 
     # Create ticket with price and limit
     go_to(page, live_server, "/eventa/manage/tickets/")
-    page.locator("a:has(i.fas.fa-edit)").click()
-    page.locator("#id_name").fill("Premium Ticket")
-    page.locator("#id_price").fill("100.00")
-    page.locator("#id_max_available").fill("10")
-    submit_confirm(page)
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").fill("Premium Ticket")
+    edit_iframe.locator("#id_price").fill("100.00")
+    edit_iframe.locator("#id_max_available").fill("10")
+    save_modal(page, edit_iframe)
 
     # Create a second ticket
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").fill("Standard Ticket")
-    page.locator("#id_price").fill("50.00")
-    page.locator("#id_max_available").fill("20")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").fill("Standard Ticket")
+    edit_iframe.locator("#id_price").fill("50.00")
+    edit_iframe.locator("#id_max_available").fill("20")
+    save_modal(page, edit_iframe)
 
     # Create registration questions
     go_to(page, live_server, "/eventa/manage/form/")
 
     # Add text question
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_name").fill("Dietary restrictions")
-    page.locator("#id_description").fill("Please specify any dietary restrictions")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_name").fill("Dietary restrictions")
+    edit_iframe.locator("#id_description").fill("Please specify any dietary restrictions")
+    save_modal(page, edit_iframe)
 
     # Add single choice question with options
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("s")
-    page.locator("#id_name").fill("T-shirt size")
-    page.locator("#id_description").fill("Select your t-shirt size")
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("s")
+    edit_iframe.locator("#id_name").fill("T-shirt size")
+    edit_iframe.locator("#id_description").fill("Select your t-shirt size")
 
     # Add options
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").fill("Small")
-    page.locator("#id_description").fill("Small size")
-    submit_confirm(page)
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").fill("Small")
+    option_row.locator("#id_description").fill("Small size")
+    submit_option(edit_iframe, option_row)
 
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").fill("Medium")
-    page.locator("#id_description").fill("Medium size")
-    page.locator("#id_price").fill("5.00")
-    submit_confirm(page)
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").fill("Medium")
+    option_row.locator("#id_description").fill("Medium size")
+    option_row.locator("#id_price").fill("5.00")
+    submit_option(edit_iframe, option_row)
 
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").fill("Large")
-    page.locator("#id_description").fill("Large size")
-    page.locator("#id_price").fill("10.00")
-    page.locator("#id_max_available").fill("5")
-    submit_confirm(page)
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").fill("Large")
+    option_row.locator("#id_description").fill("Large size")
+    option_row.locator("#id_price").fill("10.00")
+    option_row.locator("#id_max_available").fill("5")
+    submit_option(edit_iframe, option_row)
 
-    submit_confirm(page)
+    save_modal(page, edit_iframe)
 
     # Add multiple choice question
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("m")
-    page.locator("#id_name").fill("Workshop preferences")
-    page.locator("#id_description").fill("Select your preferred workshops")
-    page.locator("#id_max_length").fill("2")
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("m")
+    edit_iframe.locator("#id_name").fill("Workshop preferences")
+    edit_iframe.locator("#id_description").fill("Select your preferred workshops")
+    edit_iframe.locator("#id_max_length").fill("2")
 
     # Add options
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").fill("Combat")
-    page.locator("#id_description").fill("Combat workshop")
-    page.locator("#id_price").fill("15.00")
-    submit_confirm(page)
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").fill("Combat")
+    option_row.locator("#id_description").fill("Combat workshop")
+    option_row.locator("#id_price").fill("15.00")
+    submit_option(edit_iframe, option_row)
 
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").fill("Makeup")
-    page.locator("#id_description").fill("Makeup workshop")
-    page.locator("#id_price").fill("20.00")
-    submit_confirm(page)
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").fill("Makeup")
+    option_row.locator("#id_description").fill("Makeup workshop")
+    option_row.locator("#id_price").fill("20.00")
+    submit_option(edit_iframe, option_row)
 
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").fill("Crafting")
-    page.locator("#id_description").fill("Crafting workshop")
-    page.locator("#id_price").fill("10.00")
-    submit_confirm(page)
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").fill("Crafting")
+    option_row.locator("#id_description").fill("Crafting workshop")
+    option_row.locator("#id_price").fill("10.00")
+    submit_option(edit_iframe, option_row)
 
-    submit_confirm(page)
+    save_modal(page, edit_iframe)
 
 
 def create_event_b(page: Any, live_server: Any) -> None:
     """Create Event B."""
     go_to(page, live_server, "/manage/events/")
     page.get_by_role("link", name="New event").click()
-    page.locator("#id_form1-name").fill("Event B")
-
-    page.locator("#id_form2-development").select_option("1")
-    page.locator("#id_form2-start").fill("2055-07-11")
-    just_wait(page)
-    page.locator("#id_form2-start").click()
-    page.locator("#id_form2-end").fill("2055-07-13")
-    just_wait(page)
-    page.locator("#id_form2-end").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_form1-name").click()
+    edit_iframe.locator("#id_form1-name").fill("Event B")
+    edit_iframe.locator("#id_form1-name").press("Tab")
+    edit_iframe.locator('label[for="id_form2-development_1"]').click()
+    edit_iframe.locator('label[for="id_form2-registration_status_1"]').click()
+    fill_date(edit_iframe, "#id_form2-start", "2055-07-11")
+    fill_date(edit_iframe, "#id_form2-end", "2055-07-13")
+    save_modal(page, edit_iframe)
 
 
 def copy_tickets_and_questions(page: Any, live_server: Any) -> None:
@@ -188,12 +192,12 @@ def copy_tickets_and_questions(page: Any, live_server: Any) -> None:
     go_to(page, live_server, "/eventb/manage/")
 
     # Activate copy
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.locator("div.feature_checkbox", has_text="Copy").locator("input[type='checkbox']").check()
     submit_confirm(page)
 
     # Navigate to copy page
-    page.locator("#orga_copy").get_by_role("link", name="Copy").click()
+    sidebar(page, "Copy")
 
     # Select Event A as source
     page.locator("#select2-id_parent-container").click()
@@ -201,9 +205,12 @@ def copy_tickets_and_questions(page: Any, live_server: Any) -> None:
     page.get_by_role("option", name="Event A").click()
 
     # Select tickets and registration form
-    page.get_by_role("checkbox", name="Registration Tickets").check()
-    page.get_by_role("checkbox", name="Registration questions and options").check()
+    page.get_by_role("checkbox", name="Registration Tickets").check(force=True)
+    page.get_by_role("checkbox", name="Registration Form").check(force=True)
 
+    submit_confirm(page)
+
+    # confirm all the single elements in the selection step
     submit_confirm(page)
 
     # Verify tickets were copied
@@ -228,17 +235,17 @@ def create_signup_event_a(page: Any, live_server: Any) -> None:
     go_to(page, live_server, "/eventa/register/")
 
     # Select Standard Ticket
-    page.get_by_label("Ticket").select_option(label="Standard Ticket - 50€ - (Available: 20)")
+    page.locator('label[for="id_ticket_1"]').click()
 
     # Fill in dietary restrictions
     page.get_by_role("textbox", name="Dietary restrictions").fill("Vegetarian")
 
-    # Select Medium t-shirt
-    page.get_by_label("T-shirt size").select_option(label="Large (10€) - (Available 5)")
+    # Select Large t-shirt
+    page.locator('label[for="id_que_u4_2"]').click()
 
     # Select workshops (Combat and Crafting)
-    page.get_by_role("checkbox", name="Combat (15€)").check()
-    page.get_by_role("checkbox", name="Crafting (10€)").check()
+    page.locator('label[for="id_que_u5_0"]').click()
+    page.locator('label[for="id_que_u5_2"]').click()
 
     page.get_by_role("button", name="Continue").click()
 
@@ -284,21 +291,23 @@ def verify_transfer(page: Any, live_server: Any) -> None:
     expect_normalized(page, page.locator("#one"), "User Test")
 
     # Click to edit and verify details
-    page.locator("a:has(i.fas.fa-edit)").click()
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
 
     # Verify ticket type is maintained (Standard Ticket)
-    expect(page.locator("#id_ticket option:checked")).to_have_text("Standard Ticket - 50€")
+    expect(edit_iframe.locator("label").filter(has_text="Standard Ticket").locator("input[name='ticket']")).to_be_checked()
 
     # Verify dietary restrictions answer
-    expect(page.locator("#id_que_u8")).to_have_value("Vegetarian")
+    dietary_row = edit_iframe.locator("tr").filter(has_text="Dietary restrictions")
+    expect(dietary_row.locator("input[type='text']")).to_have_value("Vegetarian")
 
-    # Verify t-shirt size (Medium)
-    expect_normalized(page, page.locator("#main_form"), "Large (10€)")
+    # Verify t-shirt size (Large)
+    expect(edit_iframe.locator("label").filter(has_text="Large").locator("input[type='radio']").first).to_be_checked()
 
     # Verify workshop selections (Combat and Crafting)
-    expect(page.get_by_role("checkbox", name="Combat (15€)")).to_be_checked()
-    expect(page.get_by_role("checkbox", name="Crafting (10€)")).to_be_checked()
-    expect(page.get_by_role("checkbox", name="Makeup (20€)")).not_to_be_checked()
+    expect(edit_iframe.locator("label").filter(has_text="Combat").locator("input[type='checkbox']")).to_be_checked()
+    expect(edit_iframe.locator("label").filter(has_text="Crafting").locator("input[type='checkbox']")).to_be_checked()
+    expect(edit_iframe.locator("label").filter(has_text="Makeup").locator("input[type='checkbox']")).not_to_be_checked()
 
     # Verify Event A no longer has the registration
     go_to(page, live_server, "/eventa/manage/registrations/")

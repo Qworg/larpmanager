@@ -27,50 +27,40 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db.models import F, Prefetch, QuerySet
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseRedirect
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from larpmanager.cache.character import clear_run_cache_and_media
-from larpmanager.cache.config import get_event_config
+from larpmanager.cache.config import get_event_config, save_single_config
 from larpmanager.cache.feature import get_event_features
 from larpmanager.cache.run import get_cache_run
 from larpmanager.forms.event import (
     ExeEventForm,
-    OrgaAppearanceForm,
-    OrgaConfigForm,
-    OrgaEventButtonForm,
     OrgaEventForm,
-    OrgaEventRoleForm,
-    OrgaEventTextForm,
     OrgaFeatureForm,
-    OrgaPreferencesForm,
-    OrgaQuickSetupForm,
+    OrgaRunDatesForm,
+    OrgaRunDevelopmentForm,
     OrgaRunForm,
+    OrgaRunRegistrationForm,
 )
+from larpmanager.forms.miscellanea import OrgaCopyForm
 from larpmanager.forms.writing import UploadElementsForm
-from larpmanager.models.access import AssociationPermission, AssociationRole, EventPermission, EventRole
+from larpmanager.mail.base import send_role_invite_email
+from larpmanager.models.access import AssociationPermission, AssociationRole, EventPermission, EventRole, RoleInvite
 from larpmanager.models.base import Feature
-from larpmanager.models.casting import Quest, QuestType, Trait
 from larpmanager.models.event import Event, EventButton, EventText, Run
-from larpmanager.models.form import BaseQuestionType, QuestionApplicable, RegistrationQuestionType, WritingQuestionType
-from larpmanager.models.registration import Registration
-from larpmanager.models.writing import Character, Faction, Plot
-from larpmanager.utils.auth.permission import get_index_event_permissions
+from larpmanager.utils.auth.permission import get_event_roles, get_index_event_permissions
 from larpmanager.utils.core.base import check_event_context
-from larpmanager.utils.core.common import clear_messages, get_feature
-from larpmanager.utils.io.download import (
-    _get_column_names,
-    export_abilities,
-    export_character_form,
-    export_data,
-    export_event,
-    export_registration_form,
-    export_tickets,
-    zip_exports,
-)
+from larpmanager.utils.core.common import clear_messages, get_feature, is_rate_limited
+from larpmanager.utils.core.copy import copy, get_copy_sections, read_copy_picks
+from larpmanager.utils.core.exceptions import RedirectError, UserPermissionError
+from larpmanager.utils.edit.backend import backend_edit, save_log
+from larpmanager.utils.edit.orga import OrgaAction, orga_delete, orga_edit, orga_new
+from larpmanager.utils.io.download import _get_column_names, prepare_backup, zip_exports
+from larpmanager.utils.io.restore import execute_restore, load_restore_temp, preview_restore, save_restore_temp
+from larpmanager.utils.io.template import build_upload_template
 from larpmanager.utils.io.upload import go_upload
-from larpmanager.utils.services.edit import backend_edit, orga_edit
 from larpmanager.utils.services.event import reset_all_run
 from larpmanager.utils.users.deadlines import check_run_deadlines
 
@@ -85,6 +75,50 @@ def orga_event(request: HttpRequest, event_slug: str) -> HttpResponse:
     """Event management view for organizers."""
     context = check_event_context(request, event_slug, "orga_event")
     return full_event_edit(context, request, context["event"], context["run"], is_executive=False)
+
+
+def _save_event_run(
+    context: dict,
+    run: Run | None,
+    run_form: OrgaRunForm,
+    saved_event: Event,
+    on_created_callback: callable | None,
+) -> Run:
+    """Save the run for a created or edited event, returning the saved run."""
+    if context["is_creation"]:
+        # Get the run created automatically, and update it with form data
+        saved_run = saved_event.runs.first()
+        for field in run_form.cleaned_data:
+            setattr(saved_run, field, run_form.cleaned_data[field])
+        saved_run.save()
+        save_log(context, Run, saved_run, None)
+        if on_created_callback:
+            on_created_callback(saved_event)
+    else:
+        # For editing, just save the run form normally
+        saved_run = run_form.save()
+        save_log(context, Run, saved_run, run.uuid)
+    return saved_run
+
+
+def _full_event_edit_success_response(
+    request: HttpRequest,
+    context: dict,
+    saved_run: Run,
+    is_frame: bool,  # noqa: FBT001
+    *,
+    is_executive: bool,
+) -> HttpResponse:
+    """Return the response for a successful full_event_edit save."""
+    if is_frame:
+        if context.get("is_creation"):
+            context["redirect_url"] = reverse("manage", kwargs={"event_slug": saved_run.get_slug()})
+        return render(request, "elements/dashboard/form_success.html", context)
+
+    if is_executive and not context.get("is_creation"):
+        return redirect("manage")
+
+    return redirect("manage", event_slug=saved_run.get_slug())
 
 
 def full_event_edit(
@@ -115,10 +149,21 @@ def full_event_edit(
         redirect response after successful form submission
 
     """
-    # Disable numbering in the template context
-    context["nonum"] = 1
-    context["is_creation"] = event is None
-    event_form_class = ExeEventForm if is_executive else OrgaEventForm
+    is_frame = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+    context["frame"] = is_frame
+
+    if event:
+        context["is_creation"] = False
+        context["num"] = event.uuid
+        context["name"] = event.name
+    else:
+        context["is_creation"] = True
+
+    if is_executive:
+        event_form_class = ExeEventForm
+    else:
+        event_form_class = OrgaEventForm
+        context["nonum"] = 1
 
     if request.method == "POST":
         # Create form instances with POST data and file uploads
@@ -129,25 +174,13 @@ def full_event_edit(
         if event_form.is_valid() and run_form.is_valid():
             # Save event first
             saved_event = event_form.save()
+            save_log(context, Event, saved_event, event.uuid if event else None)
 
-            if context["is_creation"]:
-                # Get the run created automatically, and update it with form data
-                saved_run = saved_event.runs.first()
-                for field in run_form.cleaned_data:
-                    setattr(saved_run, field, run_form.cleaned_data[field])
-                saved_run.save()
-                if on_created_callback:
-                    on_created_callback(saved_event)
-            else:
-                # For editing, just save the run form normally
-                saved_run = run_form.save()
+            saved_run = _save_event_run(context, run, run_form, saved_event, on_created_callback)
 
             # Show success message and redirect based on access level
-            messages.success(request, _("Operation completed") + "!")
-            if is_executive and not context.get("is_creation"):
-                return redirect("manage")
-
-            return redirect("manage", event_slug=saved_run.get_slug())
+            messages.success(request, _("Operation completed!"))
+            return _full_event_edit_success_response(request, context, saved_run, is_frame, is_executive=is_executive)
     else:
         # Create empty forms for GET requests
         event_form = event_form_class(instance=event, context=context, prefix="form1")
@@ -174,6 +207,12 @@ def orga_roles(request: HttpRequest, event_slug: str) -> HttpResponse:
 
     # Prepare the roles list with permissions and existing roles
     prepare_roles_list(context, EventPermission, EventRole.objects.filter(event=context["event"]), def_callback)
+
+    # Attach pending (unredeemed) invites to each role for display
+    for role in context["list"]:
+        role.pending_invites = RoleInvite.objects.filter(
+            event_role=role, redeemed_by__isnull=True, deleted__isnull=True
+        )
 
     return render(request, "larpmanager/orga/roles.html", context)
 
@@ -211,9 +250,7 @@ def prepare_roles_list(
             for permission in role.permissions.all():
                 # Check active_if config for event permissions
                 if permission.active_if and context.get("event"):
-                    config_value = get_event_config(
-                        context["event"].id, permission.active_if, default_value=False, context=context
-                    )
+                    config_value = get_event_config(context["event"].id, permission.active_if, context=context)
                     if not config_value:
                         continue
 
@@ -240,23 +277,55 @@ def prepare_roles_list(
 
 
 @login_required
+def orga_roles_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Edit organization event role."""
+    return orga_new(request, event_slug, OrgaAction.ROLES)
+
+
+@login_required
 def orga_roles_edit(request: HttpRequest, event_slug: str, role_uuid: str) -> HttpResponse:
     """Edit organization event role."""
-    return orga_edit(request, event_slug, "orga_roles", OrgaEventRoleForm, role_uuid)
+    return orga_edit(request, event_slug, OrgaAction.ROLES, role_uuid)
+
+
+@login_required
+def orga_roles_delete(request: HttpRequest, event_slug: str, role_uuid: str) -> HttpResponse:
+    """Delete organization event role."""
+    return orga_delete(
+        request,
+        event_slug,
+        OrgaAction.ROLES,
+        role_uuid,
+    )
+
+
+@login_required
+def orga_roles_invite(request: HttpRequest, event_slug: str, role_uuid: str) -> HttpResponse:
+    """Send email invitation to join an event role."""
+    context = check_event_context(request, event_slug, "orga_roles")
+    role = get_object_or_404(EventRole, uuid=role_uuid, event=context["event"])
+    if request.method == "POST":
+        email = request.POST.get("email", "").strip()
+        if email:
+            invite = RoleInvite.objects.create(
+                email=email,
+                association_id=context["association_id"],
+                event=context["event"],
+                event_role=role,
+                invited_by=request.user.member,
+            )
+            send_role_invite_email(invite)
+            messages.success(request, _("Invitation sent to %(email)s") % {"email": email})
+        return redirect("orga_roles", event_slug=event_slug)
+    context["role"] = role
+    context["back_url"] = reverse("orga_roles", kwargs={"event_slug": event_slug})
+    return render(request, "larpmanager/manage/roles_invite.html", context)
 
 
 @login_required
 def orga_appearance(request: HttpRequest, event_slug: str) -> HttpResponse:
     """Handle appearance configuration for an event."""
-    return orga_edit(
-        request,
-        event_slug,
-        "orga_appearance",
-        OrgaAppearanceForm,
-        None,
-        "manage",
-        additional_context={"add_another": False},
-    )
+    return orga_edit(request, event_slug, OrgaAction.APPEARANCE)
 
 
 @login_required
@@ -264,15 +333,7 @@ def orga_run(request: HttpRequest, event_slug: str) -> HttpResponse:
     """Render the event run edit form with cached run data."""
     # Retrieve cached run data and render edit form
     run_uuid = get_cache_run(request.association["id"], event_slug)
-    return orga_edit(
-        request,
-        event_slug,
-        "orga_event",
-        OrgaRunForm,
-        run_uuid,
-        "manage",
-        additional_context={"add_another": False},
-    )
+    return orga_edit(request, event_slug, OrgaAction.EVENT, run_uuid)
 
 
 @login_required
@@ -284,35 +345,63 @@ def orga_texts(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_texts_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create an organization event text entry."""
+    return orga_new(request, event_slug, OrgaAction.TEXTS)
+
+
+@login_required
 def orga_texts_edit(request: HttpRequest, event_slug: str, text_uuid: str) -> HttpResponse:
-    """Edit organization event text entry."""
-    return orga_edit(request, event_slug, "orga_texts", OrgaEventTextForm, text_uuid)
+    """Edit an organization event text entry."""
+    return orga_edit(request, event_slug, OrgaAction.TEXTS, text_uuid)
+
+
+@login_required
+def orga_texts_delete(request: HttpRequest, event_slug: str, text_uuid: str) -> HttpResponse:
+    """Delete text for event."""
+    return orga_delete(request, event_slug, OrgaAction.TEXTS, text_uuid)
 
 
 @login_required
 def orga_buttons(request: HttpRequest, event_slug: str) -> HttpResponse:
     """Display event buttons management page for organizers."""
     context = check_event_context(request, event_slug, "orga_buttons")
-    context["list"] = EventButton.objects.filter(event_id=context["event"].id).order_by("number")
+    context["list"] = EventButton.objects.filter(event_id=context["event"].id).order_by("order")
     return render(request, "larpmanager/orga/buttons.html", context)
+
+
+@login_required
+def orga_buttons_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a specific button configuration for an event."""
+    return orga_new(request, event_slug, OrgaAction.BUTTONS)
 
 
 @login_required
 def orga_buttons_edit(request: HttpRequest, event_slug: str, button_uuid: str) -> HttpResponse:
     """Edit a specific button configuration for an event."""
-    return orga_edit(request, event_slug, "orga_buttons", OrgaEventButtonForm, button_uuid)
+    return orga_edit(request, event_slug, OrgaAction.BUTTONS, button_uuid)
+
+
+@login_required
+def orga_buttons_delete(request: HttpRequest, event_slug: str, button_uuid: str) -> HttpResponse:
+    """Delete button for event."""
+    return orga_delete(request, event_slug, OrgaAction.BUTTONS, button_uuid)
 
 
 @login_required
 def orga_config(
     request: HttpRequest,
     event_slug: str,
-    section: str | None = None,
+    section: str | None = None,  # noqa: ARG001
 ) -> HttpResponse:
     """Configure organization settings with optional section navigation."""
-    add_ctx = {"jump_section": section} if section else {}
-    add_ctx["add_another"] = False
-    return orga_edit(request, event_slug, "orga_config", OrgaConfigForm, None, "manage", additional_context=add_ctx)
+    return orga_edit(request, event_slug, OrgaAction.CONFIG)
+
+
+@login_required
+def orga_publication(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Manage external promotion metadata for an event."""
+    return orga_edit(request, event_slug, OrgaAction.PROMOTION)
 
 
 @login_required
@@ -328,8 +417,9 @@ def orga_features(request: HttpRequest, event_slug: str) -> Any:
 
     """
     context = check_event_context(request, event_slug, "orga_features")
+    context["event_form"] = True
     context["add_another"] = False
-    if backend_edit(request, context, OrgaFeatureForm, None, additional_field=None, is_association=False):
+    if backend_edit(request, context, OrgaFeatureForm):
         context["new_features"] = Feature.objects.filter(
             pk__in=context["form"].added_features,
             after_link__isnull=False,
@@ -340,7 +430,7 @@ def orga_features(request: HttpRequest, event_slug: str) -> Any:
             el.follow_link = _orga_feature_after_link(el, event_slug)
         if len(context["new_features"]) == 1:
             feature = context["new_features"][0]
-            msg = _("Feature %(name)s activated") % {"name": feature.name} + "! " + feature.after_text
+            msg = _("Feature %(name)s activated!") % {"name": feature.name} + " " + feature.after_text
             clear_messages(request)
             messages.success(request, msg)
             return redirect(feature.follow_link)
@@ -351,12 +441,12 @@ def orga_features(request: HttpRequest, event_slug: str) -> Any:
     return render(request, "larpmanager/orga/edit.html", context)
 
 
-def orga_features_go(request: HttpRequest, context: dict, slug: str, *, to_active: bool = True) -> Feature:
+def orga_features_go(request: HttpRequest, event_slug: str, slug: str, *, to_active: bool = True) -> Feature:
     """Toggle a feature for an event.
 
     Args:
         request: The HTTP request object
-        context: Context dictionary containing event and feature information
+        event_slug: The event slug identifier
         slug: The feature slug to toggle
         to_active: Whether to activate (True) or deactivate (False) the feature
 
@@ -365,8 +455,17 @@ def orga_features_go(request: HttpRequest, context: dict, slug: str, *, to_activ
 
     Raises:
         Http404: If the feature is an overall feature (not event-specific)
+        RedirectError: If the association is in lite/demo mode and activation is attempted
 
     """
+    context = check_event_context(request, event_slug, "orga_features")
+
+    # Block feature activation in lite/demo mode
+    if to_active and context.get("lite_mode"):
+        messages.error(request, _("Features cannot be activated in lite mode, complete the activation checklist first"))
+        msg = "manage"
+        raise RedirectError(msg, kwargs={"event_slug": event_slug})
+
     # Get the feature from context using the slug
     get_feature(context, slug)
 
@@ -385,15 +484,16 @@ def orga_features_go(request: HttpRequest, context: dict, slug: str, *, to_activ
     # Handle feature activation/deactivation logic
     if to_active:
         if target_feature_id not in current_event_feature_ids:
-            context["event"].features.add(target_feature_id)
-            message = _("Feature %(name)s activated") + "!"
+            for dep_id in Feature.get_all_dependencies([target_feature_id]):
+                context["event"].features.add(dep_id)
+            message = _("Feature %(name)s activated!")
         else:
-            message = _("Feature %(name)s already activated") + "!"
+            message = _("Feature %(name)s already activated!")
     elif target_feature_id not in current_event_feature_ids:
-        message = _("Feature %(name)s already deactivated") + "!"
+        message = _("Feature %(name)s already deactivated!")
     else:
         context["event"].features.remove(target_feature_id)
-        message = _("Feature %(name)s deactivated") + "!"
+        message = _("Feature %(name)s deactivated!")
 
     # Save the event and update cached features for child events
     context["event"].save()
@@ -410,16 +510,7 @@ def orga_features_go(request: HttpRequest, context: dict, slug: str, *, to_activ
 
 
 def _orga_feature_after_link(feature: Feature, event_slug: str) -> str:
-    """Build redirect URL after feature interaction.
-
-    Args:
-        feature: Feature object with after_link attribute
-        event_slug: Event slug identifier
-
-    Returns:
-        Full URL path for redirect
-
-    """
+    """Build redirect URL after feature interaction."""
     after_link = feature.after_link
 
     # Use reverse if after_link is a named URL pattern starting with "orga"
@@ -437,22 +528,64 @@ def orga_features_on(
     slug: str,
 ) -> HttpResponseRedirect:
     """Toggle feature on for an event."""
-    # Check user has permission to manage features
-    context = check_event_context(request, event_slug, "orga_features")
-
-    # Enable the feature
-    feature = orga_features_go(request, context, slug, to_active=True)
-
-    # Redirect to appropriate page
+    feature = orga_features_go(request, event_slug, slug, to_active=True)
     return redirect(_orga_feature_after_link(feature, event_slug))
 
 
 @login_required
 def orga_features_off(request: HttpRequest, event_slug: str, slug: str) -> HttpResponse:
     """Disable a feature for an event."""
-    context = check_event_context(request, event_slug, "orga_features")
-    orga_features_go(request, context, slug, to_active=False)
+    orga_features_go(request, event_slug, slug, to_active=False)
     return redirect("manage", event_slug=event_slug)
+
+
+def _orga_config_after_link(event_slug: str) -> str:
+    """Build the configuration page URL, jumping to the section of the toggled option."""
+    kwargs = {"event_slug": event_slug}
+    return reverse("orga_config", kwargs=kwargs)
+
+
+def orga_config_go(request: HttpRequest, event_slug: str, slug: str, *, to_active: bool = True) -> None:
+    """Toggle a boolean configuration option for an event.
+
+    Args:
+        request: The HTTP request object
+        event_slug: The event slug identifier
+        slug: The name of the configuration option to toggle
+        to_active: Whether to activate (True) or deactivate (False) the option
+
+    """
+    context = check_event_context(request, event_slug, "orga_config")
+    context["request"] = request
+
+    # Configs of campaign children are held by the parent event
+    event = context["event"]
+    config_target = event.parent if event.parent_id else event
+
+    # Skip the update if the option already has the requested value
+    if get_event_config(config_target.id, slug) == to_active:
+        message = _("Option %(name)s already activated!") if to_active else _("Option %(name)s already deactivated!")
+    else:
+        save_single_config(config_target, slug, str(to_active))
+        config_target.save()
+        clear_run_cache_and_media(context["run"])
+        message = _("Option %(name)s activated!") if to_active else _("Option %(name)s deactivated!")
+
+    messages.success(request, message % {"name": slug})
+
+
+@login_required
+def orga_config_on(request: HttpRequest, event_slug: str, slug: str) -> HttpResponseRedirect:
+    """Activate a configuration option and redirect to the configuration page."""
+    orga_config_go(request, event_slug, slug, to_active=True)
+    return redirect(_orga_config_after_link(event_slug))
+
+
+@login_required
+def orga_config_off(request: HttpRequest, event_slug: str, slug: str) -> HttpResponseRedirect:
+    """Deactivate a configuration option and redirect to the configuration page."""
+    orga_config_go(request, event_slug, slug, to_active=False)
+    return redirect(_orga_config_after_link(event_slug))
 
 
 @login_required
@@ -470,100 +603,71 @@ def orga_deadlines(request: HttpRequest, event_slug: str) -> HttpResponse:
 @login_required
 def orga_quick(request: HttpRequest, event_slug: str) -> HttpResponse:
     """Handle quick event setup form."""
-    # Delegate to orga_edit with quick setup form configuration
-    return orga_edit(
-        request,
-        event_slug,
-        "orga_quick",
-        OrgaQuickSetupForm,
-        None,
-        "manage",
-        additional_context={"add_another": False},
-    )
+    return orga_edit(request, event_slug, OrgaAction.QUICK)
 
 
 @login_required
 def orga_preferences(request: HttpRequest, event_slug: str) -> HttpResponse:
-    """Render organizer preferences editing form."""
-    # Get current member ID and delegate to orga_edit
-    m_id = request.user.member.id
-    return orga_edit(
-        request,
-        event_slug,
-        None,
-        OrgaPreferencesForm,
-        m_id,
-        "manage",
-        additional_context={"add_another": False},
-    )
+    """Handle organizer preferences editing form."""
+    return orga_edit(request, event_slug, OrgaAction.PREFERENCES)
+
+
+def _check_organizer(request: HttpRequest, context: dict, event_slug: str) -> None:
+    is_organizer, _perms, _roles = get_event_roles(request, context, event_slug)
+    if not is_organizer and 1 not in context.get("association_role", {}):
+        raise UserPermissionError
 
 
 @login_required
 def orga_backup(request: HttpRequest, event_slug: str) -> HttpResponse:
     """Prepare event backup for download."""
-    # Check user has event access
     context = check_event_context(request, event_slug, "orga_event")
+    _check_organizer(request, context, event_slug)
+    if is_rate_limited(f"orga_backup_{context['event'].id}"):
+        messages.error(request, _("Please wait before retrying."))
+        return redirect("manage", event_slug=event_slug)
+    return prepare_backup(context)
 
-    # Generate and return backup response
-    return _prepare_backup(context)
 
+@login_required
+def orga_restore(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Restore event data from a previously exported backup ZIP."""
+    context = check_event_context(request, event_slug, "orga_event")
+    _check_organizer(request, context, event_slug)
 
-def _prepare_backup(context: dict) -> HttpResponse:
-    """Prepare comprehensive event data backup by exporting various components.
+    if request.method == "POST":
+        if "confirm" in request.POST:
+            if is_rate_limited(f"orga_restore_{context['event'].id}"):
+                messages.error(request, _("Please wait before retrying."))
+                return render(request, "larpmanager/orga/restore.html", context)
+            temp_key = request.POST.get("temp_key", "")
+            zip_bytes = load_restore_temp(temp_key)
+            if zip_bytes is None:
+                messages.error(request, _("Session expired, please upload the file again."))
+                return render(request, "larpmanager/orga/restore.html", context)
+            try:
+                context["logs"] = execute_restore(context, zip_bytes)
+                messages.success(request, _("Completed!"))
+                return render(request, "larpmanager/orga/uploads.html", context)
+            except Exception as exc:
+                logger.exception("Restore execute error")
+                messages.error(request, _("Error") + f": {exc}")
+                return render(request, "larpmanager/orga/restore.html", context)
 
-    Creates a ZIP file containing exported event data including registrations,
-    characters, factions, plots, abilities, and quest builder components based
-    on enabled features.
+        elif "zip_file" in request.FILES:
+            zip_bytes = request.FILES["zip_file"].read()
+            try:
+                sections, unknown_files = preview_restore(context, zip_bytes)
+                temp_key = save_restore_temp(zip_bytes)
+                context["sections"] = sections
+                context["unknown_files"] = unknown_files
+                context["temp_key"] = temp_key
+                return render(request, "larpmanager/orga/restore_preview.html", context)
+            except Exception as exc:
+                logger.exception("Restore preview error")
+                messages.error(request, _("Error reading backup file") + f": {exc}")
 
-    Args:
-        context: Context dictionary containing:
-            - event: Event object to backup
-            - features: Dict of enabled feature flags
-            - Other context data required by export functions
-
-    Returns:
-        HttpResponse: ZIP file response containing all exported event data
-
-    Raises:
-        KeyError: If required context keys are missing
-        Exception: If export or ZIP creation fails
-
-    """
-    export_files = []
-
-    # Export core event data
-    export_files.extend(export_event(context))
-
-    # Export registration-related data
-    export_files.extend(export_data(context, Registration))
-    export_files.extend(export_registration_form(context))
-    export_files.extend(export_tickets(context))
-
-    # Export character data if feature is enabled
-    if "character" in context["features"]:
-        export_files.extend(export_data(context, Character))
-        export_files.extend(export_character_form(context))
-
-    # Export faction data if feature is enabled
-    if "faction" in context["features"]:
-        export_files.extend(export_data(context, Faction))
-
-    # Export plot data if feature is enabled
-    if "plot" in context["features"]:
-        export_files.extend(export_data(context, Plot))
-
-    # Export experience/abilities data if feature is enabled
-    if "px" in context["features"]:
-        export_files.extend(export_abilities(context))
-
-    # Export quest builder data if feature is enabled
-    if "questbuilder" in context["features"]:
-        export_files.extend(export_data(context, QuestType))
-        export_files.extend(export_data(context, Quest))
-        export_files.extend(export_data(context, Trait))
-
-    # Create and return ZIP file with all exports
-    return zip_exports(context, export_files, "backup")
+    return render(request, "larpmanager/orga/restore.html", context)
 
 
 @login_required
@@ -586,8 +690,11 @@ def orga_upload(request: HttpRequest, event_slug: str, upload_type: str) -> Http
         Exception: Any error during file processing is caught and displayed to user
 
     """
-    # Check user permissions and get event context
-    context = check_event_context(request, event_slug, f"orga_{upload_type}")
+    # Check user permissions and get event context. The matchmaker form reuses the
+    # registration form's permission, since matchmaker questions are RegistrationQuestion
+    # rows managed through the same "orga_registration_form" screen.
+    permission_type = "registration_form" if upload_type == "matchmaker_form" else upload_type
+    context = check_event_context(request, event_slug, f"orga_{permission_type}")
     context["typ"] = upload_type.rstrip("s")
     context["name"] = context["typ"]
 
@@ -599,7 +706,10 @@ def orga_upload(request: HttpRequest, event_slug: str, upload_type: str) -> Http
         form = UploadElementsForm(request.POST, request.FILES)
 
         # Prepare redirect URL for after processing
-        redr = reverse(f"orga_{upload_type}", args=[context["run"].get_slug()])
+        if upload_type == "matchmaker_form":
+            redr = reverse("orga_registration_form", args=[context["run"].get_slug(), "matchmaker"])
+        else:
+            redr = reverse(f"orga_{upload_type}", args=[context["run"].get_slug()])
 
         if form.is_valid():
             try:
@@ -608,13 +718,13 @@ def orga_upload(request: HttpRequest, event_slug: str, upload_type: str) -> Http
                 context["redr"] = redr
 
                 # Show success message and render results page
-                messages.success(request, _("Elements uploaded") + "!")
+                messages.success(request, _("Elements uploaded!"))
                 return render(request, "larpmanager/orga/uploads.html", context)
 
             except Exception as exp:
                 # Log the full traceback and show error to user
                 logger.exception("Upload error")
-                messages.error(request, _("Unknow error on upload") + f": {exp}")
+                messages.error(request, _("Unknown error while uploading.") + f": {exp}")
 
             # Redirect back to the main page on error or completion
             return HttpResponseRedirect(redr)
@@ -637,7 +747,7 @@ def orga_upload_template(request: HttpRequest, event_slug: str, upload_type: str
         upload_type: Template type specifying which template to generate. Valid values:
             - 'writing': Character writing elements template
             - 'registration': Event registration template
-            - 'px_abilitie': Player experience abilities template
+            - 'exp_abilitie': Player experience abilities template
             - 'form': Generic form template
 
     Returns:
@@ -652,295 +762,22 @@ def orga_upload_template(request: HttpRequest, event_slug: str, upload_type: str
     context = check_event_context(request, event_slug)
     context["typ"] = upload_type
 
-    # Extract and set column names for template generation
-    _get_column_names(context)
-
-    # Define value mappings for different question types and their expected formats
-    value_mapping = {
-        BaseQuestionType.SINGLE: "option name",
-        BaseQuestionType.MULTIPLE: "option names (comma separated)",
-        BaseQuestionType.TEXT: "field text",
-        BaseQuestionType.PARAGRAPH: "field long text",
-        BaseQuestionType.EDITOR: "field html text",
-        WritingQuestionType.NAME: "element name",
-        WritingQuestionType.TEASER: "element presentation",
-        WritingQuestionType.SHEET: "element text",
-        WritingQuestionType.COVER: "element cover (utils path)",
-        WritingQuestionType.FACTIONS: "faction names (comma separated)",
-        WritingQuestionType.TITLE: "title short text",
-        WritingQuestionType.MIRROR: "name of mirror character",
-        WritingQuestionType.HIDE: "hide (true or false)",
-        WritingQuestionType.PROGRESS: "name of progress step",
-        WritingQuestionType.ASSIGNED: "name of assigned staff",
-        RegistrationQuestionType.TICKET: "name of the ticket",
-        RegistrationQuestionType.ADDITIONAL: "number of additional tickets",
-        RegistrationQuestionType.PWYW: "amount of free donation",
-        RegistrationQuestionType.QUOTA: "number of quotas to split the fee",
-        RegistrationQuestionType.SURCHARGE: "surcharge applied",
-    }
-
-    # Generate appropriate template based on type
-    if context.get("writing_typ"):
-        # Generate writing elements template for character backgrounds
-        exports = _writing_template(context, upload_type, value_mapping)
-    elif upload_type == "registration":
-        # Generate registration template for event signup data
-        exports = _reg_template(context, upload_type, value_mapping)
-    elif upload_type == "registration_ticket":
-        # Generate ticket template for ticket tier definitions
-        exports = _ticket_template(context)
-    elif upload_type == "px_abilitie":
-        # Generate abilities template for player experience tracking
-        exports = _ability_template(context)
-    else:
-        # Generate generic form template for other data types
-        exports = _form_template(context)
-
     # Package exports into ZIP file and return as download response
-    return zip_exports(context, exports, "template")
-
-
-def _ticket_template(context: dict) -> Any:
-    """Generate template for ticket tier uploads with example data."""
-    export_data = []
-    field_example_values = {
-        "name": "Basic Ticket",
-        "tier": "1",
-        "description": "Standard admission ticket",
-        "price": "50",
-        "max_available": "100",
-    }
-    column_names = list(context["columns"][0].keys())
-    example_row_values = []
-    for field_name, example_value in field_example_values.items():
-        if field_name not in column_names:
-            continue
-        example_row_values.append(example_value)
-    export_data.append(("tickets", column_names, [example_row_values]))
-    return export_data
-
-
-def _ability_template(context: dict) -> Any:
-    """Generate template for ability uploads with example data.
-
-    Args:
-        context: Context dictionary containing column definitions
-
-    Returns:
-        list: Export data containing ability template with example values
-
-    """
-    export_data = []
-    field_example_values = {
-        "name": "Ability name",
-        "cost": "Ability cost",
-        "typ": "Ability type",
-        "descr": "Ability description",
-        "prerequisites": "Ability prerequisite, comma-separated",
-        "requirements": "Character options, comma-separated",
-    }
-    column_names = list(context["columns"][0].keys())
-    example_row_values = []
-    for field_name, example_value in field_example_values.items():
-        if field_name not in column_names:
-            continue
-        example_row_values.append(example_value)
-    export_data.append(("abilities", column_names, [example_row_values]))
-    return export_data
-
-
-def _form_template(context: dict) -> list[tuple[str, list[str], list[list[str]]]]:
-    """Generate template files for form questions and options upload.
-
-    Creates sample data templates for both questions and options that can be used
-    for bulk upload functionality. The templates include predefined values that
-    serve as examples for users.
-
-    Args:
-        context: Context dictionary containing column definitions with the structure:
-            - columns[0]: Dictionary with question field definitions
-            - columns[1]: Dictionary with option field definitions
-
-    Returns:
-        List of tuples where each tuple contains:
-            - str: Template type ("questions" or "options")
-            - list[str]: Column headers/keys
-            - list[list[str]]: Sample data rows
-
-    """
-    template_exports = []
-
-    # Define sample data for questions template
-    sample_question_data = {
-        "name": "Question Name",
-        "typ": "multi-choice",
-        "description": "Question Description",
-        "status": "optional",
-        "applicable": "character",
-        "visibility": "public",
-        "max_length": "1",
-    }
-
-    # Extract available question fields from context
-    question_column_keys = list(context["columns"][0].keys())
-    question_sample_values = []
-
-    # Build values list matching available fields
-    for field_name, sample_value in sample_question_data.items():
-        if field_name not in question_column_keys:
-            continue
-        question_sample_values.append(sample_value)
-
-    # Add questions template to exports
-    template_exports.append(("questions", question_column_keys, [question_sample_values]))
-
-    # Define sample data for options template
-    sample_option_data = {
-        "question": "Question Name",
-        "name": "Option Name",
-        "description": "Option description",
-        "max_available": "2",
-        "price": "10",
-    }
-
-    # Extract available option fields from context
-    option_column_keys = list(context["columns"][1].keys())
-    option_sample_values = []
-
-    # Build values list matching available fields
-    for field_name, sample_value in sample_option_data.items():
-        if field_name not in option_column_keys:
-            continue
-        option_sample_values.append(sample_value)
-
-    # Add options template to exports
-    template_exports.append(("options", option_column_keys, [option_sample_values]))
-
-    return template_exports
-
-
-def _reg_template(
-    context: dict,
-    template_type: str,
-    value_mapping: dict,
-) -> list[tuple[str, list[str], list[list[str]]]]:
-    """Generate registration template data for export.
-
-    Creates a template with predefined default values and dynamic fields
-    based on the provided context and value mapping.
-
-    Args:
-        context: Context dictionary containing columns and fields information
-        template_type: Template type identifier for naming
-        value_mapping: Mapping of field types to their default values
-
-    Returns:
-        List of tuples containing template name, column keys, and row values
-
-    """
-    # Extract existing column keys from context
-    column_keys = list(context["columns"][0].keys())
-    row_values = []
-
-    # Define default values for common registration fields
-    default_values = {"email": "user@test.it", "ticket": "Standard", "characters": "Test Character", "donation": "5"}
-
-    # Add default values for existing fields only
-    for field_name, default_value in default_values.items():
-        if field_name not in column_keys:
-            continue
-        row_values.append(default_value)
-
-    # Extend keys with additional context fields
-    column_keys.extend(context["fields"])
-
-    # Add values for dynamic fields based on field type mapping
-    row_values.extend([value_mapping[field_type] for field_type in context["fields"].values()])
-
-    # Create export tuple with template name, keys, and values
-    return [(f"{template_type} - template", column_keys, [row_values])]
-
-
-def _writing_template(
-    context: dict,
-    type_prefix: str,
-    value_mapping: dict,
-) -> list[tuple[str, list[str], list[list[str]]]]:
-    """Generate template data for writing export with field mappings.
-
-    Creates export templates for different writing types including base templates
-    and conditional templates for relationships and roles based on features.
-
-    Args:
-        context: Context dictionary containing:
-            - fields: Dict mapping field names to field types
-            - writing_typ: QuestionApplicable enum value for writing type
-            - features: Set of enabled feature names
-            - columns: Dict containing column definitions (when applicable)
-        type_prefix: Type string used as prefix for the template name
-        value_mapping: Dictionary mapping field types to their example values
-
-    Returns:
-        List of tuples containing template data where each tuple is:
-        (template_name, column_keys, row_values_list)
-
-    """
-    # Extract non-skipped fields and their corresponding example values
-    column_keys = [key for key, field_type in context["fields"].items() if field_type != "skip"]
-    example_values = [
-        value_mapping[field_type] for _field, field_type in context["fields"].items() if field_type != "skip"
-    ]
-
-    # Add type-specific prefix fields based on writing type
-    if context["writing_typ"] == QuestionApplicable.QUEST:
-        column_keys.insert(0, "typ")
-        example_values.insert(0, "name of quest type")
-    elif context["writing_typ"] == QuestionApplicable.TRAIT:
-        column_keys.insert(0, "quest")
-        example_values.insert(0, "name of quest")
-
-    # Create base template export
-    template_exports = [(f"{type_prefix} - template", column_keys, [example_values])]
-
-    # Add relationships template for character writing when feature is enabled
-    if context["writing_typ"] == QuestionApplicable.CHARACTER and "relationships" in context["features"]:
-        template_exports.append(
-            (
-                "relationships - template",
-                list(context["columns"][1].keys()),
-                [["Test Character", "Another Character", "Super pals"]],
-            ),
-        )
-
-    # Add roles template for plot writing
-    if context["writing_typ"] == QuestionApplicable.PLOT:
-        template_exports.append(
-            (
-                "roles - template",
-                list(context["columns"][1].keys()),
-                [["Test Plot", "Test Character", "Gonna be a super star"]],
-            ),
-        )
-    return template_exports
+    return zip_exports(context, build_upload_template(context, upload_type), "template")
 
 
 @login_required
 def orga_reload_cache(request: HttpRequest, event_slug: str) -> HttpResponse:
-    """Reset all cache entries for the specified event run.
-
-    Clears multiple cache layers including run media, event features,
-    registration counts, and relationship caches to ensure fresh data.
-
-    Args:
-        request: The HTTP request object containing user and session data
-        event_slug: String identifier for the event run slug
-
-    Returns:
-        HttpResponse: Redirect to the manage page for the event run
-
-    """
+    """Reset all cache entries for the specified event run."""
     # Verify user permissions and get event context
     context = check_event_context(request, event_slug)
+
+    # Check it's an organizer
+    _check_organizer(request, context, event_slug)
+
+    if is_rate_limited(f"orga_reload_cache_{context['event'].id}"):
+        messages.error(request, _("Please wait before retrying."))
+        return redirect("manage", event_slug=context["run"].get_slug())
 
     # Reset everything
     reset_all_run(context["event"], context["run"])
@@ -948,3 +785,113 @@ def orga_reload_cache(request: HttpRequest, event_slug: str) -> HttpResponse:
     # Notify user of successful cache reset
     messages.success(request, _("Cache reset!"))
     return redirect("manage", event_slug=context["run"].get_slug())
+
+
+def _orga_run_quick_edit(
+    request: HttpRequest,
+    event_slug: str,
+    form_class: type[OrgaRunForm],
+    success_message: str,
+) -> HttpResponse:
+    """Generic quick edit handler for run fields in a modal.
+
+    Args:
+        request: HTTP request object
+        event_slug: Event slug identifier
+        form_class: Form class to use for editing
+        success_message: Message to display on successful save
+
+    Returns:
+        HttpResponse: Rendered form or redirect after save
+
+    """
+    context = check_event_context(request, event_slug, "orga_event")
+    context["is_modal"] = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+
+    if request.method == "POST":
+        form = form_class(request.POST, instance=context["run"], context=context)
+        if form.is_valid():
+            saved_run = form.save()
+            save_log(context, Run, saved_run, context["run"].uuid)
+            messages.success(request, success_message)
+            if context["is_modal"]:
+                return render(request, "elements/dashboard/form_success.html", context)
+            return redirect("manage", event_slug=event_slug)
+    else:
+        form = form_class(instance=context["run"], context=context)
+
+    context["form"] = form
+    if context["is_modal"]:
+        return render(request, "elements/dashboard/form_frame.html", context)
+    return render(request, "larpmanager/orga/edit.html", context)
+
+
+@login_required
+def orga_run_quick_edit_dates(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Quick edit for run dates in a modal."""
+    return _orga_run_quick_edit(request, event_slug, OrgaRunDatesForm, _("Dates updated!"))
+
+
+@login_required
+def orga_run_quick_edit_development(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Quick edit for run development status in a modal."""
+    return _orga_run_quick_edit(request, event_slug, OrgaRunDevelopmentForm, _("Status updated!"))
+
+
+@login_required
+def orga_run_quick_edit_registration(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Quick edit for run registration status in a modal."""
+    return _orga_run_quick_edit(request, event_slug, OrgaRunRegistrationForm, _("Registration settings updated!"))
+
+
+@login_required
+def orga_copy(request: HttpRequest, event_slug: str) -> Any:
+    """Handle event copying functionality for organizers.
+
+    The copy is done in two steps: first the source event and the types of elements are
+    chosen, then the single elements of each type.
+
+    Args:
+        request: HTTP request object
+        event_slug: Event slug identifier
+
+    Returns:
+        HttpResponse: Rendered copy form template or redirect after successful copy
+
+    """
+    context = check_event_context(request, event_slug, "orga_copy")
+
+    if request.method == "POST":
+        form = OrgaCopyForm(request.POST, request.FILES, context=context)
+        if form.is_valid():
+            response = _process_copy_form(request, context, form)
+            if response:
+                return response
+
+    else:
+        form = OrgaCopyForm(context=context)
+
+    context["form"] = form
+
+    return render(request, "larpmanager/orga/copy.html", context)
+
+
+def _process_copy_form(request: HttpRequest, context: dict, form: OrgaCopyForm) -> Any:
+    """Run the copy, or show the selection of single elements when it is still missing."""
+    parent = Event.objects.get(pk=form.cleaned_data["parent"], association_id=context["association_id"])
+    targets = form.cleaned_data["target"]
+
+    if request.POST.get("step") != "elements":
+        sections = get_copy_sections(parent.id, targets)
+        if sections:
+            context["copy_sections"] = sections
+            context["copy_parent"] = parent.id
+            context["copy_targets"] = targets
+            return render(request, "larpmanager/orga/copy_elements.html", context)
+
+    picks = read_copy_picks(request, targets)
+    # Skip the types for which no element has been selected
+    targets = [key for key in targets if key not in picks or picks[key]]
+
+    copy(request, context, parent, context["event"], targets, picks)
+    return None

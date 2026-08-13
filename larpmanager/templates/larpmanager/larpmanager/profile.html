@@ -1,5 +1,11 @@
 {% extends "utils.html" %}
 {% load i18n static show_tags %}
+{% block datatables_css %}
+    {% include "elements/structure/datatables-css.html" %}
+{% endblock datatables_css %}
+{% block datatables_js %}
+    {% include "elements/structure/datatables-js.html" %}
+{% endblock datatables_js %}
 {% block title %}
     {% trans "Profiling" %}
 {% endblock title %}
@@ -8,6 +14,7 @@
     <table id="lm_profile" class="go_datatable mob">
         <thead>
             <tr>
+                <th></th>
                 <th>Domain</th>
                 <th>View</th>
                 <th>Avg Duration</th>
@@ -18,6 +25,7 @@
         <tbody>
             {% for el in res %}
                 <tr>
+                    <td></td>
                     <td>{{ el.domain }}</td>
                     <td>{{ el.view_func_name }}</td>
                     <td>{{ el.avg_duration | floatformat:2 }}</td>

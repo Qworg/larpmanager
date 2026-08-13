@@ -1,16 +1,18 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Tickets" %} - {{ run }}
+    {% trans "Tickets" %} - {{ run.search }}
 {% endblock title %}
-{% block info %}
-    {% trans "This page shows the different tickets with which participants can register for the event" %}
-{% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
-    <table id="registration_tickets" class="go_datatable writing ordering_arrow">
+    {% include "elements/table/header.html" %}
+    <table id="registration_tickets"
+           class="go_datatable writing row_reorder"
+           data-reorder-url="{% url 'orga_reorder_items' run.get_slug %}"
+           data-reorder-model="orga_registration_tickets">
         <thead>
             <tr>
+                <th></th>
+                <th class="reorder-handle"></th>
                 <th></th>
                 <th>{% trans "Name" %}</th>
                 {% if tiers|length > 1 %}
@@ -26,14 +28,20 @@
                 {% if features.gift %}
                     <th>{% trans "Gift" %}</th>
                 {% endif %}
+                {% if show_ticket_sold %}
+                    <th>{% trans "Show sold count" %}</th>
+                {% endif %}
                 <th>{% trans "Direct link" %}</th>
-                <th></th>
                 <th></th>
             </tr>
         </thead>
         <tbody>
             {% for el in list %}
                 <tr id="{{ el.uuid }}">
+                    <td></td>
+                    <td class="reorder-handle">
+                        <i class="fa-solid fa-grip-vertical"></i>
+                    </td>
                     <td>
                         <a href="{% url 'orga_registration_tickets_edit' run.get_slug el.uuid %}">
                             <i class="fas fa-edit"></i>
@@ -55,6 +63,11 @@
                             {% if el.giftable %}<i class="fa-solid fa-check"></i>{% endif %}
                         </td>
                     {% endif %}
+                    {% if show_ticket_sold %}
+                        <td>
+                            {% if el.show_sold %}<i class="fa-solid fa-check"></i>{% endif %}
+                        </td>
+                    {% endif %}
                     <td>
                         <a href="{% url 'register' run.get_slug el.uuid %}" target="_blank">{% trans "Signup link" %}</a>
                         <button class="copy-link-btn"
@@ -64,21 +77,18 @@
                         </button>
                     </td>
                     <td>
-                        {% if not forloop.first %}
-                            <a href="{% url 'orga_registration_tickets_order' run.get_slug el.uuid 0 %}">
-                                <i class="fa-solid fa-arrow-up"></i>
-                            </a>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if not forloop.last %}
-                            <a href="{% url 'orga_registration_tickets_order' run.get_slug el.uuid 1 %}">
-                                <i class="fa-solid fa-arrow-down"></i>
-                            </a>
-                        {% endif %}
+                        <a href="{% url 'orga_registration_tickets_delete' run.get_slug el.uuid %}"
+                           qtip="{% trans "Delete" %}"
+                           class="only_new_v18"><i class="fas fa-trash"></i></a>
                     </td>
                 </tr>
             {% endfor %}
         </tbody>
     </table>
+    {% if not list %}
+        <p class="no-elements-available">
+            {% trans "No tickets have been created for this event yet. Use the button above to add a ticket type that participants can choose when registering." %}
+        </p>
+    {% endif %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}

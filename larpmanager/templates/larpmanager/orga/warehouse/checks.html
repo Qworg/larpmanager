@@ -1,10 +1,10 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Warehouse assignments" %}  - {{ run }}
+    {% trans "Warehouse assignments" %}  - {{ run.search }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page displays cases where the same item has been assigned to multiple areas" %}
+    {% trans "Identify items assigned to more than one area to spot and resolve conflicts" %}
 {% endblock info %}
 {% block content %}
     {% for item_id, item in items.items %}
@@ -12,23 +12,24 @@
             <h2>{{ item }}</h2>
             {% if item.quantity %}
                 <p>
-                    <b>{% trans "Quantity" %}:</b> {{ item.quantity }}
+                    <b>{% trans "Quantity:" %}</b> {{ item.quantity }}
                 </p>
             {% endif %}
             {% if item.description %}
                 <p>
-                    <b>{% trans "Description" %}:</b> {{ item.description }}
+                    <b>{% trans "Description:" %}</b> {{ item.description }}
                 </p>
             {% endif %}
             {% if item.photo %}
                 <p>
-                    <b>{% trans "Photo" %}:</b>
+                    <b>{% trans "Photo:" %}</b>
                     <img src="{{ el.item.thumb.url }}" class="inv_photo" alt="item photo" />
                 </p>
             {% endif %}
             <table id="inv_item_{{ item_id }}" class="go_datatable dot_links">
                 <thead>
                     <tr>
+                        <th></th>
                         <th></th>
                         <th>{% trans "Area" %}</th>
                         {% if optionals.quantity %}
@@ -40,6 +41,7 @@
                 <tbody>
                     {% for el in item.assignment_list %}
                         <tr id="{{ el.uuid }}">
+                            <td></td>
                             <td></td>
                             <td>
                                 <a href="{% url 'orga_warehouse_area_edit' run.get_slug el.area.uuid %}">{{ el.area }}</a>
@@ -56,4 +58,7 @@
             </table>
         {% endif %}
     {% endfor %}
+    {% if not items.items %}
+        <p class="no-elements-available">{% trans "No item has conflicting area assignments." %}</p>
+    {% endif %}
 {% endblock content %}

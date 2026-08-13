@@ -2,7 +2,7 @@
 <div class="centerized">
     {% if form.errors %}
         <p class="payment-form-error">
-            {% trans "Warning. The form contains errors to the fields" %} -
+            {% trans "Warning: the form contains errors in the fields" %} -
             {% for field in form.visible_fields %}
                 {% if field.errors %}{{ field.label }} -{% endif %}
             {% endfor %}
@@ -10,20 +10,30 @@
     {% endif %}
     <form action="{{ request.path }}" method="post">
         {% csrf_token %}
-        {% if amount %}
-            <input type="hidden" name="amount" id="id_amount" value="{{ amount }}" />
-        {% else %}
-            <div class="form_amount">
-                {{ form.amount }}
-                <br />
-            </div>
+        {% if invoice_key %}
+            <input type="hidden"
+                   name="invoice_key"
+                   id="id_invoice_key"
+                   value="{{ invoice_key }}" />
         {% endif %}
-        {% if donate %}
-            <p>{% trans "Please enter the occasion for which you wish to make the donation" %}</p>
-            {{ form.descr }}
-            <br />
+        {% if amount %}<input type="hidden" name="amount" id="id_amount" value="{{ amount }}" />{% endif %}
+        {% if not amount or donate %}
+            <table id="payment_form_fields">
+                {% if not amount %}
+                    <tr>
+                        <th>{{ form.amount.label_tag }}</th>
+                        <td>{{ form.amount }}</td>
+                    </tr>
+                {% endif %}
+                {% if donate %}
+                    <tr>
+                        <th>{{ form.descr.label_tag }}</th>
+                        <td>{{ form.descr }}</td>
+                    </tr>
+                {% endif %}
+            </table>
         {% endif %}
-        <p>{% trans "Choose the payment method" %}:</p>
+        <p>{% trans "Choose the payment method:" %}</p>
         <table id="payment_form">
             {% for key, el in form.methods.items %}
                 <tr id="row_{{ el.slug }}"
@@ -41,7 +51,7 @@
                     {% if user_fees %}
                         <th>
                             {% if el.fee %}
-                                {% trans "Fee" %}: +{{ el.fee }}%
+                                {% trans "Fee:" %} +{{ el.fee }}%
                             {% endif %}
                         </th>
                     {% endif %}
@@ -49,7 +59,6 @@
                 </tr>
             {% endfor %}
         </table>
-        <br />
         <input type="submit" id="submit" value="{% trans "Submit" %}">
     </form>
 </div>

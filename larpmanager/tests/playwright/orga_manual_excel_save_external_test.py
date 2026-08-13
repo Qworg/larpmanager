@@ -23,159 +23,147 @@ Test: Manual editing, Excel-style editing, external access, and working tickets.
 Verifies character editing via modal and Excel-style interface, character finder,
 auto-save functionality, external access URLs, and concurrent editing warnings.
 """
-
+import re
 from typing import Any
 
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import (just_wait,
-    check_feature,
-    expect_normalized,
-    fill_tinymce,
-    go_to,
-    go_to_check,
-    login_orga,
-    logout,
-    submit_confirm,
-)
+from larpmanager.tests.utils import (check_feature,
+                                     expect_normalized,
+                                     fill_tinymce,
+                                     go_to,
+                                     go_to_check,
+                                     login_orga,
+                                     logout,
+                                     submit_confirm, submit_inline_edit, wait_for_inline_edit,
+                                     get_modal_iframe, save_modal, sidebar, _wait_select2_results, LONG_TIMEOUT,
+                                     )
 
 pytestmark = pytest.mark.e2e
 
 
 def test_manual_excel_save_external(pw_page: Any) -> None:
-    page, server, context = pw_page
+    page, live_server, context = pw_page
 
-    login_orga(page, server)
+    login_orga(page, live_server)
 
     # prepare
-    page.get_by_role("link", name="").click()
-    page.get_by_role("link", name=" Test Larp").click()
-    page.get_by_role("link", name="Features").first.click()
+    go_to(page, live_server, "/test/manage/")
+    sidebar(page, "Features")
     check_feature(page, "Characters")
     submit_confirm(page)
 
     # change name
-    page.get_by_role("cell", name="#1 Test Character").dblclick()
-    page.locator("#id_name").click()
-    page.locator("#id_name").press("End")
-    page.locator("#id_name").fill("Test Character2")
-    submit_confirm(page)
+    page.get_by_role("cell", name="Test Character").dblclick()
+    panel = wait_for_inline_edit(page)
+    panel.locator("#id_name").press("End")
+    panel.locator("#id_name").fill("Test Character2")
+    submit_inline_edit(page)
     expect_normalized(page, page.locator('[id="u1"]'), "Test Character2 Test Teaser Test Text")
 
     # change teaser
     page.locator('[id="u1"]').get_by_role("cell").filter(has_text="Test Teaser").dblclick()
-    page.locator('iframe[title="Rich Text Area"]').content_frame.locator("html").click()
-    page.locator('iframe[title="Rich Text Area"]').content_frame.get_by_text("Test Teaser").click()
-    page.locator('iframe[title="Rich Text Area"]').content_frame.get_by_label("Rich Text Area").fill("Test Teaser + 2")
-    page.locator('iframe[title="Rich Text Area"]').content_frame.get_by_label("Rich Text Area").press("ControlOrMeta+s")
-    submit_confirm(page)
+    panel = wait_for_inline_edit(page)
+    panel.locator("#id_teaser").fill("Test Teaser + 2")
+    submit_inline_edit(page)
     expect_normalized(page, page.locator('[id="u1"]'), "Test Character2 Test Teaser + 2 Test Text")
 
     # change text
     page.locator('[id="u1"]').get_by_role("cell").filter(has_text="Test Text").dblclick()
-    page.locator('iframe[title="Rich Text Area"]').content_frame.get_by_text("Test Text").click()
-    page.locator('iframe[title="Rich Text Area"]').content_frame.get_by_label("Rich Text Area").fill("Test Text ff")
-    submit_confirm(page)
+    panel = wait_for_inline_edit(page)
+    panel.locator("#id_text").fill("Test Text ff")
+    submit_inline_edit(page)
 
     # check by reload
-    page.get_by_role("link", name="Characters").click()
-    expect_normalized(page, page.locator("#one"), "#1 Test Character2 Test Teaser + 2 Test Text ff")
+    sidebar(page, "Characters")
+    expect_normalized(page, page.locator("#one"), "Test Character2 Test Teaser + 2 Test Text ff")
 
     # add new
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Another")
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Another")
 
     # test char finder
-    fill_tinymce(page, "id_teaser", "good friends with ")
-    just_wait(page)
-    frame_locator = page.frame_locator("iframe#id_teaser_ifr")
-    editor = frame_locator.locator("body#tinymce")
-
-    editor.evaluate("""
-    el => {
-        const range = document.createRange();
-        const sel = window.getSelection();
-        range.selectNodeContents(el);
-        range.collapse(false);
-        sel.removeAllRanges();
-        sel.addRange(range);
-    }
-    """)
-    just_wait(page)
+    fill_tinymce(edit_iframe, "id_teaser", "good friends with ")
+    editor = edit_iframe.locator("#id_teaser")
     editor.press(" ")
-    just_wait(page)
     editor.press("#")
-    page.get_by_role("searchbox").fill("tes")
-    page.locator(".select2-results__option").first.click()
-    just_wait(page)
+    edit_iframe.get_by_role("searchbox").fill("tes")
+    _wait_select2_results(edit_iframe)
+    edit_iframe.locator(".select2-results__option").first.click()
+    expect(editor).to_have_value(re.compile(r".*#\d+"))
+    save_modal(page, edit_iframe)
 
-    submit_confirm(page)
-    just_wait(page)
     expect_normalized(page,
         page.locator("#one"),
-        "#1 Test Character2 Test Teaser + 2 Test Text ff #2 Another good friends with #1",
+        "Test Character2 Test Teaser + 2 Test Text ff Another good friends with #1",
     )
 
-    excel(page, server)
+    excel(page, live_server)
 
-    external(page, server)
+    external(page, live_server)
 
-    working_ticket(page, server, context)
+    working_ticket(page, live_server, context)
 
-    working_ticket_event(page, server, context)
+    working_ticket_event(page, live_server, context)
 
 
 def excel(page: Any, live_server: Any) -> None:
     # test char finder on excel edit
     page.locator('[id="u1"]').get_by_role("cell").filter(has_text="Test Text ff").dblclick()
-    frame = page.locator('iframe[title="Rich Text Area"]').content_frame
-    frame.get_by_label("Rich Text Area").fill("Test Text ff kinda hate ")
-    frame.get_by_label("Rich Text Area").press("#")
+    panel = wait_for_inline_edit(page)
+    panel.locator("#id_text").fill("Test Text ff kinda hate ")
+    panel.locator("#id_text").press("#")
     page.get_by_role("searchbox").fill("an")
+    _wait_select2_results(page)
     page.locator(".select2-results__option").first.click()
-    just_wait(page)
-    submit_confirm(page)
+    expect(panel.locator("#id_text")).to_have_value(re.compile(r".*#\d+"))
+    submit_inline_edit(page)
 
     # check by reload
-    page.get_by_role("link", name="Characters").click()
+    sidebar(page, "Characters")
     expect_normalized(page,
         page.locator("#one"),
-        "#1 Test Character2 Test Teaser + 2 Test Text ff kinda hate #2 #2 Another good friends with #1",
+        "Test Character2 Test Teaser + 2 Test Text ff kinda hate #2 Another good friends with #1",
     )
 
     # test manual save
-    page.locator('[id="u2"]').get_by_role("link", name="").click()
-    fill_tinymce(page, "id_text", "ciaoooo")
-    frame_locator = page.frame_locator("iframe#id_text_ifr")
-    editor = frame_locator.locator("body#tinymce")
-    editor.press("ControlOrMeta+s")
-    just_wait(page)
+    page.locator('[id="u2"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    fill_tinymce(edit_iframe, "id_text", "ciaoooo")
+
+    with page.expect_response(
+        lambda r: r.request.method == "POST" and "ajax=1" in (r.request.post_data or "")
+    ) as save_response:
+        page.locator('body').press("ControlOrMeta+s")
+    assert save_response.value.ok
 
     # check by reload
-    page.get_by_role("link", name="Characters").click()
+    page.reload()
     expect_normalized(page,
         page.locator("#one"),
-        "#1 Test Character2 Test Teaser + 2 Test Text ff kinda hate #2 #2 Another good friends with #1 ciaoooo",
+        "Test Character2 Test Teaser + 2 Test Text ff kinda hate #2 Another good friends with #1 ciaoooo",
     )
 
     # check in page
-    page.locator('[id="u2"]').get_by_role("link", name="").click()
-    page.locator('a.my_toggle[tog="f_id_text"]').click()
-    expect_normalized(page, page.locator("#one"), "good friends with #1 ciaoooo")
-
+    page.locator('[id="u2"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator('a.my_toggle[tog="f_id_text"]').click()
+    expect_normalized(edit_iframe, edit_iframe.locator("#one"), "<p>good friends with </p> #1 <p>ciaoooo</p> ")
+    save_modal(page, edit_iframe)
 
 def external(page: Any, live_server: Any) -> None:
     # enable external access
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Writing ").click()
+    page.get_by_role("link", name=re.compile(r"^Characters")).click()
     page.locator("#id_writing_external_access").check()
     submit_confirm(page)
 
     # get url
-    page.get_by_role("link", name="Characters").click()
-    url = page.locator('[id="u2"]').get_by_role("link", name="").get_attribute("href")
+    sidebar(page, "Characters")
+    url = page.locator('[id="u2"]').locator(".fa-key").locator('..').get_attribute("href")
 
     # logout, then go to the page
     logout(page)
@@ -190,14 +178,14 @@ def working_ticket(page: Any, server: Any, context: Any) -> None:
     login_orga(page, server)
 
     go_to(page, server, "/test/manage")
-    page.get_by_role("link", name="Characters").click()
-    page.locator('[id="u1"]').get_by_role("link", name="").click(button="right")
+    sidebar(page, "Characters")
+    page.locator('[id="u1"]').locator(".fa-edit").click(button="right")
     page1 = context.new_page()
-    page1.goto(server + "/test/manage/characters/edit/u1/")
-    page.locator('[id="u1"]').get_by_role("link", name="").click()
-    just_wait(page)
-    expect_normalized(page,
-        page.locator("#test-larp"),
+    page1.goto(server + "/test/manage/characters/u1/edit/")
+    page.locator('[id="u1"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    expect_normalized(edit_iframe,
+        edit_iframe.locator("#test-orga"),
         "Warning! Other users are editing this item. You cannot work on it at the same time: the work of one of you would be lost.",
     )
 
@@ -208,8 +196,11 @@ def working_ticket_event(page: Any, server: Any, context: Any) -> None:
     go_to(page, server, "/test/manage/config")
     page1 = context.new_page()
     page1.goto(server + "/test/manage/config")
-    just_wait(page)
+    page.wait_for_function(
+        "() => document.body.innerText.toLowerCase().includes('warning! other users are editing')",
+        timeout=LONG_TIMEOUT,
+    )
     expect_normalized(page,
-        page.locator("#test-larp"),
+        page.locator("#test-orga"),
         "Warning! Other users are editing this item. You cannot work on it at the same time: the work of one of you would be lost.",
     )

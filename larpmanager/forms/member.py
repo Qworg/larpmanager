@@ -43,7 +43,7 @@ from django_recaptcha.widgets import ReCaptchaV3
 from django_registration.forms import RegistrationFormUniqueEmail
 
 from larpmanager.cache.config import get_association_config
-from larpmanager.forms.base import BaseAccForm, BaseForm, BaseModelForm
+from larpmanager.forms.base import BaseAccForm, BaseForm, BaseModelForm, FormMixin
 from larpmanager.forms.utils import (
     AssociationMemberS2Widget,
     AssociationMemberS2WidgetMulti,
@@ -52,7 +52,6 @@ from larpmanager.forms.utils import (
 )
 from larpmanager.models.accounting import AccountingItemMembership
 from larpmanager.models.association import Association, MemberFieldType
-from larpmanager.models.base import BaseModel, FeatureNationality
 from larpmanager.models.member import (
     Badge,
     Member,
@@ -69,6 +68,8 @@ from larpmanager.utils.larpmanager.tasks import my_send_mail
 if TYPE_CHECKING:
     from collections.abc import Generator
     from datetime import date
+
+    from larpmanager.models.base import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ class MyAuthForm(AuthenticationForm):
         self.fields["password"].label = False
 
 
-class MyRegistrationFormUniqueEmail(RegistrationFormUniqueEmail):
+class MyRegistrationFormUniqueEmail(FormMixin, RegistrationFormUniqueEmail):
     """Custom registration form with unique email validation and GDPR compliance."""
 
     # noinspection PyUnresolvedReferences, PyProtectedMember
@@ -133,7 +134,9 @@ class MyRegistrationFormUniqueEmail(RegistrationFormUniqueEmail):
         # Extract request object and initialize parent form
         self.request = kwargs.pop("request", None)
         super(RegistrationFormUniqueEmail, self).__init__(*args, **kwargs)
-        self.fields["username"].widget = forms.HiddenInput()
+
+        # Remove username field - value will be generated from email in clean_username()
+        del self.fields["username"]
 
         # Configure language selection field
         self.fields["lang"] = forms.ChoiceField(
@@ -196,37 +199,36 @@ class MyRegistrationFormUniqueEmail(RegistrationFormUniqueEmail):
         new_order = ["lang"] + [key for key in self.fields if key != "lang"]
         self.fields = OrderedDict((key, self.fields[key]) for key in new_order)
 
-    def clean_username(self) -> str:
-        """Validate username field and check for duplicate email addresses."""
-        # Extract and normalize username input
-        data = self.cleaned_data["username"].strip()
-        logger.debug("Validating username/email: %s", data)
+    def clean_email(self) -> str:
+        """Validate that the email is not already used as a username."""
+        email = self.cleaned_data.get("email")
+        if not email:
+            return email
 
-        # Prevent duplicate email registrations
-        if User.objects.filter(email__iexact=data).exists():
-            msg = "Email already used! It seems you already have an account!"
-            raise ValidationError(msg)
-        return data
+        # Check if username already exists
+        if User.objects.filter(username__iexact=email).exists():
+            raise ValidationError(
+                _("A user with this email address already exists. Please use a different email or try logging in."),
+            )
 
-    def save(self, commit: bool = True) -> User:  # noqa: FBT001, FBT002, ARG002
-        """Save user and update associated member profile with form data.
+        return email
 
-        Args:
-            commit: Whether to save to database. Defaults to True.
-
-        Returns:
-            Created user instance with updated member profile.
-
-        """
+    def save(self, commit: bool = True) -> User:  # noqa: FBT001, FBT002
+        """Save user and update associated member profile with form data."""
         # Create user instance from parent form
-        user = super(RegistrationFormUniqueEmail, self).save()
+        user = super(RegistrationFormUniqueEmail, self).save(commit=False)
 
-        # Update member profile with form data
-        user.member.newsletter = self.cleaned_data["newsletter"]
-        user.member.language = self.cleaned_data["lang"]
-        user.member.name = self.cleaned_data["name"]
-        user.member.surname = self.cleaned_data["surname"]
-        user.member.save()
+        # Force username = email
+        user.username = user.email
+
+        if commit:
+            user.save()
+
+            user.member.newsletter = self.cleaned_data["newsletter"]
+            user.member.language = self.cleaned_data["lang"]
+            user.member.name = self.cleaned_data["name"]
+            user.member.surname = self.cleaned_data["surname"]
+            user.member.save()
 
         return user
 
@@ -245,13 +247,7 @@ class MyPasswordResetForm(PasswordResetForm):
     """Custom password reset form with association-specific handling."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize form with email field constraints.
-
-        Args:
-            *args: Variable length argument list
-            **kwargs: Arbitrary keyword arguments
-
-        """
+        """Initialize form with email field constraints."""
         super().__init__(*args, **kwargs)
         self.fields["email"].widget.attrs["maxlength"] = 70
 
@@ -320,7 +316,7 @@ class MyPasswordResetForm(PasswordResetForm):
 class AvatarForm(BaseForm):
     """Form for uploading user avatar images."""
 
-    image = forms.ImageField(label="Select an image")
+    image = forms.ImageField(label="Select an image", required=False)
 
 
 class LanguageForm(BaseForm):
@@ -328,7 +324,7 @@ class LanguageForm(BaseForm):
 
     language = forms.ChoiceField(
         choices=conf_settings.LANGUAGES,
-        label=_("Select Language"),
+        label=_("Select a language"),
         widget=forms.Select(attrs={"class": "form-control"}),
     )
 
@@ -400,7 +396,7 @@ class ResidenceWidget(forms.MultiWidget):
 def validate_no_pipe(value: str) -> None:
     """Validate that the value does not contain pipe characters."""
     if "|" in value:
-        raise forms.ValidationError(_("Character not allowed") + ": |")
+        raise forms.ValidationError(_("Value not allowed:") + " |")
 
 
 class ResidenceField(forms.MultiValueField):
@@ -475,10 +471,10 @@ class BaseProfileForm(BaseModelForm):
         super().__init__(*args, **kwargs)
 
         # Cache frequently accessed request data
-        self.allowed = self.params["members_fields"]
+        self.allowed = self.params.get("members_fields")
 
         # Use cached association data
-        association = Association.objects.get(pk=self.params["association_id"])
+        association = Association.objects.get(pk=self.params.get("association_id"))
 
         # Pre-split and cache field sets
         self.mandatory = set(association.mandatory_fields.split(","))
@@ -530,6 +526,7 @@ class ProfileForm(BaseProfileForm):
             "first_aid",
             "diet",
             "safety",
+            "accessibility",
             "newsletter",
             "presentation",
             "birth_date",
@@ -546,6 +543,7 @@ class ProfileForm(BaseProfileForm):
         widgets: ClassVar[dict] = {
             "diet": Textarea(attrs={"rows": 5}),
             "safety": Textarea(attrs={"rows": 5}),
+            "accessibility": Textarea(attrs={"rows": 5}),
             "presentation": Textarea(attrs={"rows": 5}),
             "birth_date": DatePickerInput,
             "document_issued": DatePickerInput,
@@ -589,7 +587,7 @@ class ProfileForm(BaseProfileForm):
         # Handle presentation field for voting candidates
         if "presentation" in self.fields:
             vote_cands = get_association_config(
-                self.params["association_id"], "vote_candidates", default_value="", context=self.params
+                self.params.get("association_id"), "vote_candidates", context=self.params
             ).split(",")
             if not self.instance.pk or str(self.instance.pk) not in vote_cands:
                 self.delete_field("presentation")
@@ -607,7 +605,7 @@ class ProfileForm(BaseProfileForm):
         # Membership checking
         share = False
         if self.instance.pk:
-            membership = self.params["membership"]
+            membership = self.params.get("membership")
             share = membership.compiled
 
         # Add consent field only if needed
@@ -621,6 +619,26 @@ class ProfileForm(BaseProfileForm):
                 + "?",
             )
 
+    def clean_phone_contact(self) -> Any:
+        """Validate phone uniqueness with a helpful recovery message."""
+        data = self.cleaned_data.get("phone_contact")
+        if not data:
+            return data
+
+        duplicates = Member.objects.filter(phone_contact=data)
+        if self.instance.pk:
+            duplicates = duplicates.exclude(pk=self.instance.pk)
+        if duplicates.exists():
+            raise ValidationError(
+                _(
+                    "Looks like an account already exists with this phone number! "
+                    "You can recover your account from the login page, "
+                    "or contact support if you need assistance."
+                )
+            )
+
+        return data
+
     def clean_birth_date(self) -> date:
         """Optimized birth date validation with cached association data."""
         data = self.cleaned_data["birth_date"]
@@ -633,7 +651,7 @@ class ProfileForm(BaseProfileForm):
         features = self.params["features"]
 
         if "membership" in features:
-            min_age = get_association_config(association_id, "membership_age", default_value="", context=self.params)
+            min_age = get_association_config(association_id, "membership_age", context=self.params)
             if min_age:
                 try:
                     min_age = int(min_age)
@@ -652,7 +670,7 @@ class ProfileForm(BaseProfileForm):
 
         # Check if profile photo is both allowed and mandatory, then validate presence
         if "profile" in self.allowed and "profile" in self.mandatory and not self.instance.profile:
-            self.add_error(None, _("Please upload your profile photo") + "!")
+            self.add_error(None, _("Please upload your profile photo!"))
 
         return cleaned_data
 
@@ -678,13 +696,13 @@ class MembershipRequestForm(forms.ModelForm):
 
     request = forms.FileField(
         label=_("Request signed"),
-        help_text=_("Upload the scan of your signed application (image or pdf document)"),
+        help_text=_("Upload a scan of your signed application (image or PDF document)."),
         validators=[FileTypeValidator(allowed_types=["image/*", "application/pdf"])],
     )
 
     document = forms.FileField(
         label=_("Photo of an ID"),
-        help_text=_("Upload a photo of the identity document that you listed in the request (image or pdf)"),
+        help_text=_("Upload a photo of the identity document listed in the request (image or PDF)."),
         validators=[FileTypeValidator(allowed_types=["image/*", "application/pdf"])],
     )
 
@@ -714,9 +732,11 @@ class MembershipResponseForm(BaseForm):
 class ExeVolunteerRegistryForm(BaseModelForm):
     """Form for ExeVolunteerRegistry."""
 
-    page_title = _("Volounteer data")
+    page_title = _("Volunteer data")
 
-    page_info = _("Manage volunteer entries")
+    page_info = _(
+        "Manage the volunteer registry: view, add, and edit volunteer records, and print an official PDF copy"
+    )
 
     class Meta:
         model = VolunteerRegistry
@@ -755,11 +775,12 @@ class MembershipForm(BaseAccForm):
 class ExeMemberForm(BaseProfileForm):
     """Form for ExeMember."""
 
-    page_info = _("Manage member profiles")
+    page_info = _("View and edit member profiles, documents, registrations, and payment history.")
 
     class Meta:
         model = Member
-        fields = "__all__"
+        # Exclude the linking FKs from this admin form
+        exclude = ("user", "parent")
         widgets: ClassVar[dict] = {
             "birth_date": DatePickerInput,
         }
@@ -774,7 +795,9 @@ class ExeMemberForm(BaseProfileForm):
 class ExeMembershipForm(BaseModelForm):
     """Form for ExeMembership."""
 
-    page_info = _("Manage member membership status")
+    page_info = _(
+        "Manage association memberships: review applicants, approve or reject requests, and track renewal status for the current year"
+    )
 
     load_templates: ClassVar[list] = ["membership"]
 
@@ -793,20 +816,20 @@ class ExeMembershipForm(BaseModelForm):
 class ExeMembershipFeeForm(BaseForm):
     """Form for ExeMembershipFee."""
 
-    page_info = _("Manage membership fee invoice upload")
+    page_info = _("Upload a membership-fee receipt to confirm payment for the current year.")
 
     page_title = _("Upload membership fee")
 
     member = forms.ModelChoiceField(
         label=_("Member"),
         queryset=Member.objects.none(),
-        required=False,
+        required=True,
         widget=AssociationMemberS2Widget,
     )
 
     invoice = forms.FileField(
         validators=[FileTypeValidator(allowed_types=["image/*", "application/pdf"])],
-        label=_("Invoice"),
+        label=_("Receipt"),
     )
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -838,11 +861,14 @@ class ExeMembershipFeeForm(BaseForm):
     def clean_member(self) -> Member:
         """Validate that the member doesn't already have a membership fee for the current year."""
         member = self.cleaned_data["member"]
+        if not member:
+            return member
         year = timezone.now().year
+        association_id = self.params.get("association_id")
 
-        # Check if membership fee already exists for this year
-        if AccountingItemMembership.objects.filter(member=member, year=year).exists():
-            self.add_error("member", _("Membership fee already existing for this user and for this year"))
+        # Check if membership fee already exists for this association and year
+        if AccountingItemMembership.objects.filter(member=member, year=year, association_id=association_id).exists():
+            self.add_error("member", _("Membership fee already existing for this user and for this year."))
 
         return member
 
@@ -851,9 +877,9 @@ class ExeMembershipDocumentForm(BaseForm):
     """Form for ExeMembershipDocument."""
 
     page_info = (
-        _("Manage membership document upload")
+        _("Upload membership documents to complete a member's approval")
         + " - "
-        + _("Please note that the user must have confirmed their consent to share their data with your organization")
+        + _("The member must have already confirmed their consent to share personal data with your organization.")
     )
 
     page_title = _("Upload membership document")
@@ -935,7 +961,9 @@ class ExeMembershipDocumentForm(BaseForm):
 class ExeBadgeForm(BaseModelForm):
     """Form for ExeBadge."""
 
-    page_info = _("Manage badges and user assignments")
+    page_info = _(
+        "Manage association badges: view, create, edit, and track how many members each badge has been assigned to"
+    )
 
     page_title = _("Badge")
 
@@ -958,7 +986,9 @@ class ExeProfileForm(BaseModelForm):
 
     page_title = _("Profile")
 
-    page_info = _("Manage profile fields that participants can fill in")
+    page_info = _(
+        "Configure which personal data fields are collected during registration, setting each field as mandatory, optional, or absent"
+    )
 
     class Meta:
         model = Association
@@ -981,6 +1011,9 @@ class ExeProfileForm(BaseModelForm):
         # MEMBERS INFO
         fields = self.get_members_fields()
         for slug, name, help_text in fields:
+            if slug == "uuid":
+                continue
+
             if slug in mandatory:
                 init = MemberFieldType.MANDATORY
             elif slug in optional:
@@ -997,7 +1030,7 @@ class ExeProfileForm(BaseModelForm):
 
             self.initial[slug] = init
 
-        if self.instance.nationality != FeatureNationality.ITALY:
+        if self.instance.nationality != "it":
             self.delete_field("fiscal_code")
 
     @staticmethod
@@ -1028,7 +1061,7 @@ class ExeProfileForm(BaseModelForm):
             "language",
             "newsletter",
             "parent",
-            "legal_gender",
+            "media_token",
         ]
 
         available_fields: list[tuple[str, str, str]] = []
@@ -1080,3 +1113,27 @@ class ExeProfileForm(BaseModelForm):
         instance.save()
 
         return instance
+
+
+class OTPVerifyForm(forms.Form):
+    """Single-field form for OTP verification on the login second step."""
+
+    token = forms.CharField(
+        max_length=6,
+        widget=forms.TextInput(
+            attrs={"class": "form-control", "placeholder": "000000", "autocomplete": "one-time-code"},
+        ),
+        label=False,
+    )
+
+
+class OTPConfirmForm(forms.Form):
+    """Single-field form for confirming a new TOTP device during profile setup."""
+
+    token = forms.CharField(
+        max_length=6,
+        widget=forms.TextInput(
+            attrs={"class": "form-control", "placeholder": "000000", "autocomplete": "one-time-code"},
+        ),
+        label=_("6-digit code from your authenticator app"),
+    )

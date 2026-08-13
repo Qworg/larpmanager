@@ -60,12 +60,6 @@ var avoids = window['avoids'];
 // CSRF token for POST requests
 var csrf_token = window['csrf_token'];
 
-// Current tier/ticket ID being processed
-var tick = window['tick'];
-
-// Type of casting being performed
-var tipo = window['typ'];
-
 // URL endpoint for toggling character assignments
 var toggle_url = window['toggle_url'];
 
@@ -90,12 +84,28 @@ var disappoint = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512];
 // CSS selector for the main grid table
 var grid = '#main_grid';
 
+// DataTable instance (initialized after load_grid)
+var dtTable = null;
+
 /**
  * Debug helper function - displays data as JSON alert
  * @param {*} data - Any data to display for debugging
  */
 function debug(data) {
-    alert(JSON.stringify(data));
+    if (!window.lmTesting) alert(JSON.stringify(data));
+}
+
+/**
+ * Escapes HTML special characters in user-provided data (player names,
+ * emails, character names) before it is concatenated into HTML strings
+ * passed to jQuery .append(), which parses them as HTML.
+ * @param {*} s - Value to escape
+ * @returns {string} HTML-safe string
+ */
+function esc_html(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+        return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+    });
 }
 
 /**
@@ -128,7 +138,7 @@ function load_grid() {
     if (not_chosen.length > 0) {
         $('#not_chosen').append(trads['ne']);
         for (var ix = 0; ix < not_chosen.length; ix++) {
-            $('#not_chosen').append(' / ' + choices[not_chosen[ix]]);
+            $('#not_chosen').append(' / ' + esc_html(choices[not_chosen[ix]]));
         }
     }
 
@@ -136,12 +146,12 @@ function load_grid() {
     if (didnt_choose.length > 0) {
         $('#didnt_choose').append(trads['ge']);
         for (var ix = 0; ix < didnt_choose.length; ix++) {
-            $('#didnt_choose').append(' - ' + players[didnt_choose[ix]]['name']);
+            $('#didnt_choose').append(' - ' + esc_html(players[didnt_choose[ix]]['name']));
         }
         $('#didnt_choose').append(' - ' + trads['le'] + ': ');
         for (var ix = 0; ix < didnt_choose.length; ix++) {
             if (ix > 0) $('#didnt_choose').append(', ');
-            $('#didnt_choose').append(players[didnt_choose[ix]]['email']);
+            $('#didnt_choose').append(esc_html(players[didnt_choose[ix]]['email']));
         }
     }
 
@@ -182,8 +192,13 @@ function load_grid() {
     for (var ix = 0; ix < num_pref; ix++) {
         aux += '<th>Pref {0}</th>'.format(ix+1);
     }
+    if (reg_priority)
+        aux += '<th>{0}</th>'.format('Reg days');
+    if (pay_priority)
+        aux += '<th>{0}</th>'.format('Pay days');
+
     aux += '</tr>'
-    $(grid).append(aux);
+    $(grid + ' thead').append(aux);
 
     // Sort the taken characters list for easier lookup
     taken.sort();
@@ -197,9 +212,9 @@ function load_grid() {
         if (key in avoids) av = avoids[key];
 
         // Start building row: checkbox, player name, priority
-        aux = '<tr class="p_{1}"><td class="include"><input type=checkbox></td><td>{0}</td><td>{2}</td>'.format(players[key]['name'], key, players[key]['prior']);
+        aux = '<tr class="p_{1}"><td class="include"><input type=checkbox></td><td>{0}</td><td>{2}</td>'.format(esc_html(players[key]['name']), key, players[key]['prior']);
         if (casting_avoid)
-            aux += '<td>{0}</td>'.format(av)  // Add avoid column if enabled
+            aux += '<td>{0}</td>'.format(esc_html(av))  // Add avoid column if enabled
 
         // Build cells for each character preference
         for (var ix = 0; ix < Math.min(num_pref, preferences[key].length); ix++) {
@@ -226,30 +241,37 @@ function load_grid() {
                 // Available choice - show toggle button and character name
                 tgl = '<a class="dis change" pid="{0}" oid="{1}">YES</a>'.format(key, k);
                 var nm_choice = 'EMPTY';
-                if (k != '') nm_choice = choices[k];
+                if (k != '') nm_choice = esc_html(choices[k]);
                 aux += '</select><br /><span class="c_{0}">{1}</span> - {2}</td>'.format(k, nm_choice, tgl);
             }
         }
+
+        if (reg_priority)
+            aux += '<td>{0}</td>'.format(players[key]['reg_days']);
+
+        if (pay_priority)
+            aux += '<td>{0}</td>'.format(players[key]['pay_days']);
+
         aux += '</tr>';
-        $(grid).append(aux);
+        $(grid + ' tbody').append(aux);
 
         // Initialize preference ordering for this player
         select_option(key);
     }
 
-    // Attach click handlers to YES/NO toggle buttons
-    // When clicked, toggles between including/excluding a character choice
-    $('.change').click(function() {
-        $( this ).toggleClass('NO');
-        if ($( this ).hasClass('NO')) $( this ).text('NO'); else $( this ).text('YES');
+    // Attach click handlers to YES/NO toggle buttons via delegation
+    // (delegation is required so handlers survive DataTable redraws)
+    $(grid).on('click', '.change', function() {
+        $(this).toggleClass('NO');
+        if ($(this).hasClass('NO')) $(this).text('NO'); else $(this).text('YES');
 
         // Recalculate preference ordering for this player
-        pid = $( this ).attr('pid');
+        var pid = $(this).attr('pid');
         select_option(pid);
 
         // Send toggle to server
-        oid = $( this ).attr('oid');
-        data = {'pid': pid, 'oid': oid, csrfmiddlewaretoken: csrf_token };
+        var oid = $(this).attr('oid');
+        var data = {'pid': pid, 'oid': oid, csrfmiddlewaretoken: csrf_token};
         $.post(toggle_url, data);
     });
 
@@ -267,8 +289,24 @@ function load_grid() {
         select_option(pid);
     }
 
-    // Initialize tablesorter plugin for sortable columns
-    $('.tablesorter').tablesorter();
+    // Initialize DataTable (search + sort, no pagination)
+    dtTable = new DataTable(grid, {
+        paging: false,
+        searching: true,
+        scrollX: true,
+        stateSave: false,
+        columnControl: ['order', 'searchDropdown'],
+        order: [],
+        layout: {
+            topStart: 'search',
+            topEnd: null,
+            bottomStart: null,
+            bottomEnd: null,
+        },
+        columnDefs: [
+            { orderable: false, targets: 0 },  // checkbox column not sortable
+        ],
+    });
 }
 
 /**
@@ -438,9 +476,9 @@ function exec_assigner() {
 
                 // Build assignment string (handle mirrored characters)
                 if (mirrors[ch] !== undefined) {
-                    ass[mirrors[ch]] = '{2} - {0} [-> {1}]'.format(players[key]['name'], choices[ch], choices[mirrors[ch]]);
+                    ass[mirrors[ch]] = '{2} - {0} [-> {1}]'.format(esc_html(players[key]['name']), esc_html(choices[ch]), esc_html(choices[mirrors[ch]]));
                 } else {
-                    ass[ch] = '{1} - {0}'.format(players[key]['name'], choices[ch]);
+                    ass[ch] = '{1} - {0}'.format(esc_html(players[key]['name']), esc_html(choices[ch]));
                 }
 
             }
@@ -474,8 +512,8 @@ function exec_assigner() {
         // Show submit button
         $('#load').show();
 
-        // Re-initialize tablesorter
-        $('.tablesorter').tablesorter();
+        // Notify DataTable that cell content has changed
+        if (dtTable) dtTable.rows().invalidate().draw(false);
 
         // Check if solution is feasible (all constraints satisfied)
         if (!results['feasible']) {
@@ -519,23 +557,6 @@ $(function() {
         }
         return false;
     });
-
-    // Tier/ticket dropdown - reload page with selected tier
-    $('#fascia').change(function() {
-        url = window['orga_casting_url'];
-        url += this.value;
-        window.location = url;
-    });
-    $('#fascia').val(tick);
-
-    // Type dropdown - reload page with selected type
-    $('#tipo').change(function() {
-        url = document.URL;
-        url = url.replace(/&t=[0-9]/i, '');
-        url += '&t=' + this.value;
-        window.location = url;
-    });
-    $('#tipo').val(tipo);
 
     // Set form action to current URL (preserves query parameters)
     $('#load form').attr('action', document.URL);

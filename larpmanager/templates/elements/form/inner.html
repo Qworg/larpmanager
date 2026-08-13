@@ -7,46 +7,57 @@
         {% if section != old_section %}
         </table>
     </div>
-    <h1>
-        <a href="#"
-           class="my_toggle section-link"
-           tog='sec_{{ section | slugify }}'>
-            {{ section | template_trans }}
-            <i class="fa-solid fa-chevron-down"></i>
-        </a>
-    </h1>
-    <div class="{% if not form.show_sections %}hide{% endif %} sec_{{ section | slugify }}">
+    {% if not form.hide_section_headers %}
+        <h1>
+            <a href="#"
+               class="my_toggle section-link"
+               tog='sec_{{ section | slugify }}'>
+                {{ section | template_trans }}
+                <i class="fa-solid fa-chevron-down"></i>
+            </a>
+        </h1>
+    {% endif %}
+    <div class="form_container auto_resize {% if not form.show_sections %}hide{% endif %} sec_{{ section | slugify }}">
         {% if section in form.section_descriptions %}
             {% get_field form.section_descriptions section as description %}
             {{ description | safe }}
         {% endif %}
-        <table class="mob">
+        <table>
             {% define section as old_section %}
         {% endif %}
     {% endif %}
     <tr id="{{ field.auto_id }}_tr"
-        {% if field.field.custom_class %}class="{{ field.field.custom_class }}"{% endif %}>
+        {% if field.field.custom_class %}class="{{ field.field.custom_class }}"{% endif %}
+        {% if field.field.custom_style %}style="{{ field.field.custom_style }}"{% endif %}>
         <th>
+            {% if form.plot_reorder_uuids and field.auto_id in form.plot_reorder_uuids %}
+                {% get_field form.plot_reorder_uuids field.auto_id as plot_uuid %}
+                <span class="plot-drag-handle"
+                      data-plot-uuid="{{ plot_uuid }}"
+                      draggable="true"
+                      title="{% trans 'Drag to reorder' %}"><i class="fa-solid fa-grip-vertical"></i></span>
+            {% endif %}
             {% if form.field_link and field.auto_id in form.field_link %}
                 {% get_field form.field_link field.auto_id as link %}
                 <a href="{{ link }}">{% include "elements/form/label.html" %}</a>
             {% else %}
                 {% include "elements/form/label.html" %}
             {% endif %}
-            {% if form.ordering_up and field.auto_id in form.ordering_up %}
-                {% get_field form.ordering_up field.auto_id as link %}
-                <a href="{{ link }}" class="trigger_save"> <i class="fa-solid fa-arrow-up"></i></a>
-            {% endif %}
-            {% if form.ordering_down and field.auto_id in form.ordering_down %}
-                {% get_field form.ordering_down field.auto_id as link %}
-                <a href="{{ link }}" class="trigger_save"> <i class="fa-solid fa-arrow-down"></i></a>
+            {% if not form.plot_reorder_uuids or field.auto_id not in form.plot_reorder_uuids %}
+                {% if form.ordering_up and field.auto_id in form.ordering_up %}
+                    {% get_field form.ordering_up field.auto_id as link %}
+                    <a href="{{ link }}" class="trigger_save"> <i class="fa-solid fa-arrow-up"></i></a>
+                {% endif %}
+                {% if form.ordering_down and field.auto_id in form.ordering_down %}
+                    {% get_field form.ordering_down field.auto_id as link %}
+                    <a href="{{ link }}" class="trigger_save"> <i class="fa-solid fa-arrow-down"></i></a>
+                {% endif %}
             {% endif %}
             {% if form.translate and field.auto_id in form.translate %}
                 <br />
                 <br />
                 <a onclick="return translate('{{ field.auto_id }}');">{% trans "Translate" %}</a>
             {% endif %}
-            {{ field.custom_class }}
         </th>
         <td>
             {% if field.errors %}{{ field.errors }}{% endif %}
@@ -62,28 +73,32 @@
                 {% endautoescape %}
             {% endif %}
             {% if form.show_link and field.auto_id in form.show_link %}
+                <div class="hide  f_{{ field.auto_id }}">{{ field }}</div>
                 <p>
-                    <a href="#" class="my_toggle" tog="f_{{ field.auto_id }}">{% trans "Show" %}</a>
+                    <a href="#"
+                       class="my_toggle"
+                       tog="f_{{ field.auto_id }}"
+                       onclick="var s=this.querySelector('.sl-show');var h=this.querySelector('.sl-hide');s.classList.toggle('hide');h.classList.toggle('hide');">
+                        <span class="sl-show"><i class="fa-regular fa-eye"></i> {% trans "Show" %}</span>
+                        <span class="sl-hide hide"><i class="fa-regular fa-eye-slash"></i> {% trans "Hide" %}</span>
+                    </a>
                 </p>
-                <div class="hide hide_later f_{{ field.auto_id }}">{{ field }}</div>
             {% else %}
                 {{ field }}
             {% endif %}
             {% if field.help_text %}
                 <br>
-                <div class="helptext {% if feield.field.widget.input_type == 'checkbox' %}helptext-checkbox{% endif %}">
-                    {{ field.help_text | safe }}
-                </div>
+                <div class="helptext">{{ field.help_text | safe }}</div>
             {% endif %}
             {% if field.auto_id in form.max_lengths %}
                 {% get_field form.max_lengths field.auto_id as args %}
                 {% if args.1 == "m" %}
                     <div class="helptext">
-                        {% trans "options" %}: <span class="count"></span> / {{ args.0 }}
+                        {% blocktrans with max=args.0 %}options: <span class="count"></span> / {{ max }}{% endblocktrans %}
                     </div>
                 {% else %}
                     <div class="helptext">
-                        {% trans "text length" %}: <span class="count"></span> / {{ args.0 }}
+                        {% blocktrans with max=args.0 %}text length: <span class="count"></span> / {{ max }}{% endblocktrans %}
                     </div>
                 {% endif %}
             {% endif %}

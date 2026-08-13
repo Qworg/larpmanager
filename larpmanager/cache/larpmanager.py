@@ -30,11 +30,28 @@ from django.db.models import Count
 from larpmanager.models.accounting import PaymentInvoice
 from larpmanager.models.association import Association
 from larpmanager.models.event import Event, Run
-from larpmanager.models.larpmanager import LarpManagerHighlight, LarpManagerReview, LarpManagerShowcase
+from larpmanager.models.larpmanager import (
+    LarpManagerCollaborator,
+    LarpManagerHighlight,
+    LarpManagerPartner,
+    LarpManagerReview,
+    LarpManagerScreenshot,
+    LarpManagerShowcase,
+    LarpManagerText,
+)
 from larpmanager.models.member import Member
 from larpmanager.models.registration import Registration
 from larpmanager.models.writing import Character
 from larpmanager.utils.core.common import round_to_two_significant_digits
+
+# Path from each counted model to its Association, used to exclude demo organizations
+NON_DEMO_PATHS = {
+    Event: "association",
+    Character: "event__association",
+    Registration: "run__event__association",
+    Member: "memberships__association",
+    PaymentInvoice: "association",
+}
 
 
 def clear_larpmanager_home_cache() -> None:
@@ -84,31 +101,45 @@ def update_cache_lm_home() -> dict[str, int | list]:
     """
     context = {}
 
-    # Count objects for main models and round to two significant digits
-    for model_class in [Event, Character, Registration, Member, PaymentInvoice]:
+    # Count objects for main models, excluding demo organizations, rounded to two significant digits
+    for model_class, assoc_path in NON_DEMO_PATHS.items():
         model_name = str(model_class.__name__).lower()
-        model_count = model_class.objects.count()
+        model_count = model_class.objects.filter(**{f"{assoc_path}__demo_type__isnull": True}).distinct().count()
         context[f"cnt_{model_name}"] = int(round_to_two_significant_digits(model_count))
 
     # Count runs that have more than 5 registrations
-    runs_query = Run.objects.annotate(num_registration=Count("registrations")).filter(num_registration__gt=5)
+    runs_query = (
+        Run.objects.filter(event__association__demo_type__isnull=True)
+        .annotate(num_registration=Count("registrations"))
+        .filter(num_registration__gt=5)
+    )
     context["cnt_run"] = int(round_to_two_significant_digits(runs_query.count()))
 
     # Gather additional display data
-    context["promoters"] = _get_promoters()
+    # context["promoters"] = _get_promoters() # noqa: ERA001
     context["showcase"] = _get_showcases()
     context["reviews"] = _get_reviews()
+    context["partners"] = _get_partners()
+    context["highlights"] = _get_highlights()
+    context["screenshots"] = _get_screenshots()
 
     return context
 
 
+def _get_highlights() -> list[dict]:
+    """Get all LarpManager highlights as dictionaries, in random order."""
+    highlights = list(LarpManagerHighlight.objects.all())
+    random.shuffle(highlights)
+    return [highlight.as_dict() for highlight in highlights]
+
+
+def _get_screenshots() -> list[dict]:
+    """Get all LarpManager screenshots as dictionaries, in display order."""
+    return [screenshot.as_dict() for screenshot in LarpManagerScreenshot.objects.order_by("order")]
+
+
 def _get_reviews() -> list[dict]:
-    """Get all LARP manager reviews as dictionaries.
-
-    Returns:
-        List of review dictionaries.
-
-    """
+    """Get all LARP manager reviews as dictionaries."""
     # Convert each review object to dictionary representation
     return [review.as_dict() for review in LarpManagerReview.objects.all()]
 
@@ -152,13 +183,13 @@ def _get_showcases() -> list[dict]:
     return result
 
 
+def _get_partners() -> list[dict]:
+    """Get all LarpManager partners as dictionaries."""
+    return [partner.as_dict() for partner in LarpManagerPartner.objects.all()]
+
+
 def _get_promoters() -> list[dict]:
-    """Get all promoters from associations that have promoter data.
-
-    Returns:
-        List of promoter dictionaries from associations with valid promoter data.
-
-    """
+    """Get all promoters from associations that have promoter data."""
     # Filter associations that have promoter data
     associations_queryset = Association.objects.exclude(promoter__isnull=True)
     associations_queryset = associations_queryset.exclude(promoter__exact="")
@@ -264,3 +295,59 @@ def clear_blog_cache(blog_id: int) -> None:
 def get_blog_cache_key(blog_id: int) -> str:
     """Get key for a blog content cache."""
     return f"blog_content_{blog_id}_{datetime.now(tz=UTC).date()}"
+
+
+def cache_larpmanager_texts_key() -> str:
+    """Generate cache key for larpmanager texts."""
+    return "cache_lm_texts"
+
+
+def get_larpmanager_texts() -> dict[str, str]:
+    """Get cached LarpManager texts as a dictionary.
+
+    Returns:
+        Dictionary mapping text names to their values.
+
+    """
+    cache_key = cache_larpmanager_texts_key()
+    cached_texts = cache.get(cache_key)
+
+    if cached_texts is None:
+        cached_texts = {text.name: text.value for text in LarpManagerText.objects.all()}
+        cache.set(cache_key, cached_texts, timeout=86400)
+
+    return cached_texts
+
+
+def clear_larpmanager_texts_cache() -> None:
+    """Clear the cached larpmanager texts."""
+    cache.delete(cache_larpmanager_texts_key())
+
+
+def cache_larpmanager_collaborators_key() -> str:
+    """Generate cache key for larpmanager collaborators."""
+    return "cache_lm_collaborators"
+
+
+def get_cache_lm_collaborators() -> list[dict]:
+    """Get cached LarpManager collaborators, in shuffled order.
+
+    Returns:
+        Cached or freshly computed list of collaborator dictionaries.
+
+    """
+    cache_key = cache_larpmanager_collaborators_key()
+    cached_data = cache.get(cache_key)
+
+    if cached_data is None:
+        collaborators = list(LarpManagerCollaborator.objects.all())
+        random.shuffle(collaborators)
+        cached_data = [collaborator.as_dict() for collaborator in collaborators]
+        cache.set(cache_key, cached_data, timeout=300)
+
+    return cached_data
+
+
+def clear_larpmanager_collaborators_cache() -> None:
+    """Clear the cached larpmanager collaborators."""
+    cache.delete(cache_larpmanager_collaborators_key())

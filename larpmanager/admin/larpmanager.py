@@ -26,17 +26,54 @@ from larpmanager.admin.base import CSRFTinyMCEModelAdmin, DefModelAdmin
 from larpmanager.models.base import PublisherApiKey
 from larpmanager.models.larpmanager import (
     LarpManagerBlog,
+    LarpManagerChatLog,
+    LarpManagerCollaborator,
+    LarpManagerDemoHint,
+    LarpManagerDemoHintDismissal,
+    LarpManagerDemoType,
     LarpManagerDiscover,
     LarpManagerFaq,
     LarpManagerFaqType,
     LarpManagerGuide,
     LarpManagerHighlight,
+    LarpManagerNewsletter,
+    LarpManagerPartner,
     LarpManagerProfiler,
     LarpManagerReview,
+    LarpManagerScreenshot,
     LarpManagerShowcase,
+    LarpManagerText,
     LarpManagerTicket,
     LarpManagerTutorial,
 )
+
+
+@admin.register(LarpManagerDemoType)
+class LarpManagerDemoTypeAdmin(DefModelAdmin):
+    """Admin interface for LarpManagerDemoType model."""
+
+    list_display = ("name", "slug", "icon", "color", "template_association", "order", "active")
+    list_filter = ("active",)
+    search_fields: ClassVar[list] = ["name", "slug"]
+    raw_id_fields: ClassVar[list] = ["template_association"]
+
+
+@admin.register(LarpManagerDemoHint)
+class LarpManagerDemoHintAdmin(CSRFTinyMCEModelAdmin):
+    """Admin interface for LarpManagerDemoHint model."""
+
+    list_display = ("key", "view_name", "demo_type", "title", "order", "active")
+    list_filter = ("active", "demo_type")
+    search_fields: ClassVar[list] = ["key", "view_name", "title"]
+    autocomplete_fields: ClassVar[list] = ["demo_type"]
+
+
+@admin.register(LarpManagerDemoHintDismissal)
+class LarpManagerDemoHintDismissalAdmin(DefModelAdmin):
+    """Admin interface for LarpManagerDemoHintDismissal model."""
+
+    list_display = ("member", "hint", "created")
+    raw_id_fields: ClassVar[list] = ["member", "hint"]
 
 
 @admin.register(LarpManagerFaq)
@@ -104,6 +141,14 @@ class LarpManagerHighlightAdmin(DefModelAdmin):
     search_fields: ClassVar[list] = ["id", "info"]
 
 
+@admin.register(LarpManagerScreenshot)
+class LarpManagerScreenshotAdmin(DefModelAdmin):
+    """Admin interface for LarpManagerScreenshot model."""
+
+    list_display = ("caption", "order", "show_reduced")
+    search_fields: ClassVar[list] = ["id", "caption"]
+
+
 @admin.register(LarpManagerShowcase)
 class LarpManagerShowcaseAdmin(CSRFTinyMCEModelAdmin):
     """Admin interface for LarpManagerShowcase model."""
@@ -143,6 +188,19 @@ class LMReviewAdmin(DefModelAdmin):
     list_display = ("text", "author")
 
 
+@admin.register(LarpManagerText)
+class LarpManagerTextAdmin(CSRFTinyMCEModelAdmin):
+    """Admin interface for LarpManagerText model."""
+
+    list_display = ("name", "value_red")
+    search_fields: ClassVar[list] = ["name", "value"]
+
+    @staticmethod
+    def value_red(instance: LarpManagerText) -> str:
+        """Return truncated value for admin display."""
+        return instance.value[:100] if instance.value else ""
+
+
 @admin.register(LarpManagerTicket)
 class LarpManagerTicketAdmin(DefModelAdmin):
     """Admin interface for LarpManagerTicket model."""
@@ -161,3 +219,33 @@ class PublisherApiKeyAdmin(DefModelAdmin):
     """Admin interface for PublisherApiKey model."""
 
     list_display = ("name", "key", "active", "last_used", "usage_count")
+
+
+@admin.register(LarpManagerNewsletter)
+class LarpManagerNewsletterAdmin(DefModelAdmin):
+    """Admin interface for PublisherApiKey model."""
+
+    list_display = ("email", "status")
+
+
+@admin.register(LarpManagerPartner)
+class LarpManagerPartnerAdmin(DefModelAdmin):
+    """Admin interface for LarpManagerPartner model."""
+
+    list_display = ("name", "url", "show_thumb")
+
+
+@admin.register(LarpManagerCollaborator)
+class LarpManagerCollaboratorAdmin(DefModelAdmin):
+    """Admin interface for LarpManagerCollaborator model."""
+
+    list_display = ("name", "show_thumb")
+    search_fields: ClassVar[list] = ["id", "name"]
+
+
+@admin.register(LarpManagerChatLog)
+class LarpManagerChatLogAdmin(DefModelAdmin):
+    """Admin interface for LarpManagerCollaborator model."""
+
+    list_display = ("member", "question")
+    search_fields: ClassVar[list] = ["id", "question"]

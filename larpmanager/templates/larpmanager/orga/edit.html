@@ -1,24 +1,26 @@
 {% extends "utils.html" %}
 {% load i18n show_tags %}
+{% block body_class %}
+    {% if frame %}floating_iframe{% endif %}
+{% endblock body_class %}
 {% block title %}
-    {{ form.page_title }}
     {% if nonum is None %}
-        {% if num != "0" %}
-            - {% trans "Change" %}
+        {% if num %}
+            {{ name }}
         {% else %}
-            - {% trans "New" %}
+            {% trans "New" %}
         {% endif %}
+        -
     {% endif %}
-    - {{ run }}
+    {{ form.page_title }}
+    - {{ run.search | truncatechars:50 }}
 {% endblock title %}
-{% block info %}
-    {{ form.page_info }}
-{% endblock info %}
 {% block content %}
     {% include "elements/form/main.html" %}
 {% endblock content %}
 {% block js2 %}
     {% include "elements/form/max_length.js" %}
     {% include "elements/form/jump_section.js" %}
-    {% include "elements/working-ticket.js" %}
+    {% include "elements/working-ticket.js" with edit_uuid=num %}
+    {% include "elements/helpers/iframe_resize.js" %}
 {% endblock js2 %}

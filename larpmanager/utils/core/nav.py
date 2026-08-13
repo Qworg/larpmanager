@@ -1,0 +1,594 @@
+# LarpManager - https://larpmanager.com
+# Copyright (C) 2025 Scanagatta Mauro
+#
+# This file is part of LarpManager and is dual-licensed:
+#
+# 1. Under the terms of the GNU Affero General Public License (AGPL) version 3,
+#    as published by the Free Software Foundation. You may use, modify, and
+#    distribute this file under those terms.
+#
+# 2. Under a commercial license, allowing use in closed-source or proprietary
+#    environments without the obligations of the AGPL.
+#
+# If you have obtained this file under the AGPL, and you make it available over
+# a network, you must also make the complete source code available under the same license.
+#
+# For more information or to purchase a commercial license, contact:
+# commercial@larpmanager.com
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from django.core.cache import cache
+from django.urls import reverse
+from django.utils.translation import gettext_lazy as _
+
+from larpmanager.models.registration import Registration
+from larpmanager.utils.larpmanager.versions import LATEST_AVAILABLE_VERSION
+
+if TYPE_CHECKING:
+    from django.http import HttpRequest
+
+_USER_NAV_CACHE_TIMEOUT = 3600 * 24
+
+_STATUS_ICONS = {
+    "pending": "fa-solid fa-clock",
+    "action_needed": "fa-solid fa-circle-exclamation",
+    "provisional": "fa-solid fa-hourglass-half",
+    "request_pending": "fa-solid fa-user-clock",
+    "todo": "fa-solid fa-list-check",
+}
+
+
+def _user_nav_cache_key(member_id: int) -> str:
+    return f"user_nav_entries_{member_id}"
+
+
+def _user_nav_profile_flags_cache_key(member_id: int) -> str:
+    return f"user_nav_profile_flags_{member_id}"
+
+
+def invalidate_user_nav_entries(member_id: int) -> None:
+    """Invalidate list of registrations for the user."""
+    cache.delete(_user_nav_cache_key(member_id))
+    cache.delete(_user_nav_profile_flags_cache_key(member_id))
+
+
+def _item(
+    url: str,
+    icon: str,
+    label: Any,
+    tooltip: Any,
+    *,
+    active: bool = False,
+    link_mode: str | None = None,
+    home: bool = False,
+    sidebar_gate: tuple[str, list[str] | None] | None = None,
+) -> dict[str, Any] | None:
+    """Build a nav entry dict, or None if `sidebar_gate` slug is excluded by the demo's allowed sidebar list.
+
+    `link_mode` is either "_blank" (open in new tab) or "download" (downloadable link).
+    """
+    if sidebar_gate:
+        slug, allowed_sidebar = sidebar_gate
+        if allowed_sidebar and slug not in allowed_sidebar:
+            return None
+
+    entry: dict[str, Any] = {
+        "url": url,
+        "icon": icon,
+        "label": label,
+        "tooltip": tooltip,
+        "active": active,
+        "home": home,
+    }
+    if link_mode == "download":
+        entry["download"] = True
+    elif link_mode:
+        entry["target"] = link_mode
+    return entry
+
+
+def _append(items: list[dict[str, Any]], entry: dict[str, Any] | None) -> None:
+    if entry is not None:
+        items.append(entry)
+
+
+def _add_registration_items(
+    items: list[dict[str, Any]],
+    slug: str,
+    active: str,
+    features: set[str],
+    registration: Any,
+    context: dict[str, Any],
+) -> None:
+    allowed_sidebar = context.get("demo_allowed_sidebar")
+    if registration and not registration.pending:
+        entry = _item(
+            reverse("register", args=[slug]),
+            "fa-solid fa-pen-to-square",
+            _("Your registration"),
+            str(_("Update here the registration options!")),
+            active=active == "register",
+        )
+        run_status = context.get("run_status") or {}
+        status_type = run_status.get("status_type")
+        if status_type in _STATUS_ICONS:
+            entry["status_type"] = status_type
+            entry["status_icon"] = _STATUS_ICONS[status_type]
+        items.append(entry)
+        if registration.tot_iscr:
+            items.append(
+                _item(
+                    reverse("event_payments", args=[slug]),
+                    "fa-solid fa-receipt",
+                    _("Payments"),
+                    str(_("View your payment details for this event!")),
+                    active=active in ("event_payments", "event_payments_registration"),
+                )
+            )
+        if getattr(registration, "character", None):
+            items.append(
+                _item(
+                    reverse("character_your", args=[slug]),
+                    "fa-solid fa-user",
+                    _("Your character"),
+                    str(_("Access your character!")),
+                    active=active == "char",
+                )
+            )
+        if (
+            "casting" in features
+            and context.get("show_character")
+            and registration.ticket
+            and registration.ticket.tier != "w"
+        ):
+            _append(
+                items,
+                _item(
+                    reverse("casting", args=[slug]),
+                    "fa-solid fa-masks-theater",
+                    _("Casting"),
+                    str(_("Select your preferences on the characters to play!")),
+                    active=active == "casting",
+                    sidebar_gate=("casting", allowed_sidebar),
+                ),
+            )
+        if "matchmaker" in features:
+            items.append(
+                _item(
+                    reverse("matchmaker", args=[slug]),
+                    "fa-solid fa-people-arrows",
+                    _("Matchmaker"),
+                    str(_("Answer questions to help match you with characters!")),
+                    active=active == "matchmaker",
+                )
+            )
+    else:
+        items.append(
+            _item(
+                reverse("register", args=[slug]),
+                "fa-solid fa-user-plus",
+                _("Register"),
+                str(_("Register to the event")),
+                active=active == "register",
+            )
+        )
+
+
+def _add_character_items(
+    items: list[dict[str, Any]],
+    slug: str,
+    active: str,
+    features: set[str],
+    allowed_sidebar: list[str] | None,
+) -> None:
+    items.append(
+        _item(
+            reverse("gallery", args=[slug]),
+            "fa-solid fa-images",
+            _("Gallery"),
+            str(_("View the list of characters and participants!")),
+            active=active == "gallery",
+        )
+    )
+    items.append(
+        _item(
+            reverse("search", args=[slug]),
+            "fa-solid fa-magnifying-glass",
+            _("Search"),
+            str(_("Filter or search the characters!")),
+            active=active == "search",
+        )
+    )
+    if "ensemble" in features:
+        _append(
+            items,
+            _item(
+                reverse("ensemble", args=[slug]),
+                "fa-solid fa-people-group",
+                _("Ensemble"),
+                str(_("Learn all characters before the event!")),
+                active=active == "ensemble",
+                sidebar_gate=("ensemble", allowed_sidebar),
+            ),
+        )
+
+
+def _add_writing_items(
+    items: list[dict[str, Any]],
+    slug: str,
+    active: str,
+    features: set[str],
+    context: dict[str, Any],
+) -> None:
+    allowed_sidebar = context.get("demo_allowed_sidebar")
+    show_addit = context.get("show_addit", {})
+    if "workshop" in features and show_addit.get("workshop"):
+        _append(
+            items,
+            _item(
+                reverse("workshops", args=[slug]),
+                "fa-solid fa-hammer",
+                _("Workshop"),
+                str(_("Fill out the event prep questions!")),
+                active=active == "workshops",
+                sidebar_gate=("workshop", allowed_sidebar),
+            ),
+        )
+    if "character" in features:
+        _add_character_items(items, slug, active, features, allowed_sidebar)
+    if "faction" in features and context.get("show_faction") and context.get("has_visible_factions"):
+        _append(
+            items,
+            _item(
+                reverse("factions", args=[slug]),
+                "fa-solid fa-flag",
+                _("Factions"),
+                str(_("Discover the game factions!")),
+                active=active == "factions",
+                sidebar_gate=("faction", allowed_sidebar),
+            ),
+        )
+    if "guild" in features:
+        _append(
+            items,
+            _item(
+                reverse("guilds", args=[slug]),
+                "fa-solid fa-users",
+                _("Guilds"),
+                str(_("Discover the game guilds!")),
+                active=active == "guilds",
+                sidebar_gate=("guild", allowed_sidebar),
+            ),
+        )
+    if "questbuilder" in features and context.get("show_quest"):
+        _append(
+            items,
+            _item(
+                reverse("quests", args=[slug]),
+                "fa-solid fa-scroll",
+                _("Quest"),
+                str(_("Find out what quests are available!")),
+                active=active == "quests",
+                sidebar_gate=("questbuilder", allowed_sidebar),
+            ),
+        )
+
+
+def _add_extra_items(
+    items: list[dict[str, Any]],
+    slug: str,
+    features: set[str],
+    context: dict[str, Any],
+    registration: Any,
+    run: Any,
+) -> None:
+    allowed_sidebar = context.get("demo_allowed_sidebar")
+    if "album" in features and run.albums.exists():
+        _append(
+            items,
+            _item(
+                reverse("album", args=[slug]),
+                "fa-solid fa-camera",
+                _("Album"),
+                str(_("View photos from the event!")),
+                sidebar_gate=("album", allowed_sidebar),
+            ),
+        )
+    if "gift" in features:
+        _append(
+            items,
+            _item(
+                reverse("gift", args=[slug]),
+                "fa-solid fa-gift",
+                _("Gift"),
+                str(_("Gift a registration to your friend")),
+                sidebar_gate=("gift", allowed_sidebar),
+            ),
+        )
+    for el in context.get("buttons", []):
+        entry: dict[str, Any] = {"url": el[2], "label": el[0], "tooltip": el[1], "active": False}
+        if el[3]:
+            entry["icon"] = el[3]
+        items.append(entry)
+    if registration and "print_pdf" in features and context.get("show_character"):
+        pdf_tooltip = str(_("Download the list of characters with their interpreters' profile images!"))
+        _append(
+            items,
+            _item(
+                reverse("portraits", args=[slug]),
+                "fa-solid fa-id-badge",
+                _("Portraits (PDF)"),
+                pdf_tooltip,
+                link_mode="download",
+                sidebar_gate=("print_pdf", allowed_sidebar),
+            ),
+        )
+        _append(
+            items,
+            _item(
+                reverse("profiles", args=[slug]),
+                "fa-solid fa-address-card",
+                _("Profiles (PDF)"),
+                pdf_tooltip,
+                link_mode="download",
+                sidebar_gate=("print_pdf", allowed_sidebar),
+            ),
+        )
+
+
+def _build_reg_nav_entries(member_id: int) -> list[dict[str, Any]]:
+    regs = (
+        Registration.objects.filter(
+            member_id=member_id,
+            cancellation_date__isnull=True,
+            deleted__isnull=True,
+        )
+        .select_related("run__event__association")
+        .order_by("-run__start")
+    )
+
+    entries = []
+    for reg in regs:
+        run = reg.run
+        event = run.event
+        slug = run.get_slug()
+        entries.append(
+            {
+                "label": event.get_name(),
+                "url": reverse("register", args=[slug]),
+                "slug": slug,
+                "assoc_name": event.association.name if event.association else "",
+            }
+        )
+    return entries
+
+
+def build_main_nav_items(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build the main event navigation item list from view context."""
+    run = context.get("run")
+    if not run:
+        return []
+
+    items: list[dict[str, Any]] = []
+    slug = run.get_slug()
+    active = context.get("request_func_name", "")
+    features = context.get("features", set())
+    registration = context.get("registration")
+    event = context.get("event")
+
+    items.append(
+        _item(
+            reverse("event", args=[slug]),
+            "fa-solid fa-calendar-days",
+            _("Event"),
+            str(_("Discover what this event is about!")),
+            active=active == "event",
+        )
+    )
+
+    if event and event.website:
+        items.append(
+            _item(
+                event.website,
+                "fa-solid fa-globe",
+                _("Website"),
+                str(_("Browse the presentation website!")),
+                link_mode="_blank",
+            )
+        )
+
+    _add_registration_items(items, slug, active, features, registration, context)
+    _add_writing_items(items, slug, active, features, context)
+    _add_extra_items(items, slug, features, context, registration, run)
+
+    return items
+
+
+def build_profile_nav_items(request: HttpRequest) -> list[dict[str, Any]]:
+    """Build profile navigation item list from request."""
+    if not hasattr(request, "association"):
+        return []
+
+    features = request.association.get("features", set())
+    allowed_sidebar = request.association.get("demo_allowed_sidebar")
+    active = request.resolver_match.url_name if request.resolver_match else ""
+
+    items: list[dict[str, Any]] = [
+        _item(reverse("profile"), "fa-solid fa-user", _("Personal info"), "", active=active == "profile", home=False),
+        _item(
+            reverse("profile_privacy"),
+            "fa-solid fa-shield-halved",
+            _("Privacy"),
+            "",
+            active=active == "profile_privacy",
+            home=False,
+        ),
+    ]
+
+    # Allow opt in to use latest interface version
+    assoc_version = request.association.get("assoc_version", LATEST_AVAILABLE_VERSION)
+    if assoc_version < LATEST_AVAILABLE_VERSION and hasattr(request.user, "member"):
+        member_version_str = request.user.member.get_config("interface_version")
+        member_version = int(member_version_str) if member_version_str else assoc_version
+        effective_version = max(member_version, assoc_version)
+        if effective_version < LATEST_AVAILABLE_VERSION:
+            items.append(
+                _item(
+                    reverse("profile_upgrade"),
+                    "fa-solid fa-arrow-up",
+                    _("Upgrade"),
+                    "",
+                    active=active == "profile_upgrade",
+                    home=False,
+                )
+            )
+
+    if "membership" in features:
+        _append(
+            items,
+            _item(
+                reverse("membership"),
+                "fa-solid fa-id-card",
+                _("Membership"),
+                "",
+                active=active == "membership",
+                home=False,
+                sidebar_gate=("membership", allowed_sidebar),
+            ),
+        )
+
+    if "delegated_members" in features:
+        _append(
+            items,
+            _item(
+                reverse("delegated"),
+                "fa-solid fa-user-shield",
+                _("Delegated users"),
+                "",
+                active=active == "delegated",
+                home=False,
+                sidebar_gate=("delegated_members", allowed_sidebar),
+            ),
+        )
+
+    items.append(
+        _item(reverse("language"), "fa-solid fa-language", _("Language"), "", active=active == "language", home=False)
+    )
+    items.append(
+        _item(reverse("security"), "fa-solid fa-lock", _("Security"), "", active=active == "security", home=False)
+    )
+
+    return items
+
+
+def build_profile_home_nav_items(request: HttpRequest) -> list[dict[str, Any]]:
+    """Build home shortcut navigation item list from request."""
+    if not hasattr(request, "association"):
+        return []
+
+    features = request.association.get("features", set())
+    allowed_sidebar = request.association.get("demo_allowed_sidebar")
+    active = request.resolver_match.url_name if request.resolver_match else ""
+
+    member = getattr(getattr(request, "user", None), "member", None)
+    has_registrations = False
+    has_paid_registrations = False
+    if member:
+        flags_cache_key = _user_nav_profile_flags_cache_key(member.id)
+        flags = cache.get(flags_cache_key)
+        if flags is None:
+            qs = Registration.objects.filter(member=member)
+            flags = {
+                "has_registrations": qs.exists(),
+                "has_paid_registrations": qs.filter(tot_iscr__gt=0).exists(),
+            }
+            cache.set(flags_cache_key, flags, _USER_NAV_CACHE_TIMEOUT)
+        has_registrations = flags["has_registrations"]
+        has_paid_registrations = flags["has_paid_registrations"]
+
+    items: list[dict[str, Any]] = []
+
+    if request.association.get("user_characters_shortcut", False):
+        items.append(
+            _item(
+                reverse("characters"),
+                "fa-solid fa-users",
+                _("Characters"),
+                "",
+                active=active == "characters",
+                home=True,
+            )
+        )
+
+    if has_registrations and request.association.get("user_registrations_shortcut", False):
+        items.append(
+            _item(
+                reverse("registrations"),
+                "fa-solid fa-list-check",
+                _("Registrations"),
+                "",
+                active=active == "registrations",
+                home=True,
+            )
+        )
+
+    if has_paid_registrations:
+        items.append(
+            _item(
+                reverse("accounting"),
+                "fa-solid fa-money-bill",
+                _("Accounting"),
+                "",
+                active=active == "accounting",
+                home=True,
+            )
+        )
+
+    if has_registrations and "past_events" in features and request.association.get("calendar_past_events", False):
+        _append(
+            items,
+            _item(
+                reverse("calendar_past"),
+                "fa-solid fa-clock-rotate-left",
+                _("Past events"),
+                "",
+                active=active == "calendar_past",
+                home=True,
+                sidebar_gate=("past_events", allowed_sidebar),
+            ),
+        )
+
+    if "badge" in features:
+        _append(
+            items,
+            _item(
+                reverse("badges"),
+                "fa-solid fa-trophy",
+                _("Badges"),
+                "",
+                active=active == "badges",
+                home=True,
+                sidebar_gate=("badge", allowed_sidebar),
+            ),
+        )
+
+    if "chat" in features:
+        _append(
+            items,
+            _item(
+                reverse("messages"),
+                "fa-solid fa-message",
+                _("Messages"),
+                "",
+                active=active == "messages",
+                home=True,
+                sidebar_gate=("chat", allowed_sidebar),
+            ),
+        )
+
+    return items

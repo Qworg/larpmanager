@@ -26,6 +26,7 @@ class ConfigType(IntEnum):
     TEXTAREA = 5
     MEMBERS = 6
     MULTI_BOOL = 7
+    CHOICE = 8
 
 
 class MultiCheckboxWidget(forms.CheckboxSelectMultiple):
@@ -91,34 +92,76 @@ class ConfigForm(BaseModelForm):
         # Initialize configuration attributes
         self.config_fields = []
         self._section = None
+        self._section_slug = None
         self.jump_section = None
 
         # Set up initial configurations
         self.set_configs()
+
+        # Restrict sections to a demo type's allow-list, if any, and auto-open them
+        self._filter_fields_by_demo_type()
 
         # Get all element configurations and add custom fields
         res = self._get_all_element_configs()
         for el in self.config_fields:
             self._add_custom_field(el, res)
 
+        # If in frame mode with a specific section, remove fields from other sections
+        if self.params.get("frame") and self.jump_section:
+            self._filter_fields_by_section()
+
     @abstractmethod
     def set_configs(self) -> None:
         """No-op method placeholder."""
 
-    def set_section(self, section_slug: str, section_name: str) -> None:
-        """Set the current section for grouping configuration fields.
+    def _filter_fields_by_section(self) -> None:
+        """Remove all fields that don't belong to jump_section when in frame mode.
 
-        Args:
-            section_slug: Section slug identifier
-            section_name: Display name for the section
+        This method filters out configuration fields from other sections when
+        the form is being displayed in a modal frame focused on a specific section.
 
         Side effects:
-            Sets internal section state and jump_section if matches params
+            - Removes fields from self.fields that don't belong to jump_section
+            - Updates self.sections to only contain fields from jump_section
+            - Updates self.config_fields to only contain configs from jump_section
+            - Sets show_sections to True to auto-open the section
 
         """
+        # Filter config_fields to keep only those in the target section
+        self.config_fields = [cf for cf in self.config_fields if cf["section"] == self.jump_section]
+
+        # Get keys of fields to keep
+        fields_to_keep = {cf["key"] for cf in self.config_fields}
+
+        # Remove fields not in the target section
+        fields_to_remove = [key for key in self.fields if key not in fields_to_keep]
+        for key in fields_to_remove:
+            del self.fields[key]
+
+        # Update sections dict to only contain fields from target section
+        if hasattr(self, "sections"):
+            self.sections = {k: v for k, v in self.sections.items() if v == self.jump_section}
+
+        # Auto-open the section in frame mode
+        self.show_sections = True
+
+        # Flag to hide section headers in frame mode
+        self.hide_section_headers = True
+
+    def set_section(self, section_slug: str, section_name: str) -> None:
+        """Set the current section for grouping configuration fields."""
         self._section = section_name
+        self._section_slug = section_slug
         if self.params.get("jump_section", "") == section_slug:
             self.jump_section = section_name
+
+    def _filter_fields_by_demo_type(self) -> None:
+        """Restrict config sections to a demo type's allow-list, if any, and auto-open them."""
+        allowed_config = self.params.get("demo_allowed_config")
+        if not allowed_config:
+            return
+        self.config_fields = [cf for cf in self.config_fields if cf["section_slug"] in allowed_config]
+        self.show_sections = True
 
     def add_configs(
         self,
@@ -146,6 +189,7 @@ class ConfigForm(BaseModelForm):
                 "key": configuration_key,
                 "type": config_type,
                 "section": self._section,
+                "section_slug": self._section_slug,
                 "label": field_label,
                 "help_text": field_help_text,
                 "extra": extra_data,
@@ -171,15 +215,20 @@ class ConfigForm(BaseModelForm):
         for el in self.config_fields:
             self._get_custom_field(el, config_values)
 
-        # Save all collected configuration values to the instance
-        save_all_element_configs(instance, config_values)
+        # Save all collected configuration values to the config target
+        config_target = self._get_config_save_target(instance)
+        save_all_element_configs(config_target, config_values)
 
-        # Reset configuration cache for this instance
-        reset_element_configs(instance)
+        # Reset configuration cache for the config target
+        reset_element_configs(config_target)
 
         # Final save to persist all changes
         instance.save()
 
+        return instance
+
+    def _get_config_save_target(self, instance: BaseModel) -> BaseModel:
+        """Return the object configs should be saved to. Override to redirect."""
         return instance
 
     def _get_custom_field(self, field_definition: dict, result_dict: dict) -> None:
@@ -270,6 +319,13 @@ class ConfigForm(BaseModelForm):
                 required=False,
                 help_text=help_text,
             ),
+            # Dropdown select field for single choice from a list
+            ConfigType.CHOICE: lambda: forms.ChoiceField(
+                label=label,
+                choices=extra,
+                required=False,
+                help_text=help_text,
+            ),
         }
 
         # Get the factory function for the specified field type
@@ -305,7 +361,9 @@ class ConfigForm(BaseModelForm):
         # Get field type and extra configuration for specific field types
         field_type = config["type"]
         extra_config = (
-            config["extra"] if field_type in [ConfigType.MEMBERS, ConfigType.MULTI_BOOL, ConfigType.CHAR] else None
+            config["extra"]
+            if field_type in [ConfigType.MEMBERS, ConfigType.MULTI_BOOL, ConfigType.CHAR, ConfigType.CHOICE]
+            else None
         )
 
         # Create and add the form field
@@ -329,12 +387,7 @@ class ConfigForm(BaseModelForm):
             self.initial[field_key] = initial_value
 
     def _get_all_element_configs(self) -> dict[str, str]:
-        """Get all existing configuration values for the instance.
-
-        Returns:
-            dict: Mapping of configuration names to their current values
-
-        """
+        """Get all existing configuration values for the instance."""
         config_mapping = {}
         if self.instance.pk:
             for config in self.instance.configs.all():

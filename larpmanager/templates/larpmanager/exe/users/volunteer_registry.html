@@ -3,9 +3,6 @@
 {% block title %}
     {% trans "Volunteer Registry" %}
 {% endblock title %}
-{% block info %}
-    {% trans "This page summarises the organization's volunteers" %}
-{% endblock info %}
 {% block content %}
     <p>
         Clicca qui per ottenere una stampa del registro a norma di legge:
@@ -13,19 +10,22 @@
         Ricorda di applicare firma digitale, e salvarlo in un sistema di storage adeguato.
     </p>
     <hr />
-    {% include "elements/header/edit.html" %}
+    {% include "elements/table/header.html" %}
     <table id="volunteers" class="go_datatable">
         <thead>
             <tr>
                 <th></th>
+                <th></th>
                 <th>{% trans "Participant" %}</th>
                 <th>{% trans "Start date" %}</th>
                 <th>{% trans "End date" %}</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
             {% for el in list %}
                 <tr id="{{ el.uuid }}">
+                    <td></td>
                     <td>
                         <a href="{% url 'exe_volunteer_registry_edit' el.uuid %}"
                            qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
@@ -33,8 +33,19 @@
                     <td>{{ el.member }}</td>
                     <td>{{ el.start }}</td>
                     <td>{{ el.end }}</td>
+                    <td>
+                        <a href="{% url 'exe_volunteer_registry_delete' el.uuid %}"
+                           qtip="{% trans "Delete" %}"
+                           class="only_new_v18"><i class="fas fa-trash"></i></a>
+                    </td>
                 </tr>
             {% endfor %}
         </tbody>
     </table>
+    {% if not list %}
+        <p class="no-elements-available">
+            {% trans "No volunteers registered yet. Use the button above to add a volunteer entry." %}
+        </p>
+    {% endif %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}

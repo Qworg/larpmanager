@@ -12,8 +12,7 @@
     {% if registration or not run_status.closed %}
         {% if event.website %}
             <p>
-                {% trans "View all event information, and any specifics tickets costs, in its" %}
-                <a target="_blank" href="{{ event.website }}">website</a>!
+                {% blocktranslate with website=event.website %} View all event information and ticket prices on <a target="_blank" href="{{ website }}">the event website</a>.{% endblocktranslate %}
             </p>
             <hr />
         {% endif %}
@@ -24,11 +23,7 @@
         <div class="centerized">
             <form id="main_form" action="{{ request.path }}" method="post">
                 {% csrf_token %}
-                <div>
-                    <table class="mob">
-                        {% include "elements/form/register.html" %}
-                    </table>
-                </div>
+                <div>{% include "elements/form/register.html" %}</div>
                 <input type="button" id="confirm" value="{% trans "Continue" %}" />
                 {% include "elements/form/delete.html" %}
                 <div id="riepilogo" class="hide">

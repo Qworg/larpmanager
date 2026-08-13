@@ -18,15 +18,18 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 
+from decimal import Decimal
 from typing import Any, ClassVar
 
-from django.db import models
+from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
+from django.db import models, transaction
 from django.db.models import Q
 from django.db.models.constraints import UniqueConstraint
 from django.utils.translation import gettext_lazy as _
 
 from larpmanager.models.association import Association
-from larpmanager.models.base import BaseModel, PaymentMethod, UuidMixin
+from larpmanager.models.base import BaseModel, OrderMixin, PaymentMethod, UuidMixin
 from larpmanager.models.event import Event, Run
 from larpmanager.models.member import Member
 from larpmanager.models.registration import Registration
@@ -64,8 +67,8 @@ class PaymentInvoice(UuidMixin, BaseModel):
         upload_to=UploadToPathAndRename("wire/"),
         null=True,
         blank=True,
-        verbose_name=_("Statement"),
-        help_text=_("Statement issued by the bank as proof of the issuance of the transfer (as pdf file)"),
+        verbose_name=_("Bank Statement"),
+        help_text=_("Statement issued by the bank as proof of the transfer (as a PDF file)"),
     )
 
     text = models.TextField(null=True, blank=True)
@@ -95,7 +98,7 @@ class PaymentInvoice(UuidMixin, BaseModel):
 
     txn_id = models.CharField(max_length=50, null=True, blank=True)
 
-    causal = models.CharField(max_length=200)
+    causal = models.CharField(max_length=500)
 
     cod = models.CharField(max_length=50, unique=True, db_index=True)
 
@@ -121,13 +124,19 @@ class PaymentInvoice(UuidMixin, BaseModel):
             models.Index(fields=["association", "cod"]),
             models.Index(fields=["registration", "status", "-created"]),
             models.Index(fields=["status", "-created"]),
+            # Performance index from migration 0137
+            models.Index(
+                fields=["status", "created"],
+                name="payinv_status_created_idx",
+            ),
         ]
 
     def __str__(self) -> str:
         """Return invoice summary with payment status and transaction details."""
-        return (
-            f"({self.status}) Invoice for {self.member} - {self.causal} - {self.txn_id} {self.mc_gross} {self.mc_fee}"
-        )
+        res = _("Payment") + f" {self.member} ({self.mc_gross})"
+        if self.registration:
+            res += f" {self.registration.run}"
+        return res
 
     def download(self) -> str:
         """Download the invoice file if available.
@@ -164,7 +173,7 @@ class PaymentInvoice(UuidMixin, BaseModel):
 
         # Add download link if invoice is available
         if self.invoice:
-            details_html += f" <a href='{self.download()}'>Download</a>"
+            details_html += f" <a href='{self.download()}' target='_blank' download>Download</a>"
 
         # Append payment method text description
         if self.text:
@@ -238,33 +247,39 @@ class ElectronicInvoice(UuidMixin, BaseModel):
             **kwargs: Arbitrary keyword arguments passed to parent save method.
 
         """
-        # Auto-generate progressive number if not set (global counter)
-        if not self.progressive:
-            highest_progressive = ElectronicInvoice.objects.aggregate(models.Max("progressive"))["progressive__max"]
-            self.progressive = highest_progressive + 1 if highest_progressive else 1
+        # Use atomic transaction to prevent race conditions
+        with transaction.atomic():
+            # Auto-generate progressive number if not set (global counter)
+            if not self.progressive:
+                # Lock all electronic invoices to prevent concurrent progressive number generation
+                highest_progressive = ElectronicInvoice.objects.select_for_update().aggregate(
+                    models.Max("progressive")
+                )["progressive__max"]
+                self.progressive = highest_progressive + 1 if highest_progressive else 1
 
-        # Auto-generate invoice number if not set (per year/association counter)
-        if not self.number:
-            que = ElectronicInvoice.objects.filter(year=self.year, association=self.association)
-            highest_number = que.aggregate(models.Max("number"))["number__max"]
-            self.number = highest_number + 1 if highest_number else 1
+            # Auto-generate invoice number if not set (per year/association counter)
+            if not self.number:
+                # Lock relevant invoices for this year/association
+                que = ElectronicInvoice.objects.select_for_update().filter(year=self.year, association=self.association)
+                highest_number = que.aggregate(models.Max("number"))["number__max"]
+                self.number = highest_number + 1 if highest_number else 1
 
-        # Call parent save method to persist the instance
-        super().save(*args, **kwargs)
+            # Call parent save method to persist the instance
+            super().save(*args, **kwargs)
 
 
 class ExpenseChoices(models.TextChoices):
     """Choices for ExpenseChoices."""
 
-    SCENOGR = "a", _("Set design - staging, materials")
-    COST = "b", _("Costumes - make up, cloth, armor")
-    PROP = "c", _("Prop - weapons, props")
-    ELECTR = "d", _("Electronics - computers, hitech, lights")
-    PROMOZ = "e", _("Promotion - site, advertising")
-    TRANS = "f", _("Transportation - gas, highway")
-    KITCH = "g", _("Kitchen - food, tableware")
-    LOCAT = "h", _("Location - rent, gas, overnight stays")
-    SEGRET = "i", _("Secretarial - stationery, printing")
+    SCENOGR = "a", _("Set design: staging and materials")
+    COST = "b", _("Costumes: makeup, clothing, and armor")
+    PROP = "c", _("Props: weapons and accessories")
+    ELECTR = "d", _("Electronics: computers, high-tech equipment, and lighting")
+    PROMOZ = "e", _("Promotion: website and advertising")
+    TRANS = "f", _("Transportation: fuel and highway tolls")
+    KITCH = "g", _("Kitchen: food and tableware")
+    LOCAT = "h", _("Venue: rent, utilities, and accommodation")
+    SEGRET = "i", _("Secretarial: stationery and printing")
     OTHER = "j", _("Other")
 
 
@@ -300,21 +315,34 @@ class AccountingItem(UuidMixin, BaseModel):
             String with ID, class name, and member info if available.
 
         """
-        # Build base string with class name
-        s = "Voce contabile"
-        # noinspection PyUnresolvedReferences
-        if self.id:
-            # noinspection PyUnresolvedReferences
-            s += f" &{self.id}"
-        s += f" - {self.__class__.__name__}"
+        s = self.__class__.__name__.replace("AccountingItem", "")
 
-        # Append member info if present
         if self.member:
             s += f" - {self.member}"
+
+        if hasattr(self, "run") and self.run:
+            s += f" - {self.run}"
+
+        if hasattr(self, "registration") and self.registration:
+            s += f" - {self.registration.run}"
+
+        if self.value:
+            s += f" - {self.value}"
+
+        if hasattr(self, "descr"):
+            s += f" - {self.descr[:50]}"
+
         return s
 
     class Meta:
         abstract = True
+
+    def delete(self, *args: tuple, **kwargs: dict) -> None:
+        """Delete this item and its linked PaymentInvoice if present."""
+        inv = self.inv
+        super().delete(*args, **kwargs)
+        if inv:
+            inv.delete()
 
     def short_descr(self) -> str:
         """Return first 100 characters of description if available, empty string otherwise."""
@@ -350,6 +378,18 @@ class AccountingItemMembership(AccountingItem):
                 condition=Q(deleted__isnull=True),
                 name="acctmem_association_year_act",
             ),
+            models.Index(
+                fields=["association", "year", "member"],
+                condition=Q(deleted__isnull=True),
+                name="acctmem_assoc_year_member_act",
+            ),
+        ]
+        constraints: ClassVar[list] = [
+            models.UniqueConstraint(
+                fields=["member", "association", "year"],
+                condition=Q(deleted__isnull=True),
+                name="unique_active_membership_per_member_year",
+            ),
         ]
 
 
@@ -372,7 +412,7 @@ class AccountingItemOther(AccountingItem):
 
     oth = models.CharField(max_length=1, choices=OtherChoices.choices)
 
-    run = models.ForeignKey(Run, on_delete=models.CASCADE, null=True, blank=True)
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, null=True, blank=True, verbose_name=_("Event"))
 
     descr = models.CharField(max_length=150)
 
@@ -388,13 +428,19 @@ class AccountingItemOther(AccountingItem):
         # Determine base string based on other type
         s = _("Credit assignment")
         if self.oth == OtherChoices.TOKEN:
-            s = _("Tokens assignment")
+            s = _("Token assignment")
         elif self.oth == OtherChoices.REFUND:
             s = _("Refund")
 
-        # Append member information if present
         if self.member:
             s += f" - {self.member}"
+
+        if self.value:
+            s += f" - {self.value}"
+
+        if self.run:
+            s += f" - {self.run}"
+
         return s
 
 
@@ -434,7 +480,7 @@ class AccountingItemExpense(AccountingItem):
 
     invoice = models.FileField(upload_to=UploadToPathAndRename("invoice/"))
 
-    run = models.ForeignKey(Run, on_delete=models.CASCADE, null=True, blank=True)
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, null=True, blank=True, verbose_name=_("Event"))
 
     descr = models.CharField(max_length=150)
 
@@ -442,14 +488,14 @@ class AccountingItemExpense(AccountingItem):
         max_length=1,
         choices=ExpenseChoices.choices,
         verbose_name=_("Type"),
-        help_text=_("Indicate the outflow category"),
+        help_text=_("The outflow category"),
     )
 
     balance = models.CharField(
         max_length=1,
         choices=BalanceChoices.choices,
         verbose_name=_("Balance"),
-        help_text=_("Indicate how spending is allocated at the budget level"),
+        help_text=_("Enter how spending is allocated in the budget"),
         null=True,
         blank=False,
     )
@@ -468,7 +514,7 @@ class AccountingItemFlow(AccountingItem):
     class Meta:
         abstract = True
 
-    run = models.ForeignKey(Run, on_delete=models.CASCADE, null=True, blank=True)
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, null=True, blank=True, verbose_name=_("Event"))
 
     descr = models.CharField(max_length=500, verbose_name=_("Description"))
 
@@ -477,7 +523,7 @@ class AccountingItemFlow(AccountingItem):
     payment_date = models.DateField(
         null=True,
         verbose_name=_("Payment date"),
-        help_text=_("Indicate the exact date in which the payment has been performed"),
+        help_text=_("The exact date on which the payment was made"),
     )
 
     def download(self) -> str:
@@ -495,14 +541,14 @@ class AccountingItemOutflow(AccountingItemFlow):
         max_length=1,
         choices=ExpenseChoices.choices,
         verbose_name=_("Type"),
-        help_text=_("Indicate the outflow category"),
+        help_text=_("The outflow category"),
     )
 
     balance = models.CharField(
         max_length=1,
         choices=BalanceChoices.choices,
         verbose_name=_("Balance"),
-        help_text=_("Indicate how spending is allocated at the budget level"),
+        help_text=_("Enter how spending is allocated in the budget"),
         null=True,
         blank=False,
     )
@@ -522,7 +568,7 @@ class DiscountType(models.TextChoices):
     GIFT = "g", _("Gift")
 
 
-class Discount(UuidMixin, BaseModel):
+class Discount(UuidMixin, OrderMixin, BaseModel):
     """Represents Discount model."""
 
     name = models.CharField(max_length=100, help_text=_("Name of the discount - internal use"))
@@ -531,7 +577,7 @@ class Discount(UuidMixin, BaseModel):
         Run,
         related_name="discounts",
         blank=True,
-        help_text=_("Indicate the sessions for which the discount is active"),
+        help_text=_("Select the sessions for which the discount is active"),
         verbose_name=_("Sessions"),
     )
 
@@ -539,21 +585,19 @@ class Discount(UuidMixin, BaseModel):
         max_digits=10,
         decimal_places=2,
         default=0,
-        help_text=_("Indicate the value of the discount, it will be deducted from the total amount calculated"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text=_("The discount value; it will be deducted from the total registration fee"),
     )
 
     max_redeem = models.IntegerField(
-        help_text=_("Indicate the maximum number of such discounts that can be requested (0 for infinite uses)"),
+        help_text=_("The maximum number of uses (0 for unlimited uses)"),
     )
 
     cod = models.CharField(
         max_length=12,
         default=my_uuid_short,
         verbose_name=_("Code"),
-        help_text=_(
-            "Indicate the special discount code, to be communicated to the participants, which "
-            "will need to be entered during registration.",
-        ),
+        help_text=_("Unique promotional code to share with participants for use during registration"),
     )
 
     typ = models.CharField(
@@ -561,20 +605,19 @@ class Discount(UuidMixin, BaseModel):
         choices=DiscountType.choices,
         verbose_name=_("Type"),
         help_text=_(
-            "Indicate the type of discount: standard, play again (only available to those who "
-            "have already played this event)",
+            "The type of discount: standard, play again (only available to those who have already played this event)",
         ),
     )
 
     visible = models.BooleanField(
         default=False,
-        help_text=_("Indicates whether the discount is visible and usable by participants"),
+        help_text=_("Enter whether the discount is visible and usable by participants"),
     )
 
     only_reg = models.BooleanField(
         default=True,
         help_text=_(
-            "Indicate whether the discount can be used only on new enrollment, or whether it "
+            "Whether the discount can be used only on new enrollment, or whether it "
             "can be used by already registered participants.",
         ),
     )
@@ -618,15 +661,22 @@ class Discount(UuidMixin, BaseModel):
         """Return comma-separated list of all associated runs."""
         return ", ".join([str(c) for c in self.runs.all()])
 
+    def clean(self) -> None:
+        """Check uniqueness of discount code across runs."""
+        if self.pk:
+            conflict = (
+                Discount.objects.filter(cod=self.cod, runs__in=self.runs.all()).exclude(pk=self.pk).distinct().exists()
+            )
+            if conflict:
+                raise ValidationError(
+                    {"cod": _("This discount code is already used in one or more of the selected runs")}
+                )
+
 
 class AccountingItemDiscount(AccountingItem):
     """Represents AccountingItemDiscount model."""
 
-    run = models.ForeignKey(
-        Run,
-        on_delete=models.CASCADE,
-        null=True,
-    )
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, null=True, verbose_name=_("Event"))
 
     disc = models.ForeignKey(Discount, on_delete=models.CASCADE, related_name="accounting_items")
 
@@ -652,7 +702,7 @@ class CollectionStatus(models.TextChoices):
     """Represents CollectionStatus model."""
 
     OPEN = "o", _("Open")
-    DONE = "d", _("Close")
+    DONE = "d", _("Closed")
     PAYED = "p", _("Delivered")
 
 
@@ -676,11 +726,7 @@ class Collection(UuidMixin, BaseModel):
     )
 
     run = models.ForeignKey(
-        Run,
-        on_delete=models.CASCADE,
-        related_name="collections_runs",
-        null=True,
-        blank=True,
+        Run, on_delete=models.CASCADE, related_name="collections_runs", null=True, blank=True, verbose_name=_("Event")
     )
 
     organizer = models.ForeignKey(Member, on_delete=models.CASCADE, related_name="collections_created")
@@ -760,7 +806,7 @@ class RefundRequest(UuidMixin, BaseModel):
         max_length=2000,
         verbose_name=_("Details"),
         help_text=_(
-            "Indicate all references of how you want your refund to be paid  (ex: IBAN and "
+            "Enter all references of how you want your refund to be paid  (ex: IBAN and "
             "full bank details, paypal link, etc)",
         ),
     )
@@ -770,7 +816,8 @@ class RefundRequest(UuidMixin, BaseModel):
         decimal_places=2,
         default=0,
         verbose_name=_("Refund"),
-        help_text=_("Indicates the amount of reimbursement desired"),
+        help_text=_("Enter the amount of reimbursement desired"),
+        validators=[MinValueValidator(Decimal("0.01"))],
     )
 
     hide = models.BooleanField(default=False)
@@ -787,7 +834,9 @@ class RefundRequest(UuidMixin, BaseModel):
 class RecordAccounting(BaseModel):
     """Represents RecordAccounting model."""
 
-    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name="rec_accs", null=True, blank=True)
+    run = models.ForeignKey(
+        Run, on_delete=models.CASCADE, related_name="rec_accs", null=True, blank=True, verbose_name=_("Event")
+    )
 
     association = models.ForeignKey(Association, on_delete=models.CASCADE, related_name="rec_accs")
 

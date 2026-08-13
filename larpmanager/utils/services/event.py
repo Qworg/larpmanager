@@ -23,32 +23,44 @@ from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Prefetch, Q
-from django.utils.translation import activate
-from django.utils.translation import gettext_lazy as _
+from django.utils.translation import activate, gettext_lazy as _
 
 from larpmanager.cache.accounting import clear_registration_accounting_cache
+from larpmanager.cache.bulk import reset_bulk_options_cache
 from larpmanager.cache.button import clear_event_button_cache
 from larpmanager.cache.character import clear_event_cache_all_runs, clear_run_cache_and_media
 from larpmanager.cache.config import reset_element_configs
-from larpmanager.cache.event_text import reset_event_text
+from larpmanager.cache.event_text import clear_event_text_cache
+from larpmanager.cache.experience import clear_event_exp_cache, get_exp_effective_event_id
 from larpmanager.cache.feature import clear_event_features_cache, get_event_features
 from larpmanager.cache.fields import clear_event_fields_cache
 from larpmanager.cache.links import clear_run_event_links_cache
-from larpmanager.cache.registration import clear_registration_counts_cache
+from larpmanager.cache.question import (
+    clear_registration_questions_cache,
+    clear_writing_questions_cache,
+)
+from larpmanager.cache.registration import (
+    clear_registration_counts_cache,
+    clear_registration_tickets_cache,
+    get_registration_tickets,
+)
 from larpmanager.cache.rels import clear_event_relationships_cache
 from larpmanager.cache.role import remove_event_role_cache
-from larpmanager.cache.run import reset_cache_run
+from larpmanager.cache.run import reset_cache_config_run, reset_cache_run
 from larpmanager.cache.text_fields import reset_text_fields_cache
 from larpmanager.cache.widget import clear_widget_cache
+from larpmanager.cache.wwyltd import reset_orga_configs_cache
 from larpmanager.models.access import EventRole, get_event_organizers
 from larpmanager.models.base import Feature, auto_set_uuid, debug_set_uuid
-from larpmanager.models.event import Event, EventConfig, EventText, Run
+from larpmanager.models.event import Event, Run
+from larpmanager.models.experience import SystemExp
 from larpmanager.models.form import (
     BaseQuestionType,
     QuestionApplicable,
     QuestionStatus,
     QuestionVisibility,
     RegistrationQuestion,
+    RegistrationQuestionApplicable,
     RegistrationQuestionType,
     WritingQuestion,
     WritingQuestionType,
@@ -56,7 +68,6 @@ from larpmanager.models.form import (
 from larpmanager.models.registration import RegistrationCharacterRel, RegistrationTicket, TicketTier
 from larpmanager.models.writing import Character, Faction, FactionType
 from larpmanager.utils.auth.permission import has_event_permission
-from larpmanager.utils.core.common import copy_class
 from larpmanager.utils.services.inventory import generate_base_inventories
 
 if TYPE_CHECKING:
@@ -64,17 +75,7 @@ if TYPE_CHECKING:
 
 
 def get_character_filter(character: Any, character_registrations: Any, active_filters: Any) -> bool:
-    """Check if character should be included based on filter criteria.
-
-    Args:
-        character: Character instance to check
-        character_registrations (dict): Mapping of character IDs to registrations
-        active_filters (list): Filter criteria ('free', 'mirror', etc.)
-
-    Returns:
-        bool: True if character passes all filters
-
-    """
+    """Check if character should be included based on filter criteria."""
     if "free" in active_filters and character.id in character_registrations:
         return False
     return not ("mirror" in active_filters and character.mirror_id and character.mirror_id in character_registrations)
@@ -126,7 +127,8 @@ def get_event_filter_characters(context: dict, character_filters: Any) -> None: 
             if len(faction.chars) == 0:
                 continue
             context["factions"].append(faction)
-    else:
+
+    if not context["factions"]:
         default_faction = Faction()
         default_faction.number = 0
         default_faction.name = "all"
@@ -142,16 +144,10 @@ def get_event_filter_characters(context: dict, character_filters: Any) -> None: 
 
 
 def has_access_character(request: HttpRequest, context: dict) -> bool:
-    """Check if user has access to view/edit a specific character.
+    """Check if user has access to view/edit a specific character."""
+    if not request.user.is_authenticated:
+        return False
 
-    Args:
-        request: Django HTTP request object
-        context (dict): Context with character information
-
-    Returns:
-        bool: True if user has access (organizer, owner, or player)
-
-    """
     if has_event_permission(request, context, context["event"].slug, "orga_characters"):
         return True
 
@@ -164,12 +160,7 @@ def has_access_character(request: HttpRequest, context: dict) -> bool:
 
 
 def update_run_plan_on_event_change(run_instance: Any) -> None:
-    """Set run plan from association default if not already set.
-
-    Args:
-        run_instance: Run instance that was saved
-
-    """
+    """Set run plan from association default if not already set."""
     if not run_instance.plan and run_instance.event:
         plan_updates = {"plan": run_instance.event.association.plan}
         Run.objects.filter(pk=run_instance.pk).update(**plan_updates)
@@ -192,28 +183,6 @@ def prepare_campaign_event_data(event_instance: Any) -> None:
         event_instance._old_parent_id = None  # noqa: SLF001  # Internal flag for parent change detection
 
 
-def copy_parent_event_to_campaign(event: Any) -> None:
-    """Set up campaign event by copying from parent.
-
-    Args:
-        event: Event instance that was saved
-
-    """
-    # noinspection PyProtectedMember
-    if event.parent_id and event._old_parent_id != event.parent_id:  # noqa: SLF001  # Internal flag for parent change detection
-        # copy config, texts, roles, features
-        copy_class(event.pk, event.parent_id, EventConfig)
-        copy_class(event.pk, event.parent_id, EventText)
-        copy_class(event.pk, event.parent_id, EventRole)
-        for feature in event.parent.features.all():
-            event.features.add(feature)
-
-            # Use flag to prevent recursion instead of disconnecting signal
-            event._skip_campaign_setup = True  # noqa: SLF001  # Internal flag to prevent recursion
-            event.save()
-            del event._skip_campaign_setup  # noqa: SLF001  # Internal flag to prevent recursion
-
-
 def create_default_event_setup(event: Any) -> None:
     """Set up event with runs, tickets, and forms after save.
 
@@ -229,6 +198,9 @@ def create_default_event_setup(event: Any) -> None:
 
     if not event.runs.exists():
         Run.objects.create(event=event, number=1)
+        skin_features = event.association.skin.default_features.filter(overall=False)
+        if skin_features.exists():
+            event.features.add(*skin_features)
 
     event_features = get_event_features(event.id)
 
@@ -237,6 +209,10 @@ def create_default_event_setup(event: Any) -> None:
     save_event_registration_form(event_features, event)
 
     save_event_character_form(event_features, event)
+
+    if "experience" in event_features and not event.get_elements(SystemExp).exists():
+        target = event.get_class_parent(SystemExp)
+        SystemExp.objects.get_or_create(event=target, number=1, defaults={"name": "XP"})
 
     clear_event_features_cache(event.id)
 
@@ -255,12 +231,14 @@ def save_event_tickets(features: Any, instance: object) -> None:
     tickets = [
         ("", TicketTier.STANDARD, "Standard"),
         ("waiting", TicketTier.WAITING, "Waiting"),
-        ("filler", TicketTier.FILLER, "Filler"),
+        ("filler", TicketTier.FILLER, "Reserve"),
     ]
+
+    existing_tiers = {t["tier"] for t in get_registration_tickets(instance.id)}
     for ticket in tickets:
         if ticket[0] and ticket[0] not in features:
             continue
-        if not RegistrationTicket.objects.filter(event=instance, tier=ticket[1]).exists():
+        if ticket[1] not in existing_tiers:
             RegistrationTicket.objects.create(event=instance, tier=ticket[1], name=ticket[2])
 
 
@@ -296,11 +274,11 @@ def save_event_character_form(features: dict, instance: object) -> None:
     # Activate the organization's language for proper localization
     _activate_orga_lang(instance)
 
-    # Define default question types with their properties
+    # Define default question types with their properties: only the name is required
     def_tps = {
-        WritingQuestionType.NAME: ("Name", QuestionStatus.MANDATORY, QuestionVisibility.PUBLIC, 1000),
-        WritingQuestionType.TEASER: ("Presentation", QuestionStatus.MANDATORY, QuestionVisibility.PUBLIC, 10000),
-        WritingQuestionType.SHEET: ("Text", QuestionStatus.MANDATORY, QuestionVisibility.PRIVATE, 50000),
+        WritingQuestionType.NAME: ("Name", QuestionStatus.MANDATORY, QuestionVisibility.PUBLIC, 1000, 1),
+        WritingQuestionType.TEASER: ("Presentation", QuestionStatus.OPTIONAL, QuestionVisibility.PUBLIC, 10000, 2),
+        WritingQuestionType.SHEET: ("Text", QuestionStatus.OPTIONAL, QuestionVisibility.PRIVATE, 50000, 3),
     }
 
     # Get basic custom question types from the system
@@ -319,56 +297,79 @@ def save_event_character_form(features: dict, instance: object) -> None:
 
     # Add faction writing elements if faction feature is enabled
     if "faction" in features:
-        _init_writing_element(instance, def_tps, [QuestionApplicable.FACTION])
+        extra = [typ for typ in [WritingQuestionType.HIDE, WritingQuestionType.LOCKED] if typ in features]
+        _init_writing_element(instance, def_tps, [QuestionApplicable.FACTION], extra_types=extra or None)
+
+    # Add guild writing elements if guild feature is enabled
+    if "guild" in features:
+        _init_writing_element(instance, def_tps, [QuestionApplicable.GUILD])
 
     # Add plot writing elements with modified teaser settings if plot feature is enabled
     if "plot" in features:
         # Create a copy of default types with modified teaser for plot concept
         plot_tps = dict(def_tps)
-        plot_tps[WritingQuestionType.TEASER] = (
-            "Concept",
-            QuestionStatus.MANDATORY,
-            QuestionVisibility.PUBLIC,
-            3000,
-        )
+        plot_tps[WritingQuestionType.TEASER] = ("Concept", QuestionStatus.OPTIONAL, QuestionVisibility.PUBLIC, 3000, 2)
         _init_writing_element(instance, plot_tps, [QuestionApplicable.PLOT])
 
 
-def _init_writing_element(instance: object, default_question_types: Any, question_applicables: Any) -> None:
+def _init_writing_element(
+    instance: object,
+    default_question_types: Any,
+    question_applicables: Any,
+    extra_types: list | None = None,
+) -> None:
     """Initialize writing questions for specific applicables in an event instance.
 
     Args:
         instance: Event instance to initialize writing elements for
         default_question_types: Dictionary of default question types and their configurations
         question_applicables: List of QuestionApplicable types to create questions for
+        extra_types: Optional list of additional special question types to add
 
     """
     for applicable in question_applicables:
-        # if there are already questions for this applicable, skip
-        if instance.get_elements(WritingQuestion).filter(applicable=applicable).exists():
-            continue
+        existing_qs = instance.get_elements(WritingQuestion).filter(applicable=applicable)
 
-        writing_questions = [
-            WritingQuestion(
-                event=instance,
-                typ=question_type,
-                name=_(config[0]),
-                status=config[1],
-                visibility=config[2],
-                max_length=config[3],
-                applicable=applicable,
-            )
-            for question_type, config in default_question_types.items()
-        ]
-        # Manually set UUIDs since bulk_create doesn't trigger pre_save signals
-        for question in writing_questions:
-            auto_set_uuid(question)
-        WritingQuestion.objects.bulk_create(writing_questions)
+        if not existing_qs.exists():
+            writing_questions = [
+                WritingQuestion(
+                    event=instance,
+                    typ=question_type,
+                    name=_(config[0]),
+                    status=config[1],
+                    visibility=config[2],
+                    max_length=config[3],
+                    applicable=applicable,
+                    order=config[4],
+                )
+                for question_type, config in default_question_types.items()
+            ]
+            # Manually set UUIDs since bulk_create doesn't trigger pre_save signals
+            for question in writing_questions:
+                auto_set_uuid(question)
+            WritingQuestion.objects.bulk_create(writing_questions)
 
-        # Update UUIDs for debug mode after bulk_create (when IDs are assigned)
-        # Note: bulk_create doesn't trigger post_save, so we need to manually update
-        for question in writing_questions:
-            debug_set_uuid(question, created=True)
+            # Update UUIDs for debug mode after bulk_create (when IDs are assigned)
+            # Note: bulk_create doesn't trigger post_save, so we need to manually update
+            for question in writing_questions:
+                debug_set_uuid(question, created=True)
+
+            clear_writing_questions_cache(instance.id)
+
+        if extra_types:
+            existing_types = set(existing_qs.values_list("typ", flat=True))
+            for typ in extra_types:
+                if typ not in existing_types:
+                    WritingQuestion.objects.create(
+                        event=instance,
+                        typ=typ,
+                        name=_(typ.capitalize()),
+                        status=QuestionStatus.HIDDEN,
+                        visibility=QuestionVisibility.HIDDEN,
+                        max_length=1000,
+                        applicable=applicable,
+                    )
+                    clear_writing_questions_cache(instance.id)
 
 
 def _init_character_form_questions(
@@ -416,9 +417,9 @@ def _init_character_form_questions(
                 applicable=QuestionApplicable.CHARACTER,
             )
 
-    # Determine which types should not be removed (defaults + px feature)
+    # Determine which types should not be removed (defaults + experience feature)
     protected_types = set(default_types.keys())
-    if "px" in features:
+    if "experience" in features:
         protected_types.add(WritingQuestionType.COMPUTED)
     available_types -= protected_types
 
@@ -479,6 +480,8 @@ def save_event_registration_form(features: dict, instance: object) -> None:
     choices = dict(RegistrationQuestionType.choices)
     all_types = choices.keys()
     all_types -= basic_tps
+    # Faction preference is matchmaker-only and handled separately below
+    all_types -= {RegistrationQuestionType.FACTION_PREFERENCE}
 
     # Create default question types if they don't exist
     for el in def_tps:
@@ -501,7 +504,7 @@ def save_event_registration_form(features: dict, instance: object) -> None:
         "pay_what_you_want": _("Freely indicate the amount of your donation"),
         "reg_surcharges": _("Registration surcharge"),
         "reg_quotas": _(
-            "Number of installments to split the fee: payments and deadlines will be equally divided from the registration date",
+            "Select how many payments to split the fee into (total amount and deadlines are divided equally starting from the registration date)",
         ),
     }
 
@@ -519,6 +522,22 @@ def save_event_registration_form(features: dict, instance: object) -> None:
         # Remove question if feature is disabled but question exists
         if el not in features and el in types:
             RegistrationQuestion.objects.filter(event=instance, typ=el).delete()
+
+    # Default matchmaker question: when the matchmaker feature is active and the
+    # event has no matchmaker-applicable question yet, add a faction preference one
+    if "matchmaker" in features:
+        matchmaker_questions = instance.get_elements(RegistrationQuestion).filter(
+            applicable=RegistrationQuestionApplicable.MATCHMAKER,
+        )
+        if not matchmaker_questions.exists():
+            RegistrationQuestion.objects.create(
+                event=instance,
+                typ=RegistrationQuestionType.FACTION_PREFERENCE,
+                applicable=RegistrationQuestionApplicable.MATCHMAKER,
+                name=_("Faction preference"),
+                description=_("Order the factions from your most (top) to least (bottom) preferred"),
+                status=QuestionStatus.OPTIONAL,
+            )
 
 
 def _activate_orga_lang(instance: Event) -> None:
@@ -588,23 +607,18 @@ def assign_previous_campaign_character(registration: Any) -> None:
     ):
         return
 
-    # Find the most recent run from the same campaign series
-    previous_campaign_run = (
-        Run.objects.filter(
-            Q(event__parent=registration.run.event.parent) | Q(event_id=registration.run.event.parent_id),
+    # Find the most recent character the member had in this campaign series
+    previous_character_relation = (
+        RegistrationCharacterRel.objects.filter(
+            Q(registration__run__event__parent=registration.run.event.parent)
+            | Q(registration__run__event_id=registration.run.event.parent_id),
+            registration__member=registration.member,
+            registration__cancellation_date__isnull=True,
         )
-        .exclude(event_id=registration.run.event_id)
-        .order_by("-end")
+        .exclude(registration__run__event_id=registration.run.event_id)
+        .order_by("-registration__run__end")
         .first()
     )
-    if not previous_campaign_run:
-        return
-
-    # Get character relationship from previous run and create new one
-    previous_character_relation = RegistrationCharacterRel.objects.filter(
-        registration__member=registration.member,
-        registration__run=previous_campaign_run,
-    ).first()
 
     # Only proceed if previous character exists and is active
     if not previous_character_relation or not previous_character_relation.character.is_active:
@@ -651,16 +665,22 @@ def reset_all_run(event: Event, run: Run) -> None:
 
     # Clear run config cache
     reset_element_configs(run)
+    reset_cache_config_run(run)
+
+    # Clear question cache
+    clear_writing_questions_cache(run.event_id)
+    clear_registration_questions_cache(run.event_id)
 
     # Clear registration-related caches
     clear_registration_counts_cache(run.id)
     clear_registration_accounting_cache(run.id)
     clear_event_fields_cache(event.id)
     clear_event_relationships_cache(event.id)
+    clear_event_exp_cache(get_exp_effective_event_id(event))
+    clear_registration_tickets_cache(event.id)
 
-    # Clear event text caches for all EventText instances
-    for event_text in EventText.objects.filter(event_id=event.id):
-        reset_event_text(event_text)
+    # Clear event text caches for every type/language
+    clear_event_text_cache(event.id)
 
     # Clear event role caches
     for event_role_id in EventRole.objects.filter(event_id=event.id).values_list("id", flat=True):
@@ -674,6 +694,12 @@ def reset_all_run(event: Event, run: Run) -> None:
     # Clear widgets
     clear_widget_cache(run.id)
 
+    # Clear orga config field definitions cache (derived from active features)
+    reset_orga_configs_cache(event.id)
+
+    # Clear bulk
+    reset_bulk_options_cache(run.event_id)
+
 
 def on_event_features_m2m_changed(
     sender: type,  # noqa: ARG001
@@ -682,19 +708,7 @@ def on_event_features_m2m_changed(
     pk_set: set[int] | None,
     **kwargs: Any,  # noqa: ARG001
 ) -> None:
-    """Handle event-feature m2m relationship changes.
-
-    Called when features are added/removed from an event via the m2m_changed signal.
-    Uses a single bulk query to fetch all feature slugs and passes them to init_features.
-
-    Args:
-        sender: The through model class
-        instance: The Event instance
-        action: The m2m action (post_add, post_remove, post_clear)
-        pk_set: Set of Feature PKs being added/removed
-        **kwargs: Additional signal arguments
-
-    """
+    """Handle event-feature m2m relationship changes."""
     # Only process post_add actions for newly activated features
     if action != "post_add" or not pk_set:
         return

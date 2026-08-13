@@ -1,10 +1,10 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Deadlines" %} - {{ run }}
+    {% trans "Deadlines" %} - {{ run.search | truncatechars:50 }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows the deadlines to be met for this event" %}
+    {% trans "View all deadlines that must be met for this event" %}
 {% endblock info %}
 {% block content %}
     {% include "elements/deadlines.html" %}

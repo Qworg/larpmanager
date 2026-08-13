@@ -3,28 +3,27 @@
 {% block title %}
     {% trans "One-Time Access Tokens" %} - {{ event.name }}
 {% endblock title %}
-{% block info %}
-    {% trans "This page shows all access tokens for one-time content. Each token can only be used once." %}
-{% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
+    {% include "elements/table/header.html" %}
     <table id="onetimes_tokens" class="go_datatable writing">
         <thead>
             <tr>
+                <th></th>
                 <th>{% trans "Content" %}</th>
                 <th>{% trans "Token" %}</th>
                 <th>{% trans "Access Link" %}</th>
                 <th>{% trans "Note" %}</th>
                 <th>{% trans "Status" %}</th>
-                <th>{% trans "Used At" %}</th>
-                <th>{% trans "Used By" %}</th>
-                <th>{% trans "IP Address" %}</th>
+                <th>{% trans "Usage date" %}</th>
+                <th>{% trans "User" %}</th>
+                <th>IP Address</th>
                 <th>{% trans "Created" %}</th>
             </tr>
         </thead>
         <tbody>
             {% for el in list %}
                 <tr id="{{ el.uuid }}">
+                    <td></td>
                     <td>
                         <a href="{% url 'orga_onetimes_edit' run.get_slug el.content.uuid %}">{{ el.content.name }}</a>
                     </td>
@@ -66,4 +65,10 @@
             {% endfor %}
         </tbody>
     </table>
+    {% if not list %}
+        <p class="no-elements-available">
+            {% trans "No access tokens generated yet. Create one-time content items first, then generate tokens for distribution." %}
+        </p>
+    {% endif %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}

@@ -23,6 +23,7 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar
 
+from colorfield.fields import ColorField
 from django.db import models
 from django.db.models import Q
 from django.db.models.constraints import UniqueConstraint
@@ -32,13 +33,13 @@ from pilkit.processors import ResizeToFit
 from tinymce.models import HTMLField
 
 from larpmanager.cache.config import get_element_config, get_event_config
-from larpmanager.models.base import BaseModel, UuidMixin
+from larpmanager.models.base import BaseModel, MediaTokenMixin, OrderMixin, UuidMixin
 from larpmanager.models.event import BaseConceptModel, Event, ProgressStep, Run
 from larpmanager.models.member import Member
 from larpmanager.models.utils import UploadToPathAndRename, download, my_uuid, my_uuid_short, show_thumb
 
 
-class Writing(UuidMixin, BaseConceptModel):
+class Writing(MediaTokenMixin, UuidMixin, OrderMixin, BaseConceptModel):
     """Represents Writing model."""
 
     progress = models.ForeignKey(
@@ -78,33 +79,14 @@ class Writing(UuidMixin, BaseConceptModel):
         abstract = True
 
     def show_red(self) -> dict[str, Any]:
-        """Return a dictionary representation for red display.
-
-        Returns:
-            Dictionary containing number, name, and uuid attributes.
-
-        """
+        """Return a dictionary representation for red display."""
         js = {}
         for s in ["number", "name", "uuid"]:
             self.upd_js_attr(js, s)
         return js
 
     def show(self, run: Run | None = None) -> dict[str, Any]:  # noqa: ARG002
-        """Generate a display dictionary with basic writing information and teaser.
-
-        Builds upon the reduced representation from show_red() by adding the teaser
-        field to provide a more complete view of the writing object for display
-        purposes.
-
-        Args:
-            run: Optional run instance for context-specific display modifications.
-                 Defaults to None if no specific run context is needed.
-
-        Returns:
-            Dict containing writing object data with id, number, name, and teaser
-            fields suitable for JSON serialization and frontend display.
-
-        """
+        """Generate a display dictionary with basic writing information and teaser."""
         # Get base dictionary with id, number, and name fields
         js = self.show_red()
 
@@ -175,7 +157,7 @@ class Character(Writing):
     title = models.CharField(
         max_length=100,
         blank=True,
-        help_text=_("Indicates the title of the character - it will be shown along with the name"),
+        help_text=_("Enter the title of the character - it will be shown along with the name"),
     )
 
     mirror = models.OneToOneField(
@@ -185,8 +167,7 @@ class Character(Writing):
         blank=True,
         related_name="mirror_inv",
         help_text=_(
-            "Indicate whether the character is a mirror (i.e., whether this pg shows the true "
-            "secret face of another character)",
+            "Whether the character is a mirror (i.e., whether this pg shows the true secret face of another character)",
         ),
     )
 
@@ -199,6 +180,8 @@ class Character(Writing):
     )
 
     hide = models.BooleanField(default=False)
+
+    locked = models.BooleanField(default=False)
 
     cover = models.ImageField(
         max_length=500,
@@ -246,21 +229,16 @@ class Character(Writing):
 
     def __str__(self) -> str:
         """Return string representation."""
-        return f"#{self.number} {self.name}"
+        return self.name
 
-    def get_config(self, name: str, *, default_value: Any = None, bypass_cache: bool = False) -> Any:
+    def get_config(self, name: str, *, bypass_cache: bool = False) -> Any:
         """Get configuration value for this character."""
-        return get_element_config(self, name, default_value, bypass_cache=bypass_cache)
+        return get_element_config(self, name, bypass_cache=bypass_cache)
 
     @property
     def is_active(self) -> bool:
-        """Check if character is active (not marked as inactive in CharacterConfig).
-
-        Returns:
-            True if character is active (no inactive config), False otherwise.
-
-        """
-        is_inactive = self.get_config("inactive", default_value=False)
+        """Check if character is active (not marked as inactive in CharacterConfig)."""
+        is_inactive = self.get_config("inactive")
         return not (is_inactive == "True" or is_inactive is True)
 
     def show(self, run: Run | None = None) -> Any:
@@ -284,9 +262,6 @@ class Character(Writing):
         if js.get("title"):
             js["show"] += " - " + js["title"]
 
-        if run:
-            self.show_factions(run.event, js)
-
         if self.cover:
             # noinspection PyUnresolvedReferences
             js["cover"] = self.cover.url
@@ -298,12 +273,38 @@ class Character(Writing):
             js["mirror"] = self.mirror.show_red()
 
         js["hide"] = self.hide
-        if get_event_config(self.event_id, "user_character_approval", default_value=False) and self.status not in [
-            CharacterStatus.APPROVED
-        ]:
+        if get_event_config(self.event_id, "user_character_approval") and self.status not in [CharacterStatus.APPROVED]:
             js["hide"] = True
 
+        js["locked"] = self.locked
+
+        if run:
+            self.show_factions(run.event, js)
+            self.show_guilds(run.event, js)
+
         return js
+
+    def show_guilds(self, event: Event | None, js: dict) -> None:
+        """Add guild information to the JavaScript data structure.
+
+        Populates the 'guilds' list in the js dictionary with numbers of guilds
+        the character belongs to, restricted to accepted memberships.
+
+        Args:
+            event: Event object to get guilds from. If None, uses self.event.
+            js: Dictionary to populate with guild data.
+
+        """
+        js["guilds"] = []
+
+        guild_event = event.get_class_parent("guild") if event else self.event.get_class_parent("guild")
+
+        # noinspection PyUnresolvedReferences
+        query = self.guild_memberships.filter(
+            status=GuildMembershipStatus.ACCEPTED, guild__event=guild_event, guild__deleted__isnull=True
+        ).select_related("guild")
+        for membership in query.order_by("guild__order"):
+            js["guilds"].append(membership.guild.number)
 
     def show_factions(self, event: Event | None, js: dict) -> None:
         """Add faction information to the JavaScript data structure.
@@ -332,12 +333,15 @@ class Character(Writing):
             # Check if this is a primary faction
             if faction.typ == FactionType.PRIM:
                 has_primary_faction = True
-                # Set thumbnail if cover image exists
-                if faction.cover:
-                    js["thumb"] = faction.thumb.url
 
             # Add faction object with uuid and number
             js["factions"].append(faction.number)
+
+            # Propagate faction-level hide and locked flags to character
+            if faction.hide:
+                js["hide"] = True
+            if faction.locked:
+                js["locked"] = True
 
         # Add default faction if no primary found
         if not has_primary_faction:
@@ -345,46 +349,27 @@ class Character(Writing):
 
     @staticmethod
     def get_character_filepath(run: Run) -> str:
-        """Get the directory path for storing character files for a given run.
-
-        Args:
-            run: The run instance for which to get the character filepath.
-
-        Returns:
-            The absolute path to the character files directory.
-
-        """
-        # Build the path to the characters directory for this run
-        directory_path = str(Path(run.event.get_media_filepath()) / "characters" / f"{run.number}/")
-        # Ensure the directory exists
-        Path(directory_path).mkdir(parents=True, exist_ok=True)
+        """Get the directory path for storing character files for a given run."""
+        directory_path = str(Path(run.get_media_filepath()) / "characters/")
+        Path(directory_path).mkdir(mode=0o770, parents=True, exist_ok=True)
         return directory_path
 
-    def get_sheet_filepath(self, run: Run) -> str:
-        """Get the path to this character's PDF sheet file.
-
-        Args:
-            run: The Run instance for which to get the sheet filepath.
-
-        Returns:
-            The full filesystem path to the character's PDF sheet file.
-
-        """
-        # Build the character's directory path
+    def get_media_filepath(self, run: Run, descr: str) -> str:
+        """Get the base path to this character's PDF files."""
         character_directory = self.get_character_filepath(run)
+        return str(Path(character_directory) / f"{self.number}-{self.media_token}-{descr}.pdf")
 
-        # Create sheet filename using character number
-        sheet_filename = f"#{self.number}.pdf"
+    def get_sheet_filepath(self, run: Run) -> str:
+        """Get the path to this character's PDF sheet file."""
+        return self.get_media_filepath(run, "full")
 
-        return str(Path(character_directory) / sheet_filename)
-
-    def get_sheet_friendly_filepath(self, character_run: Any = None) -> Any:
+    def get_sheet_friendly_filepath(self, run: Run) -> str:
         """Return filepath for the light PDF version of the character sheet."""
-        return str(Path(self.get_character_filepath(character_run)) / f"#{self.number}-light.pdf")
+        return self.get_media_filepath(run, "light")
 
-    def get_relationships_filepath(self, run: Any = None) -> Any:
+    def get_relationships_filepath(self, run: Run) -> str:
         """Return filepath for the relationships PDF."""
-        return str(Path(self.get_character_filepath(run)) / f"#{self.number}-rels.pdf")
+        return self.get_media_filepath(run, "rels")
 
     def show_thumb(self) -> Any:
         """Return HTML for displaying character thumbnail image if available."""
@@ -397,21 +382,20 @@ class Character(Writing):
         """Return queryset of relationships where this character is the source."""
         return Relationship.objects.filter(source_id=self.pk)
 
-    def get_plot_characters(self) -> Any:
-        """Return queryset of plot-character relations for this character."""
-        return PlotCharacterRel.objects.filter(character_id=self.pk).select_related("plot").order_by("order")
+    def get_plot_characters(self, event: Any = None) -> Any:
+        """Return queryset of plot-character relations for this character.
+
+        Plots are not inherited in campaigns: when an event is given, only relations
+        towards plots of that event are returned.
+        """
+        queryset = PlotCharacterRel.objects.filter(character_id=self.pk).select_related("plot")
+        if event:
+            queryset = queryset.filter(plot__event=event.get_class_parent("plot"))
+        return queryset.order_by("order")
 
     @classmethod
     def get_example_csv(cls, enabled_features: dict[str, int]) -> list[list[str]]:
-        """Extend Writing CSV example with player assignment column.
-
-        Args:
-            enabled_features: List of enabled features for the organization.
-
-        Returns:
-            List of CSV rows with headers and examples including player column.
-
-        """
+        """Extend Writing CSV example with player assignment column."""
         # Get base CSV structure from parent Writing class
         csv_rows = Writing.get_example_csv(enabled_features)
 
@@ -478,8 +462,6 @@ class Plot(Writing):
 
     characters = models.ManyToManyField(Character, related_name="plots", through="PlotCharacterRel", blank=True)
 
-    order = models.IntegerField(default=0)
-
     class Meta:
         indexes: ClassVar[list] = [
             models.Index(fields=["number", "event"]),
@@ -505,12 +487,10 @@ class Plot(Writing):
         )
 
 
-class PlotCharacterRel(BaseModel):
+class PlotCharacterRel(OrderMixin, BaseModel):
     """Represents PlotCharacterRel model."""
 
     plot = models.ForeignKey(Plot, on_delete=models.CASCADE)
-
-    order = models.IntegerField(default=0)
 
     character = models.ForeignKey(Character, on_delete=models.CASCADE)
 
@@ -547,8 +527,6 @@ class Faction(Writing):
 
     typ = models.CharField(max_length=1, choices=FactionType.choices, default=FactionType.PRIM, verbose_name=_("Type"))
 
-    order = models.IntegerField(default=0)
-
     cover = models.ImageField(
         max_length=500,
         upload_to=UploadToPathAndRename("faction/cover/"),
@@ -569,74 +547,42 @@ class Faction(Writing):
 
     selectable = models.BooleanField(
         default=False,
-        help_text=_("Indicates whether it can be selected by participants"),
+        help_text=_("Whether the faction can be selected by participants"),
+    )
+
+    locked = models.BooleanField(default=False)
+
+    color = ColorField(
+        verbose_name=_("Color"),
+        null=True,
+        blank=True,
     )
 
     @staticmethod
     def get_faction_filepath(run: Run) -> str:
-        """Get the directory path for storing faction PDF files for a specific run.
-
-        Creates the faction directory structure within the event's media directory
-        if it doesn't already exist. The directory structure follows the pattern:
-        {event_media}/factions/{run_number}/
-
-        This static method can be called without a faction instance, useful for
-        batch operations or directory initialization.
-
-        Args:
-            run: The Run model instance for which to get the faction files directory
-
-        Returns:
-            Absolute filesystem path to the faction files directory for this run.
-            The directory is guaranteed to exist after this call.
-
-        Side Effects:
-            Creates the faction directory structure if it doesn't exist
-
-        """
-        # Build directory path: event_media/factions/run_number/
-        directory_path = str(Path(run.event.get_media_filepath()) / "factions" / f"{run.number}/")
-
-        # Ensure directory exists, creating parent directories as needed
-        Path(directory_path).mkdir(parents=True, exist_ok=True)
-
+        """Get the directory path for storing faction PDF files for a specific run."""
+        directory_path = str(Path(run.get_media_filepath()) / "factions/")
+        Path(directory_path).mkdir(mode=0o770, parents=True, exist_ok=True)
         return directory_path
 
     def get_sheet_filepath(self, run: Run) -> str:
-        """Get the complete file path for this faction's PDF sheet.
-
-        Constructs the full filesystem path where the faction sheet PDF should be
-        stored or retrieved from. The filename includes the faction number for
-        easy identification: #{faction_number}.pdf
-
-        Args:
-            run: The Run model instance for which to get the sheet file path
-
-        Returns:
-            Absolute filesystem path to the faction sheet PDF file, in the format:
-            {event_media}/factions/{run_number}/#{faction_number}.pdf
-
-        Example:
-            For faction #5 in run #2:
-            /path/to/media/event_123/factions/2/#5.pdf
-
-        """
-        # Get the faction directory for this run
+        """Get the complete file path for this faction's PDF sheet."""
         faction_directory = self.get_faction_filepath(run)
-
-        # Construct filename with faction number
-        sheet_filename = f"#{self.number}.pdf"
-
-        # Return complete path to faction sheet PDF
-        return str(Path(faction_directory) / sheet_filename)
+        return str(Path(faction_directory) / f"{self.number}-{self.media_token}.pdf")
 
     def show_red(self) -> dict:
         """Update JavaScript response with 'typ' and 'teaser' attributes."""
         js = super().show_red()
 
-        # Update JS attributes for typ and teaser fields
-        for s in ["typ", "teaser"]:
+        # Update JS attributes for typ, teaser and color fields
+        for s in ["typ", "teaser", "color"]:
             self.upd_js_attr(js, s)
+
+        if self.cover:
+            # noinspection PyUnresolvedReferences
+            js["cover"] = self.cover.url
+            # noinspection PyUnresolvedReferences
+            js["thumb"] = self.thumb.url
 
         return js
 
@@ -649,6 +595,103 @@ class Faction(Writing):
             models.Index(fields=["number", "event", "order"]),
             models.Index(fields=["event"], condition=Q(deleted__isnull=True), name="fac_evt_act"),
         ]
+
+
+class GuildRole(models.TextChoices):
+    """Represents GuildRole model."""
+
+    ADMIN = "a", _("Admin")
+    MEMBER = "m", _("Member")
+
+
+class GuildMembershipStatus(models.TextChoices):
+    """Represents GuildMembershipStatus model."""
+
+    INVITED = "i", _("Invited")
+    ACCEPTED = "a", _("Accepted")
+
+
+class Guild(Writing):
+    """Represents Guild model."""
+
+    cover = models.ImageField(
+        max_length=500,
+        upload_to=UploadToPathAndRename("guild/cover/"),
+        verbose_name=_("Guild cover"),
+        help_text=_("Guild logo"),
+        null=True,
+        blank=True,
+    )
+
+    thumb = ImageSpecField(
+        source="cover",
+        processors=[ResizeToFit(500, 500)],
+        format="JPEG",
+        options={"quality": 90},
+    )
+
+    characters = models.ManyToManyField(Character, through="GuildMembership", related_name="guilds_list", blank=True)
+
+    color = ColorField(
+        verbose_name=_("Color"),
+        null=True,
+        blank=True,
+    )
+
+    def show_red(self) -> dict:
+        """Update JavaScript response with 'teaser' and cover attributes."""
+        js = super().show_red()
+
+        for s in ["teaser", "color"]:
+            self.upd_js_attr(js, s)
+
+        if self.cover:
+            # noinspection PyUnresolvedReferences
+            js["cover"] = self.cover.url
+            # noinspection PyUnresolvedReferences
+            js["thumb"] = self.thumb.url
+
+        return js
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        return self.name
+
+    class Meta:
+        indexes: ClassVar[list] = [
+            models.Index(fields=["number", "event", "order"]),
+            models.Index(fields=["event"], condition=Q(deleted__isnull=True), name="gui_evt_act"),
+        ]
+
+
+class GuildMembership(models.Model):
+    """Represents GuildMembership model."""
+
+    guild = models.ForeignKey(Guild, on_delete=models.CASCADE, related_name="memberships")
+
+    character = models.ForeignKey(Character, on_delete=models.CASCADE, related_name="guild_memberships")
+
+    role = models.CharField(max_length=1, choices=GuildRole.choices, default=GuildRole.MEMBER, verbose_name=_("Role"))
+
+    status = models.CharField(
+        max_length=1,
+        choices=GuildMembershipStatus.choices,
+        default=GuildMembershipStatus.INVITED,
+        verbose_name=_("Status"),
+    )
+
+    created = models.DateTimeField(auto_now_add=True)
+
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints: ClassVar[list] = [
+            UniqueConstraint(fields=["guild", "character"], name="unique_guild_character"),
+        ]
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        return f"{self.character} - {self.guild} ({self.get_role_display()}, {self.get_status_display()})"
 
 
 class PrologueType(Writing):
@@ -755,21 +798,10 @@ class Handout(Writing):
         return f"H{self.number} {self.name}"
 
     def get_filepath(self, run: Run) -> str:
-        """Build the file path for this handout's PDF within the event's media directory.
-
-        Args:
-            run: The Run instance to determine the event directory.
-
-        Returns:
-            Absolute path to the handout PDF file.
-
-        """
-        # Build handouts directory path within event media
+        """Build the file path for this handout's PDF within the event's media directory."""
         handouts_directory = str(Path(run.event.get_media_filepath()) / "handouts")
-        Path(handouts_directory).mkdir(parents=True, exist_ok=True)
-
-        # Generate PDF filename using handout number
-        return str(Path(handouts_directory) / f"H{self.number}.pdf")
+        Path(handouts_directory).mkdir(mode=0o770, parents=True, exist_ok=True)
+        return str(Path(handouts_directory) / f"{self.number}-{self.media_token}.pdf")
 
 
 class TextVersionChoices(models.TextChoices):
@@ -778,6 +810,7 @@ class TextVersionChoices(models.TextChoices):
     PLOT = "p", "Plot"
     CHARACTER = "c", "Character"
     FACTION = "h", "Faction"
+    GUILD = "u", "Guild"
     QUEST = "q", "Quest"
     TRAIT = "t", "Trait"
     ARTICLE = "a", "Article"
@@ -931,7 +964,7 @@ def replace_character_names(instance: Any) -> None:
         return
 
     # Early return if event doesn't have character substitution enabled
-    if not get_event_config(instance.event_id, "writing_substitute", default_value=False):
+    if not get_event_config(instance.event_id, "writing_substitute"):
         return
 
     # Build character name to number mapping for replacement
@@ -959,6 +992,33 @@ def replace_character_names(instance: Any) -> None:
             plot_character_relationship.save()
 
 
+class RelationshipTag(UuidMixin, OrderMixin, BaseConceptModel):
+    """Represents a reusable label applied to relationships between characters."""
+
+    symmetric = models.BooleanField(
+        default=True,
+        verbose_name=_("Symmetric"),
+        help_text=_(
+            "If checked, applying this tag to a relationship also applies it to the other "
+            "character's relationship back towards this one",
+        ),
+    )
+
+    class Meta:
+        indexes: ClassVar[list] = [models.Index(fields=["number", "event"])]
+        constraints: ClassVar[list] = [
+            UniqueConstraint(
+                fields=["event", "number", "deleted"],
+                name="unique_RelationshipTag_with_optional",
+            ),
+            UniqueConstraint(
+                fields=["event", "number"],
+                condition=Q(deleted=None),
+                name="unique_RelationshipTag_without_optional",
+            ),
+        ]
+
+
 class Relationship(BaseModel):
     """Represents Relationship model."""
 
@@ -966,7 +1026,21 @@ class Relationship(BaseModel):
 
     target = models.ForeignKey(Character, related_name="target", on_delete=models.CASCADE)
 
-    text = HTMLField()
+    text = HTMLField(blank=True)
+
+    auto = models.BooleanField(default=False)
+
+    tags = models.ManyToManyField(RelationshipTag, related_name="relationships", blank=True)
+
+    @property
+    def event(self) -> Any:
+        """Return the event of the source character, for character name substitution."""
+        return self.source.event
+
+    @property
+    def event_id(self) -> Any:
+        """Return the event id of the source character, for character name substitution."""
+        return self.source.event_id
 
     def __str__(self) -> str:
         """Return string representation."""

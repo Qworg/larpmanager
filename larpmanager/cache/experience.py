@@ -1,0 +1,1102 @@
+# LarpManager - https://larpmanager.com
+# Copyright (C) 2025 Scanagatta Mauro
+#
+# This file is part of LarpManager and is dual-licensed:
+#
+# 1. Under the terms of the GNU Affero General Public License (AGPL) version 3,
+#    as published by the Free Software Foundation. You may use, modify, and
+#    distribute this file under those terms.
+#
+# 2. Under a commercial license, allowing use in closed-source or proprietary
+#    environments without the obligations of the AGPL.
+#
+# If you have obtained this file under the AGPL, and you make it available over
+# a network, you must also make the complete source code available under the same license.
+#
+# For more information or to purchase a commercial license, contact:
+# commercial@larpmanager.com
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
+from __future__ import annotations
+
+import contextlib
+import logging
+import threading
+from functools import partial
+from typing import TYPE_CHECKING, Any
+
+from django.conf import settings as conf_settings
+from django.core.cache import cache
+
+from larpmanager.cache.dirty import get_has_dirty_key, mark_dirty, refresh_if_dirty, resolve_dirty_section
+from larpmanager.models.event import Event
+from larpmanager.models.experience import AbilityExp, CriterionExp, DeliveryExp, ModifierExp, RuleExp, SystemExp
+from larpmanager.utils.core.common import _validate_and_fetch_objects
+from larpmanager.utils.larpmanager.tasks import background_auto
+
+if TYPE_CHECKING:
+    from larpmanager.models.form import WritingOption
+
+logger = logging.getLogger(__name__)
+
+_pre_clear_criterion_ids: threading.local = threading.local()
+_pre_clear_modifier_ids: threading.local = threading.local()
+_pre_clear_rule_ids: threading.local = threading.local()
+
+_EXP_NS = "exp"
+_get_exp_has_dirty_key = partial(get_has_dirty_key, _EXP_NS)
+_mark_exp_dirty = partial(mark_dirty, _EXP_NS)
+_refresh_exp_if_dirty = partial(refresh_if_dirty, _EXP_NS)
+_resolve_dirty_exp_section = partial(resolve_dirty_section, _EXP_NS)
+
+
+def get_event_exp_systems_key(event_id: int) -> str:
+    """Generate cache key for event experience systems list."""
+    return f"event__exp_systems__{event_id}"
+
+
+def get_event_exp_systems(event: Event) -> list[SystemExp]:
+    """Get ordered SystemExp list for an event, using cache.
+
+    Args:
+        event: Event instance (handles parent inheritance via get_elements).
+
+    Returns:
+        Ordered list of SystemExp instances for the effective event.
+
+    """
+    effective_event_id = event.get_class_parent(SystemExp).id
+    cache_key = get_event_exp_systems_key(effective_event_id)
+    systems = cache.get(cache_key)
+    if systems is None:
+        systems = list(event.get_elements(SystemExp).order_by("order"))
+        cache.set(cache_key, systems, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
+    return systems
+
+
+def has_multiple_exp_systems(event: Event) -> bool:
+    """Return whether the event has more than one experience system configured."""
+    return len(get_event_exp_systems(event)) > 1
+
+
+def clear_event_exp_systems_cache(event_id: int) -> None:
+    """Clear cached experience systems list for the given event ID."""
+    cache.delete(get_event_exp_systems_key(event_id))
+
+
+def get_event_exp_key(event_id: int) -> str:
+    """Generate cache key for event EXP relationships."""
+    return f"event__exp__{event_id}"
+
+
+def get_exp_effective_event_id(event: Event) -> int:
+    """Return the event ID to use as EXP cache key."""
+    if event.parent_id and not event.get_config("campaign_abilitypx_indep"):
+        return event.parent_id
+    return event.id
+
+
+def clear_event_exp_cache(event_id: int) -> None:
+    """Reset event EXP cache for given event ID."""
+    # Clear cache for the main event
+    cache_key = get_event_exp_key(event_id)
+    cache.delete(cache_key)
+    logger.debug("Reset EXP cache for event %s", event_id)
+
+
+def build_relationship_dict(relationship_items: list) -> dict[str, Any]:
+    """Build relationship dictionary with list and count."""
+    return {"list": relationship_items, "count": len(relationship_items)}
+
+
+def get_ability_rels(ability: AbilityExp) -> dict[str, Any]:
+    """Get ability relationships (characters, prerequisites, and requirements).
+
+    Args:
+        ability: The AbilityExp instance to get relationships for
+
+    Returns:
+        Dictionary containing relationship data with the structure:
+            {
+                'character_rels': {
+                    'list': [(char_id, char_name), ...],
+                    'count': int
+                },
+                'prerequisite_rels': {
+                    'list': [(ability_id, ability_name), ...],
+                    'count': int
+                },
+                'requirement_rels': {
+                    'list': [(option_id, option_name), ...],
+                    'count': int
+                }
+            }
+
+    """
+    relationships = {}
+
+    try:
+        # Get all characters that have this ability
+        ability_characters = ability.characters.all()
+        character_list = [(character.uuid, character.name) for character in ability_characters]
+        relationships["character_rels"] = build_relationship_dict(character_list)
+
+        # Get all prerequisite abilities
+        prerequisites = ability.prerequisites.all()
+        prerequisite_list = [(prereq.uuid, prereq.name) for prereq in prerequisites]
+        relationships["prerequisite_rels"] = build_relationship_dict(prerequisite_list)
+
+        # Get all requirement options
+        requirements = ability.requirements.all()
+        requirement_list = [(req.uuid, req.name) for req in requirements]
+        relationships["requirement_rels"] = build_relationship_dict(requirement_list)
+
+    except Exception:
+        logger.exception("Error getting relationships for ability %s", ability.id)
+        relationships = {}
+
+    return relationships
+
+
+def get_delivery_rels(delivery: DeliveryExp) -> dict[str, Any]:
+    """Get delivery relationships (characters).
+
+    Args:
+        delivery: The DeliveryExp instance to get relationships for
+
+    Returns:
+        Dictionary containing relationship data with the structure:
+            {
+                'character_rels': {
+                    'list': [(char_id, char_name), ...],
+                    'count': int
+                }
+            }
+
+    """
+    relationships = {}
+
+    try:
+        # Get all characters associated with this delivery
+        delivery_characters = delivery.characters.all()
+        character_list = [(character.uuid, character.name) for character in delivery_characters]
+        relationships["character_rels"] = build_relationship_dict(character_list)
+
+    except Exception:
+        logger.exception("Error getting relationships for award %s", delivery.id)
+        relationships = {}
+
+    return relationships
+
+
+def get_modifier_rels(modifier: ModifierExp) -> dict[str, Any]:
+    """Get modifier relationships (abilities, prerequisites, and requirements).
+
+    Args:
+        modifier: The ModifierExp instance to get relationships for
+
+    Returns:
+        Dictionary containing relationship data with the structure:
+            {
+                'ability_rels': {
+                    'list': [(ability_id, ability_name), ...],
+                    'count': int
+                },
+                'prerequisite_rels': {
+                    'list': [(ability_id, ability_name), ...],
+                    'count': int
+                },
+                'requirement_rels': {
+                    'list': [(option_id, option_name), ...],
+                    'count': int
+                }
+            }
+
+    """
+    relationships = {}
+
+    try:
+        # Get all abilities this modifier applies to
+        modifier_abilities = modifier.abilities.all()
+        ability_list = [(ability.uuid, ability.name) for ability in modifier_abilities]
+        relationships["ability_rels"] = build_relationship_dict(ability_list)
+
+        # Get all prerequisite abilities
+        prerequisites = modifier.prerequisites.all()
+        prerequisite_list = [(prereq.uuid, prereq.name) for prereq in prerequisites]
+        relationships["prerequisite_rels"] = build_relationship_dict(prerequisite_list)
+
+        # Get all requirement options
+        requirements = modifier.requirements.all()
+        requirement_list = [(req.uuid, req.name) for req in requirements]
+        relationships["requirement_rels"] = build_relationship_dict(requirement_list)
+
+        # Get all applicable factions
+        factions = modifier.factions.all()
+        faction_list = [(faction.uuid, faction.name) for faction in factions]
+        relationships["faction_rels"] = build_relationship_dict(faction_list)
+
+    except Exception:
+        logger.exception("Error getting relationships for modifier %s", modifier.id)
+        relationships = {}
+
+    return relationships
+
+
+def get_rule_rels(rule: RuleExp) -> dict[str, Any]:
+    """Get rule relationships (abilities).
+
+    Args:
+        rule: The RuleExp instance to get relationships for
+
+    Returns:
+        Dictionary containing relationship data with the structure:
+            {
+                'ability_rels': {
+                    'list': [(ability_id, ability_name), ...],
+                    'count': int
+                }
+            }
+
+    """
+    relationships = {}
+
+    try:
+        # Get all abilities this rule applies to
+        rule_abilities = rule.abilities.all()
+        ability_list = [(ability.uuid, ability.name) for ability in rule_abilities]
+        relationships["ability_rels"] = build_relationship_dict(ability_list)
+
+    except Exception:
+        logger.exception("Error getting relationships for rule %s", rule.id)
+        relationships = {}
+
+    return relationships
+
+
+def init_event_exp_all(event: Event) -> dict[str, dict[int, dict[str, Any]]]:
+    """Initialize all EXP relationships for an event and cache the result.
+
+    Builds a complete relationship cache for all EXP elements in the event,
+    including abilities, deliveries, modifiers, and rules.
+
+    Args:
+        event: The Event instance to initialize EXP relationships for
+
+    Returns:
+        Dictionary with relationship data structure organized by element type:
+        {
+            'abilities': {
+                ability_id: {
+                    'character_rels': {...},
+                    'prerequisite_rels': {...},
+                    'requirement_rels': {...}
+                }
+            },
+            'deliveries': {
+                delivery_id: relationship_data
+            },
+            'modifiers': {
+                modifier_id: relationship_data
+            },
+            'rules': {
+                rule_id: relationship_data
+            }
+        }
+
+    """
+    px_cache: dict[str, dict[int, dict[str, Any]]] = {}
+
+    try:
+        # Configuration mapping for each EXP type
+        px_configs = [
+            ("abilities", AbilityExp, get_ability_rels),
+            ("deliveries", DeliveryExp, get_delivery_rels),
+            ("modifiers", ModifierExp, get_modifier_rels),
+            ("rules", RuleExp, get_rule_rels),
+            ("criterions", CriterionExp, get_criterion_rels),
+        ]
+
+        # Process each EXP type
+        for cache_key_plural, model_class, get_relationships_function in px_configs:
+            # Initialize the cache section for this type
+            px_cache[cache_key_plural] = {}
+
+            # Get all elements of this type associated with the event
+            elements = event.get_elements(model_class)
+
+            # Build relationships for each element
+            for element in elements:
+                px_cache[cache_key_plural][element.id] = get_relationships_function(element)
+
+            logger.debug("Initialized %s %s for event %s", len(elements), cache_key_plural, event.id)
+
+        # Cache the complete relationship data structure
+        cache_key = get_event_exp_key(event.id)
+        cache.set(cache_key, px_cache, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
+        logger.debug("Cached EXP relationships for event %s", event.id)
+
+    except Exception:
+        # Log the error with full traceback and return empty result
+        logger.exception("Error initializing EXP relationships for event %s", event.id)
+        px_cache = {}
+
+    return px_cache
+
+
+def get_event_exp_cache(event: Event) -> dict[str, Any]:
+    """Get event EXP relationships from cache, initializing if not present.
+
+    Retrieves cached EXP relationship data for the specified event. If no cached
+    data exists, initializes the cache with fresh relationship data.
+
+    Args:
+        event: The Event instance to get EXP relationships for
+
+    Returns:
+        Dictionary containing cached EXP relationship data
+
+    """
+    effective_event = event.parent if event.parent else event
+    cache_key = get_event_exp_key(effective_event.id)
+
+    # Attempt to retrieve cached relationships
+    cached_relationships = cache.get(cache_key)
+
+    # Initialize cache if no data found
+    if cached_relationships is None:
+        logger.debug("EXP cache miss for event %s (effective %s), initializing", event.id, effective_event.id)
+        return init_event_exp_all(effective_event)
+
+    # Resolve any items still marked as dirty (not yet cleaned by background job)
+    any_resolved = False
+    if cache.get(_get_exp_has_dirty_key(effective_event.id)):
+        for _section, _model, _get_rels in (
+            ("abilities", AbilityExp, get_ability_rels),
+            ("deliveries", DeliveryExp, get_delivery_rels),
+            ("modifiers", ModifierExp, get_modifier_rels),
+            ("rules", RuleExp, get_rule_rels),
+            ("criterions", CriterionExp, get_criterion_rels),
+        ):
+            if _resolve_dirty_exp_section(effective_event.id, cached_relationships, _section, _model, _get_rels):
+                any_resolved = True
+    if any_resolved:
+        cache.set(
+            get_event_exp_key(effective_event.id), cached_relationships, timeout=conf_settings.CACHE_TIMEOUT_1_DAY
+        )
+
+    return cached_relationships
+
+
+def update_cache_section(event: Event, section_name: str, section_id: int, data: dict[str, Any]) -> None:
+    """Update a specific section in the event EXP cache.
+
+    Args:
+        event: The event
+        section_name: Name of the cache section (e.g., 'abilities', 'deliveries')
+        section_id: ID of the item within the section
+        data: Data to store for this item
+
+    """
+    try:
+        event_id = event.parent_id if event.parent else event.id
+        cache_key = get_event_exp_key(event_id)
+        cached_event_data = cache.get(cache_key)
+
+        if cached_event_data is None:
+            logger.debug("Cache miss during %s update for event %s, reinitializing", section_name, event_id)
+            event = Event.objects.filter(id=event_id).first()
+            if event is None:
+                logger.warning("Event %s not found, skipping cache reinitialization", event_id)
+                return
+            init_event_exp_all(event)
+            return
+
+        if section_name not in cached_event_data:
+            cached_event_data[section_name] = {}
+
+        cached_event_data[section_name][section_id] = data
+        cache.set(cache_key, cached_event_data, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
+        logger.debug("Updated %s %s EXP relationships in cache", section_name, section_id)
+
+    except Exception:
+        logger.exception("Error updating %s %s EXP relationships", section_name, section_id)
+        clear_event_exp_cache(event_id)
+
+
+def refresh_ability_relationships(ability: AbilityExp) -> None:
+    """Update ability relationships in cache."""
+    ability_relationship_data = get_ability_rels(ability)
+    update_cache_section(ability.event, "abilities", ability.id, ability_relationship_data)
+
+
+def refresh_delivery_relationships(delivery: DeliveryExp) -> None:
+    """Update delivery relationships in cache."""
+    delivery_relationship_data = get_delivery_rels(delivery)
+    update_cache_section(delivery.event, "deliveries", delivery.id, delivery_relationship_data)
+
+
+def refresh_modifier_relationships(modifier: ModifierExp) -> None:
+    """Update modifier relationships in cache."""
+    modifier_relationship_data = get_modifier_rels(modifier)
+    update_cache_section(modifier.event, "modifiers", modifier.id, modifier_relationship_data)
+
+
+def refresh_rule_relationships(rule: RuleExp) -> None:
+    """Update rule relationships in cache."""
+    rule_relationship_data = get_rule_rels(rule)
+    update_cache_section(rule.event, "rules", rule.id, rule_relationship_data)
+
+
+# Background tasks for cache updates
+
+
+@background_auto(queue="cache-experience", skip_duplicates=True)
+def refresh_ability_character_rels_background(ability_ids: int | list[int]) -> None:
+    """Update ability relationships in cache (dirty-aware background task)."""
+    abilities = _validate_and_fetch_objects(AbilityExp, ability_ids, "AbilityExp")
+    _refresh_exp_if_dirty("abilities", abilities, refresh_ability_relationships)
+
+
+@background_auto(queue="cache-experience", skip_duplicates=True)
+def refresh_delivery_rels_dirty_background(delivery_ids: int | list[int]) -> None:
+    """Update delivery relationships in cache (dirty-aware background task)."""
+    deliveries = _validate_and_fetch_objects(DeliveryExp, delivery_ids, "DeliveryExp")
+    _refresh_exp_if_dirty("deliveries", deliveries, refresh_delivery_relationships)
+
+
+@background_auto(queue="cache-experience", skip_duplicates=True)
+def refresh_modifier_rels_dirty_background(modifier_ids: int | list[int]) -> None:
+    """Update modifier relationships in cache (dirty-aware background task)."""
+    modifiers = _validate_and_fetch_objects(ModifierExp, modifier_ids, "ModifierExp")
+    _refresh_exp_if_dirty("modifiers", modifiers, refresh_modifier_relationships)
+
+
+@background_auto(queue="cache-experience", skip_duplicates=True)
+def refresh_rule_rels_dirty_background(rule_ids: int | list[int]) -> None:
+    """Update rule relationships in cache (dirty-aware background task)."""
+    rules = _validate_and_fetch_objects(RuleExp, rule_ids, "RuleExp")
+    _refresh_exp_if_dirty("rules", rules, refresh_rule_relationships)
+
+
+def on_ability_saved(ability: AbilityExp) -> None:
+    """Refresh rels for an ability and all abilities that list it as a prerequisite.
+
+    Called from post_save signal so that renaming or updating an ability propagates
+    to every ability whose prerequisite_rels cache references this one.
+    """
+    ability_ids = [ability.id]
+    ability_ids += list(ability.exp_ability_unlock.values_list("id", flat=True))
+    _mark_exp_dirty("abilities", ability_ids, ability.event_id)
+    refresh_ability_character_rels_background(ability_ids)
+
+
+def on_character_saved(character_id: int, event_id: int) -> None:
+    """Refresh ability caches that list this character in their character_rels.
+
+    Called from post_save signal on Character so that renaming a character propagates
+    to the cached_rels of every ability that has this character assigned.
+    """
+    ability_ids = list(AbilityExp.objects.filter(characters__id=character_id).values_list("id", flat=True))
+    if not ability_ids:
+        return
+    _mark_exp_dirty("abilities", ability_ids, event_id)
+    refresh_ability_character_rels_background(ability_ids)
+
+
+def on_writing_option_saved(option: WritingOption, event_id: int) -> None:
+    """Refresh ability, modifier, and criterion caches that list this option as a requirement.
+
+    Called from post_save signal on WritingOption so that renaming an option propagates
+    to the cached_rels of every ability, modifier, and criterion that requires it.
+    """
+    ability_ids = list(AbilityExp.objects.filter(requirements__id=option.id).values_list("id", flat=True))
+    if ability_ids:
+        _mark_exp_dirty("abilities", ability_ids, event_id)
+        refresh_ability_character_rels_background(ability_ids)
+
+    modifier_ids = list(ModifierExp.objects.filter(requirements=option).values_list("id", flat=True))
+    if modifier_ids:
+        _mark_exp_dirty("modifiers", modifier_ids, event_id)
+        refresh_modifier_rels_dirty_background(modifier_ids)
+
+    criterion_ids = list(CriterionExp.objects.filter(requirements=option).values_list("id", flat=True))
+    if criterion_ids:
+        _mark_exp_dirty("criterions", criterion_ids, event_id)
+        refresh_criterion_rels_dirty_background(criterion_ids)
+
+
+# Signal handlers for M2M changes
+def on_ability_characters_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: AbilityExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle ability-character relationship changes.
+
+    Updates ability cache when characters are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The AbilityExp (if reverse=False) or Character (if reverse=True)
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of related object IDs
+        reverse: True if signal was triggered from Character.exp_ability_list
+        **kwargs: Additional keyword arguments
+
+    """
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from Character.exp_ability_list - instance is a Character
+        # pk_set contains ability IDs, so refresh each ability
+        if pk_set:
+            ability_ids = list(pk_set)
+        elif action == "post_clear":
+            # Clear was called - need to refresh all abilities for this character
+            ability_ids = list(AbilityExp.objects.filter(characters=instance).values_list("id", flat=True))
+        else:
+            ability_ids = []
+    else:
+        # Signal came from AbilityExp.characters - instance is an AbilityExp
+        ability_ids = [instance.id]
+
+    if not ability_ids:
+        return
+
+    _mark_exp_dirty("abilities", ability_ids, instance.event_id)
+    refresh_ability_character_rels_background(ability_ids)
+
+
+def on_ability_prerequisites_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: AbilityExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle ability-prerequisite relationship changes.
+
+    Updates ability cache when prerequisites are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The AbilityExp being modified
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of prerequisite ability IDs
+        reverse: True if signal was triggered from exp_ability_unlock
+        **kwargs: Additional keyword arguments
+
+    """
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from exp_ability_unlock reverse relation
+        # instance is an AbilityExp that is a prerequisite for others
+        # pk_set contains ability IDs that require this prerequisite
+        if pk_set:
+            ability_ids = list(pk_set)
+        elif action == "post_clear":
+            ability_ids = list(AbilityExp.objects.filter(prerequisites=instance).values_list("id", flat=True))
+        else:
+            ability_ids = []
+    else:
+        # Signal came from AbilityExp.prerequisites - instance is the ability being modified
+        ability_ids = [instance.id]
+
+    if not ability_ids:
+        return
+
+    _mark_exp_dirty("abilities", ability_ids, instance.event_id)
+    refresh_ability_character_rels_background(ability_ids)
+
+
+def on_ability_requirements_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: AbilityExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle ability-requirement relationship changes.
+
+    Updates ability cache when requirements are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The AbilityExp (if reverse=False) or WritingOption (if reverse=True)
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of related object IDs
+        reverse: True if signal was triggered from WritingOption.abilities
+        **kwargs: Additional keyword arguments
+
+    """
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from WritingOption.abilities - instance is a WritingOption
+        # pk_set contains ability IDs, so refresh each ability
+        if pk_set:
+            ability_ids = list(pk_set)
+        elif action == "post_clear":
+            ability_ids = list(AbilityExp.objects.filter(requirements=instance).values_list("id", flat=True))
+        else:
+            ability_ids = []
+        # WritingOption has no event_id; derive it from the affected abilities
+        event_id = (
+            AbilityExp.objects.filter(id__in=ability_ids).values_list("event_id", flat=True).first()
+            if ability_ids
+            else None
+        )
+    else:
+        # Signal came from AbilityExp.requirements - instance is an AbilityExp
+        ability_ids = [instance.id]
+        event_id = instance.event_id
+
+    if not ability_ids:
+        return
+
+    _mark_exp_dirty("abilities", ability_ids, event_id)
+    refresh_ability_character_rels_background(ability_ids)
+
+
+def on_delivery_characters_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: DeliveryExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle delivery-character relationship changes.
+
+    Updates delivery cache when characters are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The DeliveryExp (if reverse=False) or Character (if reverse=True)
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of related object IDs
+        reverse: True if signal was triggered from Character side
+        **kwargs: Additional keyword arguments
+
+    """
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from Character - instance is a Character
+        # pk_set contains delivery IDs, so refresh each delivery
+        if pk_set:
+            delivery_ids = list(pk_set)
+        elif action == "post_clear":
+            delivery_ids = list(DeliveryExp.objects.filter(characters=instance).values_list("id", flat=True))
+        else:
+            delivery_ids = []
+    else:
+        # Signal came from DeliveryExp.characters - instance is a DeliveryExp
+        delivery_ids = [instance.id]
+
+    if not delivery_ids:
+        return
+
+    _mark_exp_dirty("deliveries", delivery_ids, instance.event_id)
+    refresh_delivery_rels_dirty_background(delivery_ids)
+
+
+def on_modifier_abilities_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: ModifierExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle modifier-ability relationship changes.
+
+    Updates modifier cache when abilities are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The ModifierExp (if reverse=False) or AbilityExp (if reverse=True)
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of related object IDs
+        reverse: True if signal was triggered from AbilityExp side
+        **kwargs: Additional keyword arguments
+
+    """
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from AbilityExp - instance is an AbilityExp
+        # pk_set contains modifier IDs, so refresh each modifier
+        if pk_set:
+            modifier_ids = list(pk_set)
+        elif action == "post_clear":
+            modifier_ids = list(ModifierExp.objects.filter(abilities=instance).values_list("id", flat=True))
+        else:
+            modifier_ids = []
+    else:
+        # Signal came from ModifierExp.abilities - instance is a ModifierExp
+        modifier_ids = [instance.id]
+
+    if not modifier_ids:
+        return
+
+    _mark_exp_dirty("modifiers", modifier_ids, instance.event_id)
+    refresh_modifier_rels_dirty_background(modifier_ids)
+
+
+def on_modifier_prerequisites_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: ModifierExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle modifier-prerequisite relationship changes.
+
+    Updates modifier cache when prerequisites are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The ModifierExp (if reverse=False) or AbilityExp (if reverse=True)
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of related object IDs
+        reverse: True if signal was triggered from AbilityExp side
+        **kwargs: Additional keyword arguments
+
+    """
+    store_key = f"{instance.pk}_modifier_prerequisites"
+
+    if reverse and action == "pre_clear":
+        captured = list(ModifierExp.objects.filter(prerequisites=instance).values_list("id", flat=True))
+        setattr(_pre_clear_modifier_ids, store_key, captured)
+        return
+
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from AbilityExp - instance is an AbilityExp that is a prerequisite
+        # pk_set contains modifier IDs, so refresh each modifier
+        if pk_set:
+            modifier_ids = list(pk_set)
+        elif action == "post_clear":
+            modifier_ids = getattr(_pre_clear_modifier_ids, store_key, [])
+            with contextlib.suppress(AttributeError):
+                delattr(_pre_clear_modifier_ids, store_key)
+        else:
+            modifier_ids = []
+    else:
+        # Signal came from ModifierExp.prerequisites - instance is a ModifierExp
+        modifier_ids = [instance.id]
+
+    if not modifier_ids:
+        return
+
+    _mark_exp_dirty("modifiers", modifier_ids, instance.event_id)
+    refresh_modifier_rels_dirty_background(modifier_ids)
+
+
+def on_modifier_requirements_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: ModifierExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle modifier-requirement relationship changes.
+
+    Updates modifier cache when requirements are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The ModifierExp (if reverse=False) or WritingOption (if reverse=True)
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of related object IDs
+        reverse: True if signal was triggered from WritingOption side
+        **kwargs: Additional keyword arguments
+
+    """
+    store_key = f"{instance.pk}_modifier_requirements"
+
+    if reverse and action == "pre_clear":
+        rows = list(ModifierExp.objects.filter(requirements=instance).values("id", "event_id"))
+        setattr(_pre_clear_modifier_ids, store_key, rows)
+        return
+
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from WritingOption - instance is a WritingOption
+        # pk_set contains modifier IDs, so refresh each modifier
+        if pk_set:
+            modifier_ids = list(pk_set)
+            # WritingOption has no event_id; derive it from the affected modifiers
+            event_id = (
+                ModifierExp.objects.filter(id__in=modifier_ids).values_list("event_id", flat=True).first()
+                if modifier_ids
+                else None
+            )
+        elif action == "post_clear":
+            rows = getattr(_pre_clear_modifier_ids, store_key, [])
+            with contextlib.suppress(AttributeError):
+                delattr(_pre_clear_modifier_ids, store_key)
+            modifier_ids = [r["id"] for r in rows]
+            event_id = rows[0]["event_id"] if rows else None
+        else:
+            modifier_ids = []
+            event_id = None
+    else:
+        # Signal came from ModifierExp.requirements - instance is a ModifierExp
+        modifier_ids = [instance.id]
+        event_id = instance.event_id
+
+    if not modifier_ids:
+        return
+
+    _mark_exp_dirty("modifiers", modifier_ids, event_id)
+    refresh_modifier_rels_dirty_background(modifier_ids)
+
+
+def on_modifier_factions_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: ModifierExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle modifier-faction relationship changes.
+
+    Updates modifier cache when factions are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The ModifierExp (if reverse=False) or Faction (if reverse=True)
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of related object IDs
+        reverse: True if signal was triggered from Faction side
+        **kwargs: Additional keyword arguments
+
+    """
+    store_key = f"{instance.pk}_modifier_factions"
+
+    if reverse and action == "pre_clear":
+        rows = list(ModifierExp.objects.filter(factions=instance).values("id", "event_id"))
+        setattr(_pre_clear_modifier_ids, store_key, rows)
+        return
+
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from Faction - instance is a Faction, which is itself event-scoped
+        # pk_set contains modifier IDs, so refresh each modifier
+        if pk_set:
+            modifier_ids = list(pk_set)
+        elif action == "post_clear":
+            rows = getattr(_pre_clear_modifier_ids, store_key, [])
+            with contextlib.suppress(AttributeError):
+                delattr(_pre_clear_modifier_ids, store_key)
+            modifier_ids = [r["id"] for r in rows]
+        else:
+            modifier_ids = []
+        event_id = instance.event_id
+    else:
+        # Signal came from ModifierExp.factions - instance is a ModifierExp
+        modifier_ids = [instance.id]
+        event_id = instance.event_id
+
+    if not modifier_ids:
+        return
+
+    _mark_exp_dirty("modifiers", modifier_ids, event_id)
+    refresh_modifier_rels_dirty_background(modifier_ids)
+
+
+def on_rule_abilities_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: RuleExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle rule-ability relationship changes.
+
+    Updates rule cache when abilities are added or removed.
+
+    Args:
+        sender: The M2M through model
+        instance: The RuleExp (if reverse=False) or AbilityExp (if reverse=True)
+        action: The M2M action (pre_add, post_add, etc.)
+        pk_set: Set of related object IDs
+        reverse: True if signal was triggered from AbilityExp side
+        **kwargs: Additional keyword arguments
+
+    """
+    store_key = f"{instance.pk}_rule_abilities"
+
+    if reverse and action == "pre_clear":
+        captured = list(RuleExp.objects.filter(abilities=instance).values_list("id", flat=True))
+        setattr(_pre_clear_rule_ids, store_key, captured)
+        return
+
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        # Signal came from AbilityExp - instance is an AbilityExp
+        # pk_set contains rule IDs, so refresh each rule
+        if pk_set:
+            rule_ids = list(pk_set)
+        elif action == "post_clear":
+            rule_ids = getattr(_pre_clear_rule_ids, store_key, [])
+            with contextlib.suppress(AttributeError):
+                delattr(_pre_clear_rule_ids, store_key)
+        else:
+            rule_ids = []
+    else:
+        # Signal came from RuleExp.abilities - instance is a RuleExp
+        rule_ids = [instance.id]
+
+    if not rule_ids:
+        return
+
+    _mark_exp_dirty("rules", rule_ids, instance.event_id)
+    refresh_rule_rels_dirty_background(rule_ids)
+
+
+def get_criterion_rels(criterion: CriterionExp) -> dict[str, Any]:
+    """Get criterion relationships (prerequisites, requirements)."""
+    relationships = {}
+
+    try:
+        prerequisites = criterion.prerequisites.all()
+        prerequisite_list = [(prereq.uuid, prereq.name) for prereq in prerequisites]
+        relationships["prerequisite_rels"] = build_relationship_dict(prerequisite_list)
+
+        requirements = criterion.requirements.all()
+        requirement_list = [(req.uuid, req.name) for req in requirements]
+        relationships["requirement_rels"] = build_relationship_dict(requirement_list)
+
+        factions = criterion.factions.all()
+        faction_list = [(faction.uuid, faction.name) for faction in factions]
+        relationships["faction_rels"] = build_relationship_dict(faction_list)
+
+    except Exception:
+        logger.exception("Error getting relationships for criterion %s", criterion.id)
+        relationships = {}
+
+    return relationships
+
+
+def refresh_criterion_relationships(criterion: CriterionExp) -> None:
+    """Update criterion relationships in cache."""
+    update_cache_section(criterion.event, "criterions", criterion.id, get_criterion_rels(criterion))
+
+
+@background_auto(queue="cache-experience", skip_duplicates=True)
+def refresh_criterion_rels_dirty_background(criterion_ids: int | list[int]) -> None:
+    """Update criterion relationships in cache (dirty-aware background task)."""
+    criterions = _validate_and_fetch_objects(CriterionExp, criterion_ids, "CriterionExp")
+    _refresh_exp_if_dirty("criterions", criterions, refresh_criterion_relationships)
+
+
+def _on_criterion_m2m_changed(
+    instance: CriterionExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool,  # noqa: FBT001
+    filter_field: str,
+) -> None:
+    """Shared handler for criterion M2M changes (prerequisites and requirements)."""
+    store_key = f"{instance.pk}_{filter_field}"
+
+    if reverse and action == "pre_clear":
+        # Capture criterion IDs and their events before Django deletes the M2M rows,
+        # because post_clear fires after deletion so the filter would return nothing.
+        rows = list(CriterionExp.objects.filter(**{filter_field: instance}).values("id", "event_id"))
+        setattr(_pre_clear_criterion_ids, store_key, rows)
+        return
+
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+
+    if reverse:
+        if pk_set:
+            rows = list(CriterionExp.objects.filter(id__in=pk_set).values("id", "event_id"))
+            criterion_ids = [r["id"] for r in rows]
+        elif action == "post_clear":
+            rows = getattr(_pre_clear_criterion_ids, store_key, [])
+            with contextlib.suppress(AttributeError):
+                delattr(_pre_clear_criterion_ids, store_key)
+            criterion_ids = [r["id"] for r in rows]
+        else:
+            rows = []
+            criterion_ids = []
+
+        if not criterion_ids:
+            return
+
+        ids_by_event: dict[int, list[int]] = {}
+        for row in rows:
+            ids_by_event.setdefault(row["event_id"], []).append(row["id"])
+        for ev_id, ids in ids_by_event.items():
+            _mark_exp_dirty("criterions", ids, ev_id)
+        refresh_criterion_rels_dirty_background(criterion_ids)
+        return
+
+    criterion_ids = [instance.id]
+    _mark_exp_dirty("criterions", criterion_ids, instance.event_id)
+    refresh_criterion_rels_dirty_background(criterion_ids)
+
+
+def on_criterion_prerequisites_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: CriterionExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle criterion-prerequisite relationship changes."""
+    _on_criterion_m2m_changed(instance, action, pk_set, reverse, "prerequisites")
+
+
+def on_criterion_requirements_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: CriterionExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle criterion-requirement relationship changes."""
+    _on_criterion_m2m_changed(instance, action, pk_set, reverse, "requirements")
+
+
+def on_criterion_factions_m2m_changed(
+    sender: type,  # noqa: ARG001
+    instance: CriterionExp,
+    action: str,
+    pk_set: set[int] | None,
+    reverse: bool = False,  # noqa: FBT001, FBT002
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Handle criterion-faction relationship changes."""
+    _on_criterion_m2m_changed(instance, action, pk_set, reverse, "factions")

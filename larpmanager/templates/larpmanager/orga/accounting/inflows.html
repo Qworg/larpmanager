@@ -1,12 +1,13 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Inflows" %} - {{ run }}
+    {% trans "Inflows" %} - {{ run.search | truncatechars:50 }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows all inflows received for this event" %}
+    {% trans "Track all external income entries recorded for this event" %}
 {% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
+    {% include "elements/table/header.html" %}
     {% include "elements/paginate.html" %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}

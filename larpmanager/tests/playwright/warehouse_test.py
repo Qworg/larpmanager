@@ -23,15 +23,32 @@ Test: Warehouse inventory management system.
 Verifies container creation, item management with tags, item movements between containers,
 area assignments, external item tracking, and historical movement records.
 """
-
 from typing import Any
 
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, go_to, load_image, login_orga, expect_normalized, submit_confirm
+from larpmanager.models.miscellanea import WarehouseItem
+from larpmanager.tests.utils import go_to, load_image, login_orga, expect_normalized, submit_confirm, \
+    sidebar, get_modal_iframe, save_modal, _wait_select2_results, _wait_lm_ready
 
 pytestmark = pytest.mark.e2e
+
+
+def _expect_assignment_save(page: Any, idx: str = None):
+    """Wait for the debounced item-assignment autosave POST triggered by the wrapped action.
+
+    idx: optional row id to match against the posted payload, so a save from
+    another row edited just before does not satisfy the wait."""
+
+    def _is_save(response):
+        if response.request.method != "POST" or "assignment" not in response.url:
+            return False
+        if idx is not None and f"idx={idx}" not in (response.request.post_data or ""):
+            return False
+        return response.ok
+
+    return page.expect_response(_is_save)
 
 
 def test_warehouse(pw_page: Any) -> None:
@@ -43,93 +60,113 @@ def test_warehouse(pw_page: Any) -> None:
     add_items(page)
     bulk(page)
 
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     area_assigmenents(page)
     checks(page)
+    edit_loaded_deployed(page)
+    item_areas(page)
 
 
 def prepare(page: Any) -> None:
     # Activate feature inventory
-    page.locator("#exe_features").get_by_role("link", name="Features").click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Warehouse").check()
     submit_confirm(page)
 
     # create new boxes
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Box A")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_position").fill("bibi")
-    page.locator("#id_position").press("Tab")
-    page.locator("#id_description").fill("asdf dsfds dfdsfs")
-    page.get_by_text("After confirmation, add").click()
-    submit_confirm(page)
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Boc B")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_position").fill("dd")
-    page.locator("#id_position").press("Tab")
-    page.locator("#id_description").fill("dsf dfsd dfsd")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Box A")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_position").fill("bibi")
+    edit_iframe.locator("#id_position").press("Tab")
+    edit_iframe.locator("#id_description").fill("asdf dsfds dfdsfs")
+    save_modal(page, edit_iframe)
+
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Boc B")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_position").fill("dd")
+    edit_iframe.locator("#id_position").press("Tab")
+    edit_iframe.locator("#id_description").fill("dsf dfsd dfsd")
+    save_modal(page, edit_iframe)
     expect_normalized(page, page.locator("#inv_containers tbody"), "box a bibi asdf dsfds dfdsfs boc b dd dsf dfsd dfsd")
 
     # add new tags
     page.get_by_role("link", name="Tags").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Electrical")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("gg ds")
-    page.get_by_text("After confirmation, add").click()
-    submit_confirm(page)
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Gru sad ")
-    page.locator("#id_description").click()
-    page.locator("#id_description").fill("dsadsa")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Electrical")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("gg ds")
+    save_modal(page, edit_iframe)
+
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Gru sad ")
+    edit_iframe.locator("#id_description").click()
+    edit_iframe.locator("#id_description").fill("dsadsa")
+    save_modal(page, edit_iframe)
 
 
 def add_items(page: Any) -> None:
     # add new items
     page.get_by_role("link", name="Items").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Item 1")
-    page.locator("#id_description").click()
-    page.locator("#id_description").fill("sadsada")
-    page.get_by_label("", exact=True).click()
-    page.get_by_role("searchbox").nth(1).fill("box A")
-    page.locator(".select2-results__option").first.click()
-    page.get_by_role("list").click()
-    page.get_by_role("searchbox").fill("ele")
-    page.locator(".select2-results__option").first.click()
-    load_image(page, "#id_photo")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Item 1")
+    edit_iframe.locator("#id_description").click()
+    edit_iframe.locator("#id_description").fill("sadsada")
+    edit_iframe.get_by_label("", exact=True).click()
+    edit_iframe.get_by_role("searchbox").nth(1).fill("box A")
+    _wait_select2_results(edit_iframe)
+    edit_iframe.locator(".select2-results__option").first.click()
+    edit_iframe.get_by_role("list").click()
+    edit_iframe.get_by_role("searchbox").fill("ele")
+    _wait_select2_results(edit_iframe)
+    edit_iframe.locator(".select2-results__option").first.click()
+    load_image(edit_iframe,"#id_photo")
+    save_modal(page, edit_iframe)
 
     expect_normalized(page, page.locator("#one"), "Item 1 sadsada Box A Electrical")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Item 2")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("sdsadas")
-    page.locator("#select2-id_container-container").click()
-    page.get_by_role("searchbox").nth(1).fill("boc")
-    page.locator(".select2-results__option").first.click()
-    page.get_by_text("After confirmation, add").click()
-    submit_confirm(page)
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Item 3sa")
-    page.locator("#id_description").click()
-    page.locator("#id_description").fill("dsad")
-    page.locator("#select2-id_container-container").click()
-    page.get_by_role("searchbox").nth(1).fill("box")
-    page.locator(".select2-results__option").first.click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Item 2")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("sdsadas")
+    edit_iframe.locator("#select2-id_container-container").click()
+    edit_iframe.get_by_role("searchbox").nth(1).fill("boc")
+    _wait_select2_results(edit_iframe)
+    edit_iframe.locator(".select2-results__option").first.click()
+    save_modal(page, edit_iframe)
+
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Item 3sa")
+    edit_iframe.locator("#id_description").click()
+    edit_iframe.locator("#id_description").fill("dsad")
+    edit_iframe.locator("#select2-id_container-container").click()
+    edit_iframe.get_by_role("searchbox").nth(1).fill("box")
+    _wait_select2_results(edit_iframe)
+    edit_iframe.locator(".select2-results__option").first.click()
+    save_modal(page, edit_iframe)
+
+    page.reload()
 
     # check items
     expect_normalized(page,
         page.locator("#one"), "item 1 sadsada box a electrical item 2 sdsadas boc b item 3sa dsad box a"
     )
+
+    page.reload()
 
 
 def bulk(page: Any) -> None:
@@ -139,9 +176,7 @@ def bulk(page: Any) -> None:
     # Test links not working when bulk active
     page.locator('[id="u1"]').get_by_role("cell", name="Electrical").click()
     page.locator('[id="u1"]').get_by_role("cell", name="Box A").click()
-    page.locator('[id="u1"]').get_by_role("cell", name="sadsada").click()
-    page.get_by_role("link", name="Execute").click()
-    just_wait(page)
+    submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "item 1 sadsada boc b electrical")
     expect_normalized(page, page.locator("#one"), "item 2 sdsadas boc b")
     expect_normalized(page, page.locator("#one"), "item 3sa dsad box a")
@@ -149,14 +184,11 @@ def bulk(page: Any) -> None:
 
     page.get_by_role("link", name="Bulk").click()
     page.locator('[id="u2"]').get_by_role("cell", name="Boc B").click()
-    page.locator('[id="u2"] > td:nth-child(5)').click()
     page.locator('[id="u1"]').get_by_role("cell", name="Boc B").click()
     page.get_by_role("cell", name="Electrical").click()
-    page.get_by_role("cell", name="sadsada").click()
     page.locator("#operation").select_option("2")
     page.locator("#objs_2").select_option("u2")
-    page.get_by_role("link", name="Execute").click()
-    just_wait(page)
+    submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "item 3sa dsad box a")
     expect_normalized(page, page.locator("#one"), "Item 2 sdsadas Boc B Gru sad")
     expect_normalized(page, page.locator("#one"), "Item 1 sadsada Boc B Electrical | Gru sad")
@@ -165,36 +197,39 @@ def bulk(page: Any) -> None:
     # add movement
     page.get_by_role("link", name="Movements").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#select2-id_item-container").click()
-    page.get_by_role("searchbox").fill("item 3")
-    page.get_by_role("option", name="Item 3sa").click()
-    page.locator("#id_notes").click()
-    page.locator("#id_notes").fill("maintenance")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#select2-id_item-container").click()
+    edit_iframe.get_by_role("searchbox").fill("item 3")
+    edit_iframe.get_by_role("option", name="Item 3sa").click()
+    edit_iframe.locator("#id_notes").click()
+    edit_iframe.locator("#id_notes").fill("maintenance")
+    save_modal(page, edit_iframe)
     expect_normalized(page, page.locator("#one"), "Item 3sa maintenance")
 
 
 def area_assigmenents(page: Any) -> None:
     page.get_by_role("link", name="Area").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Kitchen")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_position").fill("ss")
-    page.locator("#id_description").click()
-    page.locator("#id_description").fill("sds")
-    page.locator("#id_description").press("CapsLock")
-    page.get_by_role("checkbox", name="After confirmation, add").check()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Kitchen")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_position").fill("ss")
+    edit_iframe.locator("#id_description").click()
+    edit_iframe.locator("#id_description").fill("sds")
+    edit_iframe.locator("#id_description").press("CapsLock")
+    save_modal(page, edit_iframe)
 
-    page.locator("#id_name").fill("sALOON")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_position").fill("SD")
-    page.locator("#id_position").press("CapsLock")
-    page.locator("#id_position").fill("SDsad ")
-    page.locator("#id_description").click()
-    page.locator("#id_description").fill("saddsadsa")
-    submit_confirm(page)
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").fill("sALOON")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_position").fill("SD")
+    edit_iframe.locator("#id_position").press("CapsLock")
+    edit_iframe.locator("#id_position").fill("SDsad ")
+    edit_iframe.locator("#id_description").click()
+    edit_iframe.locator("#id_description").fill("saddsadsa")
+    save_modal(page, edit_iframe)
 
     # check
     expect_normalized(page, page.locator("#one"), "sALOON SDsad saddsadsa Item assignments")
@@ -203,13 +238,14 @@ def area_assigmenents(page: Any) -> None:
     # assign items
     page.locator('[id="u2"]').get_by_role("link", name="Item assignments").click()
     page.locator(".selected").first.click()
-    page.get_by_role("row", name=" item 3sa dsad box a").get_by_role("textbox").click()
-    page.get_by_role("row", name=" item 3sa dsad box a").get_by_role("textbox").fill("sss")
+    page.locator('[id="u3"]').get_by_role("textbox").click()
+    with _expect_assignment_save(page, "u3"):
+        page.locator('[id="u3"]').get_by_role("textbox").fill("sss")
     page.locator('[id="u1"] > .selected').click()
-    page.get_by_role("row", name=" Item 1 sadsada Boc B Electrical | Gru sad").get_by_role("textbox").click()
-    page.get_by_role("row", name=" Item 1 sadsada Boc B Electrical | Gru sad").get_by_role("textbox").fill("ffff")
+    page.locator('[id="u1"]').get_by_role("textbox").click()
+    with _expect_assignment_save(page, "u1"):
+        page.locator('[id="u1"]').get_by_role("textbox").fill("ffff")
     page.get_by_role("cell", name="ffff").get_by_role("textbox").click()
-    just_wait(page)
 
     # check
     page.get_by_role("link", name="Area").click()
@@ -228,22 +264,125 @@ def area_assigmenents(page: Any) -> None:
     page.get_by_role("link", name="Area").click()
     page.locator('[id="u1"]').get_by_role("link", name="Item assignments").click()
     page.get_by_role("row", name="item 3sa dsad box a").get_by_role("textbox").click()
-    page.get_by_role("row", name="item 3sa dsad box a").get_by_role("textbox").fill("b")
-    page.locator('[id="u1"] > .selected').click()
-    just_wait(page)
+    with _expect_assignment_save(page):
+        page.get_by_role("row", name="item 3sa dsad box a").get_by_role("textbox").fill("b")
+    with _expect_assignment_save(page, "u1"):
+        page.locator('[id="u1"] > .selected').click()
 
 
 def checks(page: Any) -> None:
     # check manifest
     page.get_by_role("link", name="Manifest").click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "New Kitchen Position: ss Description: sds")
     expect_normalized(page,
-        page.locator("#one"), "Item 1 Boc B - dd Item 3sa Box A - bibi	 b sALOON Position: SDsad Description: saddsadsa "
+        page.locator("#one"), """Item 1 Boc B - dd Item 3sa Box A - bibi	 b no items have been assigned to this area yet. sALOON Position: SDsad Description: saddsadsa """
     )
     expect_normalized(page, page.locator("#one"), "Item 1 Boc B - dd ffff Item 3sa Box A - bibi	 sss")
 
     # check checks
     page.get_by_role("link", name="Checks").click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "Item 1 Description: sadsada Photo")
     expect_normalized(page, page.locator("#one"), "Kitchen sALOON ffff Item 3sa Description: dsad")
     expect_normalized(page, page.locator("#one"), "Kitchen b sALOON sss")
+
+
+def edit_loaded_deployed(page: Any) -> None:
+    # navigate to manifest
+    page.get_by_role("link", name="Manifest").click()
+
+    # find first item row in the manifest table
+    first_row = page.locator("table.go_datatable tbody tr").first
+
+    # toggle Loaded on: click the loaded cell and verify check icon appears
+    loaded_cell = first_row.locator("td.ajax-toggle[tp='load']")
+    loaded_icon = loaded_cell.locator("span.value")
+    assert not loaded_icon.is_visible(), "Loaded should be off initially"
+    loaded_cell.click()
+    expect(loaded_icon).to_be_visible()
+
+    # reload and verify loaded state persists
+    page.reload()
+    page.wait_for_load_state("domcontentloaded")
+    first_row = page.locator("table.go_datatable tbody tr").first
+    loaded_cell = first_row.locator("td.ajax-toggle[tp='load']")
+    loaded_icon = loaded_cell.locator("span.value")
+    assert loaded_icon.is_visible(), "Loaded check icon should persist after reload"
+
+    # toggle Loaded off
+    loaded_cell.click()
+    expect(loaded_icon).not_to_be_visible()
+
+    # toggle Deployed on: click the deployed cell and verify check icon appears
+    deployed_cell = first_row.locator("td.ajax-toggle[tp='depl']")
+    deployed_icon = deployed_cell.locator("span.value")
+    assert not deployed_icon.is_visible(), "Deployed should be off initially"
+    deployed_cell.click()
+    expect(deployed_icon).to_be_visible()
+
+    # reload and verify deployed state persists
+    page.reload()
+    page.wait_for_load_state("domcontentloaded")
+    first_row = page.locator("table.go_datatable tbody tr").first
+    deployed_cell = first_row.locator("td.ajax-toggle[tp='depl']")
+    deployed_icon = deployed_cell.locator("span.value")
+    assert deployed_icon.is_visible(), "Deployed check icon should persist after reload"
+
+    # toggle Deployed off
+    deployed_cell.click()
+    expect(deployed_icon).not_to_be_visible()
+
+
+def item_areas(page: Any) -> None:
+    # Give Item 2 a finite stock so quantity-exceeds-stock validation can be
+    # exercised; Item 2 has no area assignment yet (untouched by the previous
+    # area/manifest steps, unlike Item 1 and Item 3sa).
+    WarehouseItem.objects.filter(name="Item 2").update(quantity=5)
+
+    sidebar(page, "Items")
+
+    # the list now shows every warehouse item, assigned or not
+    expect(page.locator("#one").get_by_text("Item 2", exact=True)).to_have_count(1)
+
+    # clicking the row's edit link pre-loads the item even though it has no
+    # assignment yet in this event
+    page.get_by_role("row", name="Item 2").get_by_role("link").nth(1).click()
+    edit_iframe = get_modal_iframe(page)
+
+    def area_input(frame: Any, area_name: str) -> Any:
+        return frame.locator("tr", has_text=area_name).locator("input")
+
+    # 3 + 4 = 7 exceeds the item's stock of 5: submitting must be rejected
+    area_input(edit_iframe, "Kitchen").fill("3")
+    area_input(edit_iframe, "sALOON").fill("4")
+    submit_btn = edit_iframe.get_by_role("button", name="Confirm")
+    submit_btn.click(force=True)
+    expect(edit_iframe.get_by_text("exceeds available stock").first).to_be_visible()
+
+    # 2 + 3 = 5, exactly the available stock: this must succeed
+    area_input(edit_iframe, "Kitchen").fill("2")
+    area_input(edit_iframe, "sALOON").fill("3")
+    save_modal(page, edit_iframe)
+
+    expect_normalized(
+        page, page.locator("tr", has_text="Item 2"), "Item 2 sdsadas Boc B Gru sad Kitchen (2) sALOON (3)"
+    )
+
+    # edit again: quantities must be preloaded from the existing assignments
+    # (as the first link is now hidden, this become the new first one)
+    page.get_by_role("row", name="Item 2").get_by_role("link").first.click()
+    edit_iframe = get_modal_iframe(page)
+    assert area_input(edit_iframe, "Kitchen").input_value() == "2"
+    assert area_input(edit_iframe, "sALOON").input_value() == "3"
+
+    # zeroing out every area clears the item's assignments for this event,
+    # but the item itself must still be listed
+    area_input(edit_iframe, "Kitchen").fill("0")
+    area_input(edit_iframe, "sALOON").fill("0")
+    save_modal(page, edit_iframe)
+
+    expect(page.locator("#one").get_by_text("Item 2", exact=True)).to_have_count(1)
+    row = page.locator("tr", has_text="Item 2")
+    expect(row.get_by_text("Kitchen", exact=False)).to_have_count(0)
+    expect(row.get_by_text("sALOON", exact=False)).to_have_count(0)

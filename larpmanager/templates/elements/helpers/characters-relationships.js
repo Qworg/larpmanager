@@ -2,7 +2,7 @@
 
 <script>
 
-const editUrl = "{% url 'orga_characters_edit' run.get_slug 0 %}";
+const editUrl = "{% url 'orga_characters_new' run.get_slug %}";
 
 {% if edit_uuid %}
     var edit_uuid = '{{ edit_uuid }}';
@@ -11,7 +11,14 @@ const editUrl = "{% url 'orga_characters_edit' run.get_slug 0 %}";
 {% endif %}
 
 // Get relationship length limit from form context
-const relationshipLimit = {{ form.relationship_max_length }};
+const relationshipLimit = {{ form.relationship_max_length|default:10000 }};
+
+// Relationship tags available in this event, used to build the tags checkboxes for newly added relationships
+const relationshipTags = [
+    {% for tag in relationship_tags %}
+        {uuid: "{{ tag.uuid|escapejs }}", name: "{{ tag.name|escapejs }}"},
+    {% endfor %}
+];
 
 window.addEventListener('DOMContentLoaded', function() {
 
@@ -39,7 +46,7 @@ window.addEventListener('DOMContentLoaded', function() {
                     <p>
                         <a href="#" class="my_toggle" tog="f_rel_{0}">{% trans "Show" %}</a>
                     </p>
-                    <div class="hide hide_later f_rel_{0}">
+                    <div class="hide  f_rel_{0}">
                         <textarea name="rel_{0}" id="rel_{0}"></textarea>
                         <div class="helptext">
                             {% trans "text length" %}: <span class="count"></span> / {{ form.relationship_max_length }}
@@ -53,23 +60,46 @@ window.addEventListener('DOMContentLoaded', function() {
 
         $('#form_relationships').prepend(html);
 
+        {% if not TINYMCE_DISABLED %}
         window.addTinyMCETextarea('.f_rel_{0} textarea'.format(ch_uuid)).then((editorId) => {
             setupRelationshipEditor(editorId);
         });
+        {% endif %}
+
+        if (relationshipTags.length) {
+            var tagsCell = $('<td></td>');
+            relationshipTags.forEach(function(tag) {
+                // build with DOM nodes: tag names are organizer-supplied and must never be parsed as HTML
+                var checkbox = $('<input type="checkbox">')
+                    .attr('name', 'rel_tags_' + ch_uuid)
+                    .attr('value', tag.uuid);
+                tagsCell.append($('<label class="rel_tag_checkbox"></label>').append(checkbox).append(document.createTextNode(tag.name)));
+            });
+            {% trans "Tags" as tags_label %}
+            {% trans "Symmetric tags apply to both characters in the relationship" as tags_helptext %}
+            tagsCell.append($('<div class="helptext"></div>').text("{{ tags_helptext|escapejs }}"));
+            var tagsRow = $('<tr></tr>').append($('<th></th>').text("{{ tags_label|escapejs }}")).append(tagsCell);
+            $('#rel_' + ch_uuid + '_tr').append(tagsRow);
+        }
+
         already.push(ch_uuid);
 
     }
 
     $(function() {
         {% for key, item in relationships.items %}
+            {% if not TINYMCE_DISABLED %}
             window.addTinyMCETextarea('.f_{{ key }} textarea').then((editorId) => {
                 setupRelationshipEditor(editorId);
             });
+            {% endif %}
             already.push('{{ key }}');
         {% endfor %}
 
         document.getElementById('main_form').addEventListener('submit', function(e) {
+            {% if not TINYMCE_DISABLED %}
             tinymce.triggerSave();
+            {% endif %}
         });
 
         // add new
@@ -78,10 +108,10 @@ window.addEventListener('DOMContentLoaded', function() {
             if (value == null || value == '') return;
 
             if (value == edit_uuid) {
-                alert('You have selected the character you are editing');
+                if (!window.lmTesting) alert('You have selected the character you are editing');
             }
             else if (already.includes(value)) {
-                alert('Relationship with this character already exists');
+                if (!window.lmTesting) alert('Relationship with this character already exists');
             } else {
                 var name = $(this).find('option:selected').text();
                 add_relationship(value, name);

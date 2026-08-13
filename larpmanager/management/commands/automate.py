@@ -26,14 +26,16 @@ from django.conf import settings as conf_settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.management.base import BaseCommand
 from django.db import connection
-from django.utils import timezone
+from django.utils import dateparse, timezone
 
 from larpmanager.accounting.balance import check_accounting, check_run_accounting
 from larpmanager.accounting.token_credit import get_regs, get_regs_paying_incomplete
 from larpmanager.cache.config import get_association_config
 from larpmanager.cache.feature import get_association_features, get_event_features
+from larpmanager.cache.registration import get_active_registrations
 from larpmanager.mail.accounting import notify_invoice_check
 from larpmanager.mail.base import check_holiday
+from larpmanager.mail.digest import send_daily_organizer_summaries
 from larpmanager.mail.member import send_password_reset_remainder
 from larpmanager.mail.remind import (
     notify_deadlines,
@@ -42,6 +44,7 @@ from larpmanager.mail.remind import (
     remember_pay,
     remember_profile,
 )
+from larpmanager.models.access import AssociationRole, EventRole, get_association_executives
 from larpmanager.models.accounting import (
     AccountingItemDiscount,
     AccountingItemMembership,
@@ -50,13 +53,18 @@ from larpmanager.models.accounting import (
     PaymentStatus,
     PaymentType,
 )
-from larpmanager.models.association import Association
+from larpmanager.models.association import Association, AssociationConfig
+from larpmanager.models.base import PaymentMethod
 from larpmanager.models.event import DevelopStatus, Event, Run
+from larpmanager.models.larpmanager import LarpManagerChatLog
 from larpmanager.models.member import Badge, Member, Membership, MembershipStatus, get_user_membership
+from larpmanager.models.miscellanea import Log
 from larpmanager.models.registration import Registration, TicketTier
 from larpmanager.utils.core.common import get_time_diff_today
 from larpmanager.utils.io.pdf import print_run_bkg
-from larpmanager.utils.larpmanager.tasks import notify_admins
+from larpmanager.utils.larpmanager.tasks import my_send_mail, notify_admins
+from larpmanager.utils.publication.base import publish_event_all
+from larpmanager.utils.services.miscellanea import _newsletter_set_non_active
 
 
 class Command(BaseCommand):
@@ -73,13 +81,7 @@ class Command(BaseCommand):
     help = "Automate processes "
 
     def handle(self, *args: Any, **options: Any) -> None:  # noqa: ARG002
-        """Handle command execution with exception handling.
-
-        Args:
-            *args: Command arguments
-            **options: Command options
-
-        """
+        """Handle command execution with exception handling."""
         try:
             self.go()
         except Exception as e:  # noqa: BLE001 - Top-level handler must catch all errors to notify admins
@@ -107,34 +109,34 @@ class Command(BaseCommand):
         # Clean up database records and perform initial maintenance
         self.clean_db()
 
+        # Clean up stale test and inactive associations
+        self.clean_associations()
+
         # Update accounting for all registrations with incomplete payments
         # Process each registration to recalculate totals and payment status
         registrations_with_incomplete_payments = get_regs_paying_incomplete()
-        for registration in registrations_with_incomplete_payments.select_related("run"):
+        for registration in registrations_with_incomplete_payments.select_related(
+            "run", "run__event", "ticket", "member"
+        ):
             registration.save()
 
         # Process feature-specific checks for each association
         # Only run checks if the association has the required features enabled
         for association in Association.objects.all():
-            enabled_features = get_association_features(association.id)
-
-            # Check if reminder notifications need to be sent
-            if "remind" in enabled_features:
-                self.check_remind(association)
-
-            # Process achievement/badge updates for members
-            if "badge" in enabled_features:
-                self.check_achievements(association)
-
-            # Validate and update accounting records
-            if "record_acc" in enabled_features:
-                check_accounting(association.id)
+            self.check_association(association)
 
         # Perform standard system-wide maintenance checks
         # These checks run regardless of feature flags
         self.check_password_reset()
         self.check_payment_not_approved()
         self.check_old_payments()
+        self.check_gateway_payments()
+
+        # Send daily organizer summaries for events with digest mode enabled
+        self.send_organizer_summaries()
+
+        # Send weekly recap of ask-larpmanager chat questions to admins
+        self.send_chat_log_recap()
 
         # Process automation tasks for active runs only
         # Skip completed or cancelled runs to avoid unnecessary processing
@@ -153,17 +155,218 @@ class Command(BaseCommand):
             if "print_pdf" in event_features:
                 print_run_bkg(run.event.association.slug, run.get_slug())
 
+    def check_association(self, association: Association) -> None:
+        """Run all feature-specific automation checks for a single association."""
+        enabled_features = get_association_features(association.id)
+
+        # Check if reminder notifications need to be sent
+        if "remind" in enabled_features:
+            self.check_remind(association)
+
+        # Process achievement/badge updates for members
+        if "badge" in enabled_features:
+            self.check_achievements(association)
+
+        # Validate and update accounting records
+        if "record_acc" in enabled_features:
+            check_accounting(association.id)
+
+        # Sync published events to ILDB for all upcoming runs
+        if "publisher" in enabled_features:
+            self.publish_runs(association)
+
+    @staticmethod
+    def publish_runs(association: Association) -> None:
+        """Trigger publication sync for all visible runs."""
+        for run in Run.objects.filter(event__association=association, development=DevelopStatus.SHOW):
+            publish_event_all(run)
+
+    _DELETION_WARNING_KEY = "deletion_warning_sent"
+    _NO_DELETE_KEY = "no_delete"
+    _INACTIVE_SIGNUP_THRESHOLD = 10
+    _INACTIVE_LOG_DAYS = 360
+    _WARNING_GRACE_DAYS = 30
+    _ADMIN_NOTICE_DAYS_BEFORE = 3
+
+    @staticmethod
+    def clean_associations() -> None:
+        """Delete test associations older than 1 week, and warn/delete inactive non-test ones.
+
+        Test associations (slug starts with 'test-') are deleted after 7 days.
+        Non-test associations with fewer than 10 signups and no log activity in
+        the last year receive a warning email before deletion.
+        Associations with the 'no_delete' config key set are never deleted.
+        Admins receive a notice 7 days before an association is deleted.
+        """
+        now = timezone.now()
+
+        # Process inactive non-test associations
+        log_cutoff = now - timedelta(days=Command._INACTIVE_LOG_DAYS)
+        for association in Association.objects.filter(created__lte=log_cutoff, demo_types__isnull=True):
+            # Skip associations explicitly protected from deletion
+            if AssociationConfig.objects.filter(association=association, name=Command._NO_DELETE_KEY).exists():
+                continue
+
+            has_recent_activity = Log.objects.filter(association=association, created__gte=log_cutoff).exists()
+            if has_recent_activity:
+                # Recent activity: clear any pending warning
+                AssociationConfig.objects.filter(association=association, name=Command._DELETION_WARNING_KEY).delete()
+                continue
+
+            signup_count = Registration.objects.filter(
+                run__event__association=association, cancellation_date__isnull=True, pending=False
+            ).count()
+            if signup_count >= Command._INACTIVE_SIGNUP_THRESHOLD:
+                # Active enough: clear any pending warning
+                AssociationConfig.objects.filter(association=association, name=Command._DELETION_WARNING_KEY).delete()
+                continue
+
+            warning_config = AssociationConfig.objects.filter(
+                association=association, name=Command._DELETION_WARNING_KEY
+            ).first()
+
+            if warning_config is None:
+                Command._send_deletion_warning(association)
+                AssociationConfig.objects.create(
+                    association=association,
+                    name=Command._DELETION_WARNING_KEY,
+                    value=now.isoformat(),
+                )
+            else:
+                warning_date = dateparse.parse_datetime(warning_config.value)
+                if not warning_date:
+                    continue
+                days_since_warning = (now - warning_date).days
+                admin_notice_threshold = Command._WARNING_GRACE_DAYS - Command._ADMIN_NOTICE_DAYS_BEFORE
+                if days_since_warning >= admin_notice_threshold:
+                    Command._send_admin_deletion_link(association, days_since_warning)
+
+    @staticmethod
+    def _deactivate_organizer_newsletters(association: Association) -> None:
+        """Deactivate newsletter for all organizers (role number=1) before association deletion."""
+        emails: set[str] = set()
+
+        for email in AssociationRole.objects.filter(association=association, number=1).values_list(
+            "members__email", flat=True
+        ):
+            if email:
+                emails.add(email)
+
+        for email in EventRole.objects.filter(event__association=association, number=1).values_list(
+            "members__email", flat=True
+        ):
+            if email:
+                emails.add(email)
+
+        if association.main_mail:
+            emails.add(association.main_mail)
+
+        for email in emails:
+            _newsletter_set_non_active(email)
+
+    @staticmethod
+    def _send_deletion_warning(association: Association) -> None:
+        """Email association executives (or main_mail) that the org will be deleted in 30 days."""
+        subject = f"Can we delete '{association.name}' on LarpManager, since it has been inactive?"
+        body = f"""
+            Hello,<br /><br />
+            We noticed that your LarpManager organization <a href='https://{association.slug}.larpmanager.com/manage'>
+            <i>{association.name}</i></a> has been inactive for a significant period. <br /><br />
+            <b>Action required</b>: If you wish to keep this organization and its data,
+            please reply to this email within <b>30 days</b>.<br /><br />
+            If we don't hear from you, the organization and all associated data will
+            be permanently removed.<br /><br />
+            - LarpManager Team
+            """
+
+        recipients = list(get_association_executives(association))
+        if association.main_mail:
+            recipients.append(association.main_mail)
+        for _name, email in conf_settings.ADMINS:
+            recipients.append(email)
+
+        for recipient in recipients:
+            my_send_mail(subject, body, recipient)
+
+    @staticmethod
+    def _send_admin_deletion_link(association: Association, days_since_warning: int) -> None:
+        """Email system admins a deletion confirmation link with full association details."""
+        executives = get_association_executives(association)
+        exec_lines = "".join(f"<li>{m.user.get_full_name()} &lt;{m.user.email}&gt;</li>" for m in executives)
+        events = list(Event.objects.filter(association=association).values("name", "slug", "created"))
+        event_lines = "".join(
+            f"<li>{e['name']} ({e['slug']}) - created {e['created'].strftime('%Y-%m-%d')}</li>" for e in events
+        )
+        registration_count = Registration.objects.filter(run__event__association=association).count()
+        delete_url = f"https://larpmanager.com/lm/clean/{association.slug}/"
+
+        subject = f"[LarpManager] Action required: delete inactive association '{association.name}'"
+        body = f"""
+            Admin notice,<br /><br />
+            The LarpManager organization <i>{association.name}</i> (slug: <b>{association.slug}</b>) has been
+            inactive for <b>{days_since_warning} days</b> since the deletion warning was sent.<br /><br />
+            <b>Association details:</b><br />
+            <ul>
+                <li>Name: {association.name}</li>
+                <li>Slug: {association.slug}</li>
+                <li>Created: {association.created.strftime("%Y-%m-%d")}</li>
+                <li>Contact email: {association.main_mail or "-"}</li>
+                <li>Total registrations: {registration_count}</li>
+            </ul>
+            <b>Executive members:</b><br />
+            <ul>{exec_lines or "<li>None</li>"}</ul>
+            <b>Events ({len(events)}):</b><br />
+            <ul>{event_lines or "<li>None</li>"}</ul>
+            To permanently delete this association, visit:<br />
+            <a href='{delete_url}'>{delete_url}</a><br /><br />
+            To prevent deletion, set the <code>no_delete</code> config key on this association.<br /><br />
+            - LarpManager Automate
+            """
+
+        for _name, email in conf_settings.ADMINS:
+            my_send_mail(subject, body, email)
+
     @staticmethod
     def check_old_payments() -> None:
-        """Delete payment invoices older than 60 days with CREATED status.
+        """Delete payment invoices older than 365 days with CREATED status."""
+        # Bulk delete old payment invoices in a single query
+        reference_date = timezone.now() - timedelta(days=365)
+        PaymentInvoice.objects.filter(status=PaymentStatus.CREATED, created__lte=reference_date).delete()
 
-        Cleans up abandoned payment attempts to prevent database bloat.
+    _GATEWAY_STUCK_RATIO_THRESHOLD = 0.5
+    _NON_GATEWAY_METHOD_SLUGS = ("wire", "paypal_nf", "any")
+
+    @staticmethod
+    def check_gateway_payments() -> None:
+        """Notify admins if a payment gateway looks broken.
+
+        For each payment method with an actual gateway (excludes the ones
+        which are manually confirmed), compares the number of
+        invoices left in CREATED status against the number that reached
+        CHECKED status over the last 3 days. A high ratio of created-but-
+        never-checked invoices points to a gateway integration failure.
         """
-        # delete old payment invoice
-        reference_date = timezone.now() - timedelta(days=60)
-        payment_invoices_query = PaymentInvoice.objects.filter(status=PaymentStatus.CREATED)
-        for payment_invoice in payment_invoices_query.filter(created__lte=reference_date.date()):
-            payment_invoice.delete()
+        reference_date = timezone.now() - timedelta(days=3)
+        gateway_methods = PaymentMethod.objects.exclude(slug__in=Command._NON_GATEWAY_METHOD_SLUGS)
+
+        for method in gateway_methods:
+            created_count = PaymentInvoice.objects.filter(
+                method=method, status=PaymentStatus.CREATED, created__gte=reference_date
+            ).count()
+            checked_count = PaymentInvoice.objects.filter(
+                method=method, status=PaymentStatus.CHECKED, created__gte=reference_date
+            ).count()
+
+            if created_count == 0:
+                continue
+
+            ratio = created_count / (checked_count or 1)
+            if ratio > Command._GATEWAY_STUCK_RATIO_THRESHOLD:
+                notify_admins(
+                    "Gateway payment issue",
+                    f"Method '{method.slug}': {created_count} created vs {checked_count} checked "
+                    f"in last 3 days (ratio {ratio:.2f})",
+                )
 
     @staticmethod
     def check_payment_not_approved() -> None:
@@ -183,11 +386,7 @@ class Command(BaseCommand):
 
     @staticmethod
     def check_password_reset() -> None:
-        """Send password reset reminders and clear processed requests.
-
-        Processes pending password reset requests by sending reminder emails
-        and clearing the reset flags from membership records.
-        """
+        """Send password reset reminders and clear processed requests."""
         # check password reset
         pending_reset_memberships = Membership.objects.exclude(password_reset__exact="")
         for membership in pending_reset_memberships.exclude(password_reset__isnull=True):
@@ -197,11 +396,7 @@ class Command(BaseCommand):
 
     @staticmethod
     def clean_db() -> None:
-        """Execute configured database cleanup operations.
-
-        Runs SQL cleanup commands defined in CLEAN_DB setting to maintain
-        database performance and remove stale data.
-        """
+        """Execute configured database cleanup operations."""
         with connection.cursor() as database_cursor:
             for cleanup_sql_query in conf_settings.CLEAN_DB:
                 database_cursor.execute(cleanup_sql_query)
@@ -209,43 +404,55 @@ class Command(BaseCommand):
     def check_achievements(self, association: Association) -> None:
         """Process badge achievements for association members.
 
-        Analyzes past and future event registrations to award badges
-        based on participation and friend referral patterns. Processes
-        all completed events for participation badges and future events
-        for friend referral tracking.
-
-        Args:
-            association: Association instance to process badges for
-
-        Returns:
-            None: Function performs side effects by updating badge cache
-
+        Analyzes past and future event registrations and past event roles to award
+        badges based on participation, organization, and friend referral patterns.
         """
         # Initialize cache for badges and player data
         cache = {"badges": {}, "players": {}}
         events_by_id = {}
 
-        # Process past events for participation badges
-        for run in Run.objects.filter(end__lt=timezone.now().date(), event__association=association):
-            # Get all non-cancelled registrations
-            registrations = Registration.objects.filter(run=run, cancellation_date__isnull=True)
+        # Track which members have already been processed for roles per event to prevent double counting
+        processed_orga_events = set()
+        processed_staff_events = set()
 
-            # Process registrations excluding waiting list, staff, and NPCs
+        # Process past events for participation and staff/organizer roles
+        for run in Run.objects.filter(end__lt=timezone.now().date(), event__association=association):
+            # Process regular player registrations
+            registrations = get_active_registrations(run)
             for registration in registrations.exclude(
                 ticket__tier__in=[TicketTier.WAITING, TicketTier.STAFF, TicketTier.NPC],
             ):
                 self.check_ach_player(registration, cache)
+
+            # Process staff and organizer roles for this event
+            event = run.event
+            event_roles = EventRole.objects.filter(event=event).prefetch_related("members")
+
+            for role in event_roles:
+                for member in role.members.all():
+                    if role.number == 1:
+                        # Organizer role tracking
+                        tracking_key = (member.id, event.id)
+                        if tracking_key not in processed_orga_events:
+                            processed_orga_events.add(tracking_key)
+                            self.get_count("orga", cache, member)
+                            self.check_badge_orga(member, cache)
+                    else:
+                        # Staff role tracking
+                        tracking_key = (member.id, event.id)
+                        if tracking_key not in processed_staff_events:
+                            processed_staff_events.add(tracking_key)
+                            self.get_count("staff", cache, member)
+                            self.check_badge_staff(member, cache)
 
             # Cache event data for reference
             events_by_id[run.event_id] = run.event
 
         # Process future events for friend referral tracking
         for run in Run.objects.filter(end__gt=timezone.now().date()):
-            # Get confirmed registrations (excluding waiting list)
-            for registration in Registration.objects.filter(run=run, cancellation_date__isnull=True).exclude(
+            for registration in get_active_registrations(run).exclude(
                 ticket__tier=TicketTier.WAITING,
             ):
-                # Check friend referral achievements
                 self.check_friends_player(registration, cache)
 
     def add_member_badge(self, badge_code: str, member: Member, badge_cache: dict) -> None:
@@ -277,34 +484,12 @@ class Command(BaseCommand):
         badge.members.add(member)
 
     def check_event_badge(self, event: Event, m: Member, cache: dict[str, Any]) -> None:
-        """Award event-specific badge to member.
-
-        Args:
-            event: Event instance to derive badge from
-            m: Member instance to award badge to
-            cache: Badge cache for performance
-
-        """
+        """Award event-specific badge to member."""
         self.add_member_badge(event.slug, m, cache)
 
     @staticmethod
     def get_cache_badges_player(cache: dict, member: Member) -> list:
-        """Get cached list of badge codes for a member.
-
-        Retrieves badge codes from cache if available, otherwise queries the database
-        to build the cache entry for the member's badges.
-
-        Args:
-            cache (dict): Player badge cache containing 'players' key with member IDs
-            member: Member instance to get badges for
-
-        Returns:
-            list: Badge codes already possessed by member
-
-        Note:
-            Modifies the cache dictionary by adding member badge data if not present.
-
-        """
+        """Get cached list of badge codes for a member."""
         # Check if member's badges are already cached
         if member.id not in cache["players"]:
             # Build list of badge codes from member's badges
@@ -343,7 +528,7 @@ class Command(BaseCommand):
 
             # Return cached badge instance
             return badge_cache["badges"][badge_code]
-        except Badge.DoesNotExist:
+        except ObjectDoesNotExist:
             # Return None if badge not found
             return None
 
@@ -596,14 +781,14 @@ class Command(BaseCommand):
 
         """
         # Check if reminders should be sent during holidays
-        send_reminders_during_holidays = association.get_config("remind_holidays", default_value=True)
+        send_reminders_during_holidays = association.get_config("remind_holidays")
 
         # Skip processing if it's a holiday and holiday reminders are disabled
         if not send_reminders_during_holidays and check_holiday():
             return
 
         # Get the number of days before event to send reminders
-        reminder_days_before_event = int(association.get_config("remind_days", default_value=5))
+        reminder_days_before_event = int(association.get_config("remind_days"))
 
         # Get all registrations for this association
         registrations_queryset = get_regs(association)
@@ -699,6 +884,7 @@ class Command(BaseCommand):
         membership_fee_already_paid = AccountingItemMembership.objects.filter(
             year=registration.run.end.year,
             member=registration.member,
+            association_id=registration.run.event.association_id,
         ).count()
         if membership_fee_already_paid > 0:
             return
@@ -779,7 +965,7 @@ class Command(BaseCommand):
             return
 
         # Get deadline interval configuration for the association
-        deadline_interval_days = int(get_association_config(run.event.association_id, "deadline_days", default_value=0))
+        deadline_interval_days = int(get_association_config(run.event.association_id, "deadline_days"))
         if not deadline_interval_days:
             return
 
@@ -790,3 +976,27 @@ class Command(BaseCommand):
 
         # Send deadline notifications for this run
         notify_deadlines(run)
+
+    @staticmethod
+    def send_organizer_summaries() -> None:
+        """Send daily summary emails to organizers for events with digest mode enabled."""
+        send_daily_organizer_summaries()
+
+    @staticmethod
+    def send_chat_log_recap() -> None:
+        """Send admins a weekly recap of questions asked through the ask-larpmanager chat widget."""
+        # Only run once a week
+        if timezone.now().weekday() != 0:
+            return
+
+        week_ago = timezone.now() - timedelta(days=7)
+        chat_logs = (
+            LarpManagerChatLog.objects.filter(created__gte=week_ago).select_related("member").order_by("created")
+        )
+        if not chat_logs:
+            return
+
+        body = "<br /><br />".join(
+            f"{chat_log.created:%Y-%m-%d %H:%M} - {chat_log.member} - {chat_log.question}" for chat_log in chat_logs
+        )
+        notify_admins("Weekly ask-larpmanager questions recap", body)

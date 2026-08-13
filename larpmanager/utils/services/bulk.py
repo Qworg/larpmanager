@@ -21,29 +21,133 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, PermissionDenied
+from django.db import models, transaction
 from django.http import HttpRequest, JsonResponse
 from django.utils.translation import gettext_lazy as _
+
+from larpmanager.utils.edit.backend import save_log
 
 if TYPE_CHECKING:
     from django.db.models import QuerySet
 
-from larpmanager.cache.config import get_event_config
-from larpmanager.models.access import get_event_staffers
+    from larpmanager.models.base import BaseModel
+
+import datetime
+
+from larpmanager.cache.bulk import get_bulk_options_cache
+from larpmanager.cache.config import get_association_config, get_event_config
 from larpmanager.models.casting import Quest, QuestType, Trait
 from larpmanager.models.event import ProgressStep
-from larpmanager.models.experience import AbilityPx, AbilityTypePx, DeliveryPx
-from larpmanager.models.member import Log, Member
+from larpmanager.models.experience import AbilityExp, AbilityTypeExp, DeliveryExp
+from larpmanager.models.form import WritingAnswer, WritingChoice
+from larpmanager.models.member import LogOperationType, Member
 from larpmanager.models.miscellanea import (
+    WarehouseArea,
     WarehouseContainer,
     WarehouseItem,
     WarehouseTag,
 )
-from larpmanager.models.writing import Character, CharacterStatus, Faction, Plot, Prologue
+from larpmanager.models.writing import Character, CharacterConfig, CharacterStatus, Faction, Plot, Prologue
+from larpmanager.utils.auth.admin import is_lm_admin
 from larpmanager.utils.core.exceptions import ReturnNowError
+from larpmanager.utils.services.miscellanea import (
+    warehouse_add_assignment,
+    warehouse_assigned_quantities,
+    warehouse_available_quantity,
+)
+
+RECOVERABLE_MODELS: dict[str, type] = {
+    "character": Character,
+    "plot": Plot,
+    "faction": Faction,
+    "quest": Quest,
+    "trait": Trait,
+    "ability": AbilityExp,
+    "warehouse_item": WarehouseItem,
+}
 
 
-def _get_bulk_params(request: HttpRequest, context: dict) -> tuple[list[str], int, int]:
+def _check_delete_role(request: HttpRequest, context: dict) -> bool:
+    """Return True if the user has role required to bulk delete (admin or organizer)."""
+    if is_lm_admin(request):
+        return True
+    if 1 in context.get("association_role", {}):
+        return True
+    return any(1 in roles for roles in context.get("event_role", {}).values())
+
+
+def _require_role_delete(request: HttpRequest, context: dict) -> None:
+    """Raise PermissionDenied if the user has not role required to bulk delete."""
+    if not _check_delete_role(request, context):
+        raise PermissionDenied
+
+
+def _check_bulk_delete_enabled(context: dict) -> None:
+    """Raise PermissionDenied if bulk delete is not enabled for this association."""
+    if not get_association_config(context["association_id"], "allow_bulk_delete", context=context):
+        raise PermissionDenied
+
+
+def _bulk_op(idx: int, objs: Any) -> dict:
+    """Build a bulk operation entry using the correct label."""
+    return {"idx": idx, "label": Operations(idx).label, "objs": objs}
+
+
+def _add_bulk_delete_option(request: HttpRequest, context: dict) -> None:
+    """Append bulk delete option to context bulk list if enabled for the association and user has the required role."""
+    if not get_association_config(context["association_id"], "allow_bulk_delete", context=context):
+        return
+    if _check_delete_role(request, context):
+        objs = [{"uuid": 1, "name": _("Are you sure? The items might not be recoverable.")}]
+        context["bulk"].append(_bulk_op(Operations.DEL_BULK, objs))
+
+
+def _restore_writing_answers(element_id: int, deleted_at: Any) -> None:
+    """Restore soft-deleted WritingAnswers and WritingChoices for a writing element.
+
+    Only restores entries deleted within 1 second of the parent object's deletion
+    (i.e. cascade-deleted together with it) and whose question/option is still active.
+    """
+    window_start = deleted_at - datetime.timedelta(seconds=1)
+    window_end = deleted_at + datetime.timedelta(seconds=1)
+    for answer in WritingAnswer.all_objects.filter(
+        element_id=element_id,
+        deleted__range=(window_start, window_end),
+        question__deleted__isnull=True,
+    ):
+        answer.undelete()
+    for choice in WritingChoice.all_objects.filter(
+        element_id=element_id,
+        deleted__range=(window_start, window_end),
+        question__deleted__isnull=True,
+        option__deleted__isnull=True,
+    ):
+        choice.undelete()
+
+
+def restore_object(model_class: type, uuid: str) -> None:
+    """Undelete a soft-deleted object and reassign its sequential number if applicable.
+
+    For event-scoped writing elements, also restores any soft-deleted WritingAnswers
+    and WritingChoices whose question is still active.
+    """
+    with transaction.atomic():
+        obj = model_class.all_objects.select_for_update().get(uuid=uuid, deleted__isnull=False)
+        if hasattr(obj, "number"):
+            obj.number = None
+        deleted_at = obj.deleted
+        if isinstance(obj, Character):
+            # Restore cascade-deleted CharacterConfigs before undeleting the Character.
+            CharacterConfig.all_objects.filter(character=obj, deleted__isnull=False, deleted_by_cascade=True).update(
+                deleted=None, deleted_by_cascade=False
+            )
+        obj.undelete()
+        if hasattr(obj, "event"):
+            _restore_writing_answers(obj.pk, deleted_at)
+
+
+def _get_bulk_params(request: HttpRequest) -> tuple[list[str], int, int]:
     """Extract and validate bulk operation parameters from request.
 
     Extracts operation ID, target ID, and a list of entity UUIDs from the request,
@@ -51,7 +155,6 @@ def _get_bulk_params(request: HttpRequest, context: dict) -> tuple[list[str], in
 
     Args:
         request: HTTP request object containing POST data with operation parameters
-        context: Context dictionary containing event/run information and association ID
 
     Returns:
         :tuple[list[str], int, int]: A tuple containing:
@@ -81,51 +184,95 @@ def _get_bulk_params(request: HttpRequest, context: dict) -> tuple[list[str], in
     if not entity_uuids:
         raise ReturnNowError(JsonResponse({"error": "no uuids"}, status=400))
 
-    # Determine entity ID for logging (use run ID if available, otherwise association ID)
-    entity_id_for_log = context["association_id"]
-    if "run" in context:
-        entity_id_for_log = context["run"].id
-
-    # Log the bulk operation attempt with all relevant parameters
-    Log.objects.create(
-        member=context["member"],
-        cls=f"bulk {operation_code} {target_code}",
-        eid=entity_id_for_log,
-        dct={"operation": operation_code, "target": target_code, "uuids": entity_uuids},
-    )
-
+    # Return parameters
     return entity_uuids, operation_code, target_code
 
 
-class Operations:
-    """Operations constants."""
+class Operations(models.IntegerChoices):
+    """Bulk operation types with their human-readable labels."""
 
-    MOVE_ITEM_BOX = 1
-    ADD_ITEM_TAG = 2
-    DEL_ITEM_TAG = 3
-    ADD_CHAR_FACT = 4
-    DEL_CHAR_FACT = 5
-    ADD_CHAR_PLOT = 6
-    DEL_CHAR_PLOT = 7
-    SET_QUEST_TYPE = 8
-    SET_TRAIT_QUEST = 9
-    SET_ABILITY_TYPE = 10
-    ADD_CHAR_DELIVERY = 11
-    DEL_CHAR_DELIVERY = 12
-    ADD_CHAR_PROLOGUE = 13
-    DEL_CHAR_PROLOGUE = 14
-    SET_CHAR_PROGRESS = 15
-    SET_CHAR_ASSIGNED = 16
-    SET_CHAR_STATUS = 17
+    MOVE_ITEM_BOX = 1, _("Move to container")
+    ADD_ITEM_TAG = 2, _("Add tag")
+    DEL_ITEM_TAG = 3, _("Remove tag")
+    ADD_CHAR_FACT = 4, _("Add to faction")
+    DEL_CHAR_FACT = 5, _("Remove from faction")
+    ADD_CHAR_PLOT = 6, _("Add to plot")
+    DEL_CHAR_PLOT = 7, _("Remove from plot")
+    SET_QUEST_TYPE = 8, _("Set quest type")
+    SET_TRAIT_QUEST = 9, _("Set quest")
+    SET_ABILITY_TYPE = 10, _("Set ability type")
+    ADD_CHAR_DELIVERY = 11, _("Add to xp award")
+    DEL_CHAR_DELIVERY = 12, _("Remove from xp award")
+    ADD_CHAR_PROLOGUE = 13, _("Add prologue")
+    DEL_CHAR_PROLOGUE = 14, _("Remove prologue")
+    SET_CHAR_PROGRESS = 15, _("Set progress step")
+    SET_CHAR_ASSIGNED = 16, _("Set assigned staff member")
+    SET_CHAR_STATUS = 17, _("Set character status")
+    DEL_BULK = 18, _("Delete")
+    ADD_PLOT_CHAR = 19, _("Add character")
+    DEL_PLOT_CHAR = 20, _("Remove character")
+    SET_PLOT_PROGRESS = 21, _("Set progress step")
+    SET_PLOT_ASSIGNED = 22, _("Set assigned staff member")
+    ADD_FACT_CHAR = 23, _("Add character")
+    DEL_FACT_CHAR = 24, _("Remove character")
+    SET_FACT_PROGRESS = 25, _("Set progress step")
+    SET_FACT_ASSIGNED = 26, _("Set assigned staff member")
+    SET_ITEM_AREA_REMAINING = 27, _("Assign remaining stock to area")
 
 
-def exec_bulk(request: HttpRequest, context: dict, operation_mapping: dict) -> JsonResponse:
+def _scoped_bulk_queryset(context: dict, model_class: type, object_uuids: list[str]) -> QuerySet:
+    """Return the given UUIDs scoped to the current tenant.
+
+    WarehouseItem is association-scoped; all other bulk models are
+    event-scoped via Event.get_elements. Scoping here prevents cross-tenant
+    reads/deletes from raw POST UUIDs.
+    """
+    if model_class is WarehouseItem:
+        base = WarehouseItem.objects.filter(association_id=context["association_id"])
+    else:
+        base = context["event"].get_elements(model_class)
+    return base.filter(uuid__in=object_uuids)
+
+
+def _create_bulk_logs(
+    context: dict,
+    operation_name: int,
+    target_name: str | None,
+    object_uuids: list[str],
+    model_class: BaseModel,
+) -> None:
+    """Create individual log entries for each element in a bulk operation."""
+    objects = _scoped_bulk_queryset(context, model_class, object_uuids)
+    label = Operations(operation_name).label
+    log_info = f"{label}: {target_name}" if target_name else label
+    for obj in objects:
+        save_log(
+            context=context,
+            cls=model_class,
+            element=obj,
+            operation_type=LogOperationType.BULK,
+            info=log_info,
+        )
+
+
+def exec_bulk(
+    request: HttpRequest,
+    context: dict,
+    operation_mapping: dict,
+    model_class: type,
+    *,
+    allow_delete: bool = False,
+) -> JsonResponse:
     """Execute bulk operations on a collection of objects.
 
     Args:
         request: HTTP request object containing bulk operation parameters
         context: Context dictionary with operation-specific data
         operation_mapping: Dictionary mapping operation names to their handler functions
+        model_class: Django model class of the objects being modified (for logging)
+        allow_delete: Whether the caller offers bulk delete; must mirror the
+            listing built for GET, so an operation never exposed in the page
+            cannot be reached with a raw POST
 
     Returns:
         JsonResponse: Success response with "ok" status or error response with
@@ -136,7 +283,20 @@ def exec_bulk(request: HttpRequest, context: dict, operation_mapping: dict) -> J
 
     """
     # Extract bulk operation parameters from request
-    object_uuids, operation_name, operation_target = _get_bulk_params(request, context)
+    object_uuids, operation_name, operation_target = _get_bulk_params(request)
+
+    # Handle delete separately: log before deletion so objects are still queryable
+    if operation_name == Operations.DEL_BULK:
+        if not allow_delete:
+            return JsonResponse({"error": "unknow operation"}, status=400)
+        _require_role_delete(request, context)
+        _check_bulk_delete_enabled(context)
+        try:
+            _create_bulk_logs(context, operation_name, None, object_uuids, model_class)
+            _scoped_bulk_queryset(context, model_class, object_uuids).delete()
+        except ObjectDoesNotExist:
+            return JsonResponse({"error": "not found"}, status=400)
+        return JsonResponse({"res": "ok"})
 
     # Validate that the requested operation is supported
     if operation_name not in operation_mapping:
@@ -144,9 +304,12 @@ def exec_bulk(request: HttpRequest, context: dict, operation_mapping: dict) -> J
 
     try:
         # Execute the bulk operation using the mapped handler function
-        operation_mapping[operation_name](context, operation_target, object_uuids)
-    except ObjectDoesNotExist:
-        # Handle case where target objects don't exist
+        target_name = operation_mapping[operation_name](context, operation_target, object_uuids)
+
+        # Create log entries for each affected element
+        _create_bulk_logs(context, operation_name, target_name, object_uuids, model_class)
+    except (ObjectDoesNotExist, ValueError):
+        # Target object missing, or an invalid target value (e.g. bad status)
         return JsonResponse({"error": "not found"}, status=400)
 
     # Return success response
@@ -165,29 +328,32 @@ def exec_add_item_tag(
     context: Any,
     target: str,
     uuids: list[str],
-) -> None:
+) -> str:
     """Add items to a warehouse tag."""
     tag = WarehouseTag.objects.get(association_id=context["association_id"], uuid=target)
     tag.items.add(*_get_inv_items(uuids, context))
+    return tag.name
 
 
-def exec_del_item_tag(context: dict, target: str, uuids: list[str]) -> None:
+def exec_del_item_tag(context: dict, target: str, uuids: list[str]) -> str:
     """Remove items from a warehouse tag."""
     tag = WarehouseTag.objects.get(association_id=context["association_id"], uuid=target)
     tag.items.remove(*_get_inv_items(uuids, context))
+    return tag.name
 
 
 def exec_move_item_box(
     context: Any,
     target: str,
     uuids: list[str],
-) -> None:
+) -> str:
     """Move warehouse items to a target container."""
     # Retrieve the target container for the association
     container = WarehouseContainer.objects.get(association_id=context["association_id"], uuid=target)
 
     # Update all specified items to the new container
     WarehouseItem.objects.filter(association_id=context["association_id"], uuid__in=uuids).update(container=container)
+    return container.name
 
 
 def handle_bulk_items(request: HttpRequest, context: dict) -> None:
@@ -214,7 +380,7 @@ def handle_bulk_items(request: HttpRequest, context: dict) -> None:
             Operations.MOVE_ITEM_BOX: exec_move_item_box,
         }
         # Execute the bulk operation and raise ReturnNowError with results
-        raise ReturnNowError(exec_bulk(request, context, operation_type_to_handler))
+        raise ReturnNowError(exec_bulk(request, context, operation_type_to_handler, WarehouseItem, allow_delete=True))
 
     # Fetch available containers for the current association
     available_containers = (
@@ -229,9 +395,49 @@ def handle_bulk_items(request: HttpRequest, context: dict) -> None:
 
     # Populate context with bulk operation choices and their associated objects
     context["bulk"] = [
-        {"idx": Operations.MOVE_ITEM_BOX, "label": _("Move to container"), "objs": available_containers},
-        {"idx": Operations.ADD_ITEM_TAG, "label": _("Add tag"), "objs": available_tags},
-        {"idx": Operations.DEL_ITEM_TAG, "label": _("Remove tag"), "objs": available_tags},
+        _bulk_op(Operations.MOVE_ITEM_BOX, available_containers),
+        _bulk_op(Operations.ADD_ITEM_TAG, available_tags),
+        _bulk_op(Operations.DEL_ITEM_TAG, available_tags),
+    ]
+    _add_bulk_delete_option(request, context)
+
+
+def exec_set_item_area_remaining(context: dict, target: str, uuids: list[str]) -> str:
+    """Assign each selected item's full remaining stock to a target event area.
+
+    Items with unlimited stock or with nothing left available are skipped.
+    """
+    area = context["event"].get_elements(WarehouseArea).get(uuid=target)
+    with transaction.atomic():
+        items = list(
+            WarehouseItem.objects.select_for_update().filter(
+                association_id=context["association_id"],
+                uuid__in=uuids,
+                quantity__isnull=False,
+            )
+        )
+        assigned_by_item = warehouse_assigned_quantities(items)
+        for item in items:
+            available = warehouse_available_quantity(item, assigned_by_item.get(item.id, 0))
+            if available <= 0:
+                continue
+            warehouse_add_assignment(item, area, context["event"], available)
+
+    return area.name
+
+
+def handle_bulk_orga_items(request: HttpRequest, context: dict) -> None:
+    """Handle bulk operations on warehouse items scoped to a single event.
+
+    Supports committing each item's full remaining stock to an area of the current event.
+    """
+    if request.POST:
+        mapping = {Operations.SET_ITEM_AREA_REMAINING: exec_set_item_area_remaining}
+        raise ReturnNowError(exec_bulk(request, context, mapping, WarehouseItem))
+
+    areas = context["event"].get_elements(WarehouseArea).values("uuid", "name").order_by("name")
+    context["bulk"] = [
+        _bulk_op(Operations.SET_ITEM_AREA_REMAINING, areas),
     ]
 
 
@@ -240,81 +446,131 @@ def _get_chars(context: dict, character_uuids: list[str]) -> QuerySet[Character]
     return context["event"].get_elements(Character).filter(uuid__in=character_uuids)
 
 
-def exec_add_char_fact(context: dict, target: str, uuids: list[str]) -> None:
+def exec_add_char_fact(context: dict, target: str, uuids: list[str]) -> str:
     """Add characters to a faction."""
     fact = context["event"].get_elements(Faction).get(uuid=target)
     fact.characters.add(*_get_chars(context, uuids))
+    return fact.name
 
 
-def exec_del_char_fact(context: dict, target: str, uuids: list[str]) -> None:
+def exec_del_char_fact(context: dict, target: str, uuids: list[str]) -> str:
     """Remove characters from a faction."""
     fact = context["event"].get_elements(Faction).get(uuid=target)
     fact.characters.remove(*_get_chars(context, uuids))
+    return fact.name
 
 
-def exec_add_char_plot(context: dict, target: str, uuids: list[str]) -> None:
+def exec_add_char_plot(context: dict, target: str, uuids: list[str]) -> str:
     """Add characters to a plot element."""
     plot = context["event"].get_elements(Plot).get(uuid=target)
     plot.characters.add(*_get_chars(context, uuids))
+    return plot.name
 
 
-def exec_del_char_plot(context: dict, target: str, uuids: list[str]) -> None:
+def exec_del_char_plot(context: dict, target: str, uuids: list[str]) -> str:
     """Remove characters from a plot element."""
     plot = context["event"].get_elements(Plot).get(uuid=target)
     plot.characters.remove(*_get_chars(context, uuids))
+    return plot.name
+
+
+def exec_add_plot_char(context: dict, target: str, uuids: list[str]) -> str:
+    """Add a character to selected plots."""
+    char = context["event"].get_elements(Character).get(uuid=target)
+    for plot in context["event"].get_elements(Plot).filter(uuid__in=uuids):
+        plot.characters.add(char)
+    return char.name
+
+
+def exec_del_plot_char(context: dict, target: str, uuids: list[str]) -> str:
+    """Remove a character from selected plots."""
+    char = context["event"].get_elements(Character).get(uuid=target)
+    for plot in context["event"].get_elements(Plot).filter(uuid__in=uuids):
+        plot.characters.remove(char)
+    return char.name
+
+
+def exec_set_plot_progress(context: dict, target: str, uuids: list[str]) -> str:
+    """Set progress step for selected plots."""
+    progress_step = context["event"].get_elements(ProgressStep).get(uuid=target)
+    context["event"].get_elements(Plot).filter(uuid__in=uuids).update(progress=progress_step)
+    return progress_step.name
+
+
+def _get_assoc_member(context: dict, target: str) -> Member:
+    """Fetch a member by UUID, scoped to the current association."""
+    return Member.objects.filter(memberships__association_id=context["association_id"]).distinct().get(uuid=target)
+
+
+def exec_set_plot_assigned(context: dict, target: str, uuids: list[str]) -> str:
+    """Assign selected plots to a staff member."""
+    member = _get_assoc_member(context, target)
+    context["event"].get_elements(Plot).filter(uuid__in=uuids).update(assigned=member)
+    return member.name
 
 
 def exec_add_char_delivery(
     context: dict,
     target: str,
     uuids: list[str],
-) -> None:
+) -> str:
     """Add characters to a delivery."""
-    delivery = context["event"].get_elements(DeliveryPx).get(uuid=target)
+    delivery = context["event"].get_elements(DeliveryExp).get(uuid=target)
     delivery.characters.add(*_get_chars(context, uuids))
+    return delivery.name
 
 
-def exec_del_char_delivery(context: dict, target: str, uuids: list[str]) -> None:
+def exec_del_char_delivery(context: dict, target: str, uuids: list[str]) -> str:
     """Remove characters from delivery."""
-    delivery = context["event"].get_elements(DeliveryPx).get(uuid=target)
+    delivery = context["event"].get_elements(DeliveryExp).get(uuid=target)
     delivery.characters.remove(*_get_chars(context, uuids))
+    return delivery.name
 
 
-def exec_add_char_prologue(context: dict, target: str, uuids: list[str]) -> None:
+def exec_add_char_prologue(context: dict, target: str, uuids: list[str]) -> str:
     """Add characters to a prologue."""
     prologue = context["event"].get_elements(Prologue).get(uuid=target)
     prologue.characters.add(*_get_chars(context, uuids))
+    return prologue.name
 
 
 def exec_del_char_prologue(
     context: dict,
     target: str,
     uuids: list[str],
-) -> None:
+) -> str:
     """Remove characters from a prologue."""
     prologue = context["event"].get_elements(Prologue).get(uuid=target)
     prologue.characters.remove(*_get_chars(context, uuids))
+    return prologue.name
 
 
 def exec_set_char_progress(
     context: dict,
     target: str,
     uuids: list[str],
-) -> None:
+) -> str:
     """Update progress step for specified characters."""
     progress_step = context["event"].get_elements(ProgressStep).get(uuid=target)
     context["event"].get_elements(Character).filter(uuid__in=uuids).update(progress=progress_step)
+    return progress_step.name
 
 
-def exec_set_char_assigned(context: dict, target: str, uuids: list[str]) -> None:
+def exec_set_char_assigned(context: dict, target: str, uuids: list[str]) -> str:
     """Assign characters to a member."""
-    member = Member.objects.get(uuid=target)
+    member = _get_assoc_member(context, target)
     context["event"].get_elements(Character).filter(uuid__in=uuids).update(assigned=member)
+    return member.name
 
 
-def exec_set_char_status(context: dict, target: str, uuids: list[str]) -> None:
+def exec_set_char_status(context: dict, target: str, uuids: list[str]) -> str:
     """Update character status for specified characters in the event."""
+    # Validate the status against the allowed choices before writing raw POST
+    if target not in CharacterStatus.values:
+        msg = "invalid character status"
+        raise ValueError(msg)
     context["event"].get_elements(Character).filter(uuid__in=uuids).update(status=target)
+    return dict(CharacterStatus.choices).get(target, target)
 
 
 def handle_bulk_characters(request: HttpRequest, context: dict) -> None:
@@ -352,83 +608,177 @@ def handle_bulk_characters(request: HttpRequest, context: dict) -> None:
             Operations.SET_CHAR_STATUS: exec_set_char_status,
         }
         # Execute the bulk operation and raise exception to return result
-        raise ReturnNowError(exec_bulk(request, context, mapping))
+        raise ReturnNowError(exec_bulk(request, context, mapping, Character, allow_delete=True))
 
     # Initialize bulk operations list for GET requests
     context["bulk"] = []
+    event = context["event"]
 
     # Add faction-related operations if faction feature is enabled
     if "faction" in context["features"]:
-        factions = context["event"].get_elements(Faction).values("uuid", "name").order_by("name")
+        factions = get_bulk_options_cache(event, "factions")
         context["bulk"].extend(
             [
-                {"idx": Operations.ADD_CHAR_FACT, "label": _("Add to faction"), "objs": factions},
-                {"idx": Operations.DEL_CHAR_FACT, "label": _("Remove from faction"), "objs": factions},
+                _bulk_op(Operations.ADD_CHAR_FACT, factions),
+                _bulk_op(Operations.DEL_CHAR_FACT, factions),
             ],
         )
 
     # Add plot-related operations if plot feature is enabled
     if "plot" in context["features"]:
-        plots = context["event"].get_elements(Plot).values("uuid", "name").order_by("name")
+        plots = get_bulk_options_cache(event, "plots")
         context["bulk"].extend(
             [
-                {"idx": Operations.ADD_CHAR_PLOT, "label": _("Add to plot"), "objs": plots},
-                {"idx": Operations.DEL_CHAR_PLOT, "label": _("Remove from plot"), "objs": plots},
+                _bulk_op(Operations.ADD_CHAR_PLOT, plots),
+                _bulk_op(Operations.DEL_CHAR_PLOT, plots),
             ],
         )
 
     # Add prologue-related operations if prologue feature is enabled
     if "prologue" in context["features"]:
-        prologues = context["event"].get_elements(Prologue).values("uuid", "name").order_by("name")
+        prologues = get_bulk_options_cache(event, "prologues")
         context["bulk"].extend(
             [
-                {"idx": Operations.ADD_CHAR_PROLOGUE, "label": _("Add prologue"), "objs": prologues},
-                {"idx": Operations.DEL_CHAR_PROLOGUE, "label": _("Remove prologue"), "objs": prologues},
+                _bulk_op(Operations.ADD_CHAR_PROLOGUE, prologues),
+                _bulk_op(Operations.DEL_CHAR_PROLOGUE, prologues),
             ],
         )
 
-    # Add XP delivery operations if px feature is enabled
-    if "px" in context["features"]:
-        delivery = context["event"].get_elements(DeliveryPx).values("uuid", "name")
+    # Add XP delivery operations if experience feature is enabled
+    if "experience" in context["features"]:
+        deliveries = get_bulk_options_cache(event, "deliveries")
         context["bulk"].extend(
             [
-                {"idx": Operations.ADD_CHAR_DELIVERY, "label": _("Add to xp delivery"), "objs": delivery},
-                {"idx": Operations.DEL_CHAR_DELIVERY, "label": _("Remove from xp delivery"), "objs": delivery},
+                _bulk_op(Operations.ADD_CHAR_DELIVERY, deliveries),
+                _bulk_op(Operations.DEL_CHAR_DELIVERY, deliveries),
             ],
         )
 
     # Add progress step operation if progress feature is enabled
     if "progress" in context["features"]:
-        progress_steps = context["event"].get_elements(ProgressStep).values("uuid", "name").order_by("order")
         context["bulk"].append(
-            {"idx": Operations.SET_CHAR_PROGRESS, "label": _("Set progress step"), "objs": progress_steps},
+            _bulk_op(Operations.SET_CHAR_PROGRESS, get_bulk_options_cache(event, "progress_steps")),
         )
 
     # Add staff assignment operation if assigned feature is enabled
     if "assigned" in context["features"]:
-        # Get event staff members using the same function used in writing utils
-        event_staff = get_event_staffers(context["event"])
-        staff_members = [{"uuid": m.uuid, "name": m.show_nick()} for m in event_staff]
         context["bulk"].append(
-            {"idx": Operations.SET_CHAR_ASSIGNED, "label": _("Set assigned staff member"), "objs": staff_members},
+            _bulk_op(Operations.SET_CHAR_ASSIGNED, get_bulk_options_cache(event, "staffers")),
         )
 
     # Add status assignment operation if enabled
-    if get_event_config(context["event"].id, "user_character_approval", default_value=False, context=context):
+    if get_event_config(context["event"].id, "user_character_approval", context=context):
         status_choices = [{"uuid": choice[0], "name": choice[1]} for choice in CharacterStatus.choices]
         context["bulk"].append(
-            {"idx": Operations.SET_CHAR_STATUS, "label": _("Set character status"), "objs": status_choices},
+            _bulk_op(Operations.SET_CHAR_STATUS, status_choices),
         )
+    _add_bulk_delete_option(request, context)
+
+
+def handle_bulk_plots(request: HttpRequest, context: dict) -> None:
+    """Handle bulk operations for plot management."""
+    if request.POST:
+        mapping = {
+            Operations.ADD_PLOT_CHAR: exec_add_plot_char,
+            Operations.DEL_PLOT_CHAR: exec_del_plot_char,
+            Operations.SET_PLOT_PROGRESS: exec_set_plot_progress,
+            Operations.SET_PLOT_ASSIGNED: exec_set_plot_assigned,
+        }
+        raise ReturnNowError(exec_bulk(request, context, mapping, Plot, allow_delete=True))
+
+    event = context["event"]
+
+    characters = get_bulk_options_cache(event, "characters")
+    context["bulk"] = [
+        _bulk_op(Operations.ADD_PLOT_CHAR, characters),
+        _bulk_op(Operations.DEL_PLOT_CHAR, characters),
+    ]
+
+    if "progress" in context["features"]:
+        context["bulk"].append(
+            _bulk_op(Operations.SET_PLOT_PROGRESS, get_bulk_options_cache(event, "progress_steps")),
+        )
+
+    if "assigned" in context["features"]:
+        context["bulk"].append(
+            _bulk_op(Operations.SET_PLOT_ASSIGNED, get_bulk_options_cache(event, "staffers")),
+        )
+
+    _add_bulk_delete_option(request, context)
+
+
+def exec_add_faction_char(context: dict, target: str, uuids: list[str]) -> str:
+    """Add a character to selected factions."""
+    char = context["event"].get_elements(Character).get(uuid=target)
+    for faction in context["event"].get_elements(Faction).filter(uuid__in=uuids):
+        faction.characters.add(char)
+    return char.name
+
+
+def exec_del_faction_char(context: dict, target: str, uuids: list[str]) -> str:
+    """Remove a character from selected factions."""
+    char = context["event"].get_elements(Character).get(uuid=target)
+    for faction in context["event"].get_elements(Faction).filter(uuid__in=uuids):
+        faction.characters.remove(char)
+    return char.name
+
+
+def exec_set_faction_progress(context: dict, target: str, uuids: list[str]) -> str:
+    """Set progress step for selected factions."""
+    progress_step = context["event"].get_elements(ProgressStep).get(uuid=target)
+    context["event"].get_elements(Faction).filter(uuid__in=uuids).update(progress=progress_step)
+    return progress_step.name
+
+
+def exec_set_faction_assigned(context: dict, target: str, uuids: list[str]) -> str:
+    """Assign selected factions to a staff member."""
+    member = _get_assoc_member(context, target)
+    context["event"].get_elements(Faction).filter(uuid__in=uuids).update(assigned=member)
+    return member.name
+
+
+def handle_bulk_factions(request: HttpRequest, context: dict) -> None:
+    """Handle bulk operations for faction management."""
+    if request.POST:
+        mapping = {
+            Operations.ADD_FACT_CHAR: exec_add_faction_char,
+            Operations.DEL_FACT_CHAR: exec_del_faction_char,
+            Operations.SET_FACT_PROGRESS: exec_set_faction_progress,
+            Operations.SET_FACT_ASSIGNED: exec_set_faction_assigned,
+        }
+        raise ReturnNowError(exec_bulk(request, context, mapping, Faction, allow_delete=True))
+
+    context["bulk"] = []
+    event = context["event"]
+
+    characters = get_bulk_options_cache(event, "characters")
+    context["bulk"] = [
+        _bulk_op(Operations.ADD_FACT_CHAR, characters),
+        _bulk_op(Operations.DEL_FACT_CHAR, characters),
+    ]
+
+    if "progress" in context["features"]:
+        context["bulk"].append(
+            _bulk_op(Operations.SET_FACT_PROGRESS, get_bulk_options_cache(event, "progress_steps")),
+        )
+
+    if "assigned" in context["features"]:
+        context["bulk"].append(
+            _bulk_op(Operations.SET_FACT_ASSIGNED, get_bulk_options_cache(event, "staffers")),
+        )
+
+    _add_bulk_delete_option(request, context)
 
 
 def exec_set_quest_type(
     context: dict,
     target: str,
     uuids: list[str],
-) -> None:
+) -> str:
     """Set quest type for multiple quests."""
     quest_type = context["event"].get_elements(QuestType).get(uuid=target)
     context["event"].get_elements(Quest).filter(uuid__in=uuids).update(typ=quest_type)
+    return quest_type.name
 
 
 def handle_bulk_quest(request: HttpRequest, context: dict) -> None:
@@ -441,54 +791,54 @@ def handle_bulk_quest(request: HttpRequest, context: dict) -> None:
     """
     # Handle POST request - execute bulk operations
     if request.POST:
-        raise ReturnNowError(exec_bulk(request, context, {Operations.SET_QUEST_TYPE: exec_set_quest_type}))
+        raise ReturnNowError(
+            exec_bulk(request, context, {Operations.SET_QUEST_TYPE: exec_set_quest_type}, Quest, allow_delete=True)
+        )
 
-    # Get available quest types for the event, ordered by name
-    quest_types = context["event"].get_elements(QuestType).values("uuid", "name").order_by("name")
-
-    # Set up bulk operation options in context
     context["bulk"] = [
-        {"idx": Operations.SET_QUEST_TYPE, "label": _("Set quest type"), "objs": quest_types},
+        _bulk_op(Operations.SET_QUEST_TYPE, get_bulk_options_cache(context["event"], "quest_types")),
     ]
+    _add_bulk_delete_option(request, context)
 
 
 def exec_set_quest(
     context: dict,
     target: str,
     uuids: list[str],
-) -> None:
+) -> str:
     """Assign a quest to multiple traits."""
     # Retrieve the target quest from the event
     quest = context["event"].get_elements(Quest).get(uuid=target)
     # Update all specified traits to use this quest
     context["event"].get_elements(Trait).filter(uuid__in=uuids).update(quest=quest)
+    return quest.name
 
 
 def handle_bulk_trait(request: HttpRequest, context: dict) -> None:
     """Handle bulk trait operations for quest assignment."""
     if request.POST:
         # Execute bulk operation for setting quest traits
-        raise ReturnNowError(exec_bulk(request, context, {Operations.SET_TRAIT_QUEST: exec_set_quest}))
+        raise ReturnNowError(
+            exec_bulk(request, context, {Operations.SET_TRAIT_QUEST: exec_set_quest}, Trait, allow_delete=True)
+        )
 
-    # Get available quests for the current event
-    quests = context["event"].get_elements(Quest).values("uuid", "name").order_by("name")
-
-    # Configure bulk operation options
     context["bulk"] = [
-        {"idx": Operations.SET_TRAIT_QUEST, "label": _("Set quest"), "objs": quests},
+        _bulk_op(Operations.SET_TRAIT_QUEST, get_bulk_options_cache(context["event"], "quests")),
     ]
+    _add_bulk_delete_option(request, context)
 
 
 def exec_set_ability_type(
     context: dict,
     target: str | int,
     uuids: list[str],
-) -> None:
+) -> str:
     """Update ability type for selected abilities in bulk."""
     # Get target ability type from event elements
-    typ = context["event"].get_elements(AbilityTypePx).get(uuid=target)
+    typ = context["event"].get_elements(AbilityTypeExp).get(uuid=target)
     # Update all selected abilities with new type
-    context["event"].get_elements(AbilityPx).filter(uuid__in=uuids).update(typ=typ)
+    context["event"].get_elements(AbilityExp).filter(uuid__in=uuids).update(typ=typ)
+    return typ.name
 
 
 def handle_bulk_ability(request: HttpRequest, context: dict) -> None:
@@ -501,12 +851,13 @@ def handle_bulk_ability(request: HttpRequest, context: dict) -> None:
     """
     if request.POST:
         # Execute bulk operation and return early if POST request
-        raise ReturnNowError(exec_bulk(request, context, {Operations.SET_ABILITY_TYPE: exec_set_ability_type}))
+        raise ReturnNowError(
+            exec_bulk(
+                request, context, {Operations.SET_ABILITY_TYPE: exec_set_ability_type}, AbilityExp, allow_delete=True
+            )
+        )
 
-    # Get ability types for the event, ordered by name
-    ability_types = context["event"].get_elements(AbilityTypePx).values("uuid", "name").order_by("name")
-
-    # Setup bulk operations context
     context["bulk"] = [
-        {"idx": Operations.SET_ABILITY_TYPE, "label": _("Set ability type"), "objs": ability_types},
+        _bulk_op(Operations.SET_ABILITY_TYPE, get_bulk_options_cache(context["event"], "ability_types")),
     ]
+    _add_bulk_delete_option(request, context)

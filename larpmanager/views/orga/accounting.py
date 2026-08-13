@@ -28,14 +28,9 @@ from django.utils.translation import gettext_lazy as _
 from larpmanager.accounting.balance import get_run_accounting
 from larpmanager.cache.config import get_association_config
 from larpmanager.forms.accounting import (
-    OrgaCreditForm,
-    OrgaDiscountForm,
-    OrgaExpenseForm,
-    OrgaInflowForm,
-    OrgaOutflowForm,
+    ExeInvoiceForm,
     OrgaPaymentForm,
     OrgaPersonalExpenseForm,
-    OrgaTokenForm,
 )
 from larpmanager.models.accounting import (
     AccountingItemExpense,
@@ -44,14 +39,20 @@ from larpmanager.models.accounting import (
     AccountingItemOutflow,
     AccountingItemPayment,
     Discount,
+    PaymentChoices,
     PaymentInvoice,
     PaymentStatus,
+    PaymentType,
 )
+from larpmanager.models.member import LogOperationType
 from larpmanager.templatetags.show_tags import format_decimal
 from larpmanager.utils.core.base import check_event_context
 from larpmanager.utils.core.common import get_object_uuid
+from larpmanager.utils.core.exceptions import UserPermissionError
 from larpmanager.utils.core.paginate import orga_paginate
-from larpmanager.utils.services.edit import backend_get, orga_edit
+from larpmanager.utils.edit.backend import backend_delete, backend_delete_frame, backend_get, save_log
+from larpmanager.utils.edit.base import render_frame_or_fallback
+from larpmanager.utils.edit.orga import OrgaAction, orga_delete, orga_edit, orga_new
 
 
 @login_required
@@ -61,15 +62,27 @@ def orga_discounts(request: HttpRequest, event_slug: str) -> HttpResponse:
     context = check_event_context(request, event_slug, "orga_discounts")
 
     # Get all discounts for the event ordered by number
-    context["list"] = Discount.objects.filter(event=context["event"]).order_by("number")
+    context["list"] = Discount.objects.filter(event=context["event"]).order_by("order")
 
     return render(request, "larpmanager/orga/accounting/discounts.html", context)
 
 
 @login_required
+def orga_discounts_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new discount for event."""
+    return orga_new(request, event_slug, OrgaAction.DISCOUNTS)
+
+
+@login_required
 def orga_discounts_edit(request: HttpRequest, event_slug: str, discount_uuid: str) -> HttpResponse:
     """Edit discount for event."""
-    return orga_edit(request, event_slug, "orga_discounts", OrgaDiscountForm, discount_uuid)
+    return orga_edit(request, event_slug, OrgaAction.DISCOUNTS, discount_uuid)
+
+
+@login_required
+def orga_discounts_delete(request: HttpRequest, event_slug: str, discount_uuid: str) -> HttpResponse:
+    """Delete discount for event."""
+    return orga_delete(request, event_slug, OrgaAction.DISCOUNTS, discount_uuid)
 
 
 @login_required
@@ -106,6 +119,8 @@ def orga_expenses_my_new(request: HttpRequest, event_slug: str) -> HttpResponse:
     # Check user permissions and get event context
     context = check_event_context(request, event_slug, "orga_expenses_my")
 
+    is_frame = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+
     if request.method == "POST":
         # Process form submission with uploaded files
         form = OrgaPersonalExpenseForm(request.POST, request.FILES, context=context)
@@ -119,9 +134,13 @@ def orga_expenses_my_new(request: HttpRequest, event_slug: str) -> HttpResponse:
             exp.member = context["member"]
             exp.association_id = context["association_id"]
             exp.save()
+            save_log(context, AccountingItemExpense, exp, None)
 
             # Show success message to user
             messages.success(request, _("Reimbursement request item added"))
+
+            if is_frame:
+                return render(request, "elements/dashboard/form_success.html", context)
 
             # Redirect based on user's choice to continue or finish
             if "continue" in request.POST:
@@ -133,49 +152,8 @@ def orga_expenses_my_new(request: HttpRequest, event_slug: str) -> HttpResponse:
 
     # Add form to context and render template
     context["form"] = form
-    return render(request, "larpmanager/orga/accounting/expenses_my_new.html", context)
-
-
-@login_required
-def orga_invoices(request: HttpRequest, event_slug: str) -> HttpResponse:
-    """Display payment invoices awaiting confirmation for event organizers.
-
-    This view shows submitted payment invoices for the current event run with
-    optimized database queries to prevent N+1 query problems. Results are
-    filtered to show only invoices with SUBMITTED status.
-
-    Args:
-        request: Django HTTP request object containing user session and data
-        event_slug: Event slug identifier used to determine the current event context
-
-    Returns:
-        HttpResponse: Rendered template with paginated invoice list and context data
-
-    Raises:
-        PermissionDenied: If user lacks 'orga_invoices' permission for the event
-        Http404: If event with given slug does not exist
-
-    """
-    # Check user permissions and get event context
-    context = check_event_context(request, event_slug, "orga_invoices")
-
-    # Build optimized query with select_related to prevent N+1 queries
-    que = (
-        PaymentInvoice.objects.filter(registration__run=context["run"], status=PaymentStatus.SUBMITTED)
-        .select_related(
-            "member",  # For {{ el.member }} in template
-            "method",  # For {{ el.method }} in template
-            "registration",  # For confirmation URL generation
-            "registration__run",  # For run.get_slug() in confirmation URL
-        )
-        .order_by("-created")  # Show newest invoices first
-    )
-
-    # Add invoice list to template context
-    context["list"] = que
-
-    # Render template with invoice data
-    return render(request, "larpmanager/orga/accounting/invoices.html", context)
+    context["add_another"] = True
+    return render_frame_or_fallback(request, context, is_frame, "larpmanager/orga/accounting/expenses_my_new.html")
 
 
 @login_required
@@ -184,7 +162,7 @@ def orga_invoices_confirm(request: HttpRequest, event_slug: str, invoice_uuid: s
 
     This function allows organizers to confirm payment invoices that are in
     CREATED or SUBMITTED status. Once confirmed, the invoice status is updated
-    to CONFIRMED and the user is redirected back to the invoices list.
+    to CONFIRMED and the user is redirected back to the payments list.
 
     Args:
         request: The HTTP request object containing user and session data
@@ -192,15 +170,15 @@ def orga_invoices_confirm(request: HttpRequest, event_slug: str, invoice_uuid: s
         invoice_uuid: The uuid of invoice to confirm
 
     Returns:
-        HttpResponse: Redirect to the invoices list page with success/warning message
+        HttpResponse: Redirect to the payments list page with success/warning message
 
     Raises:
         Http404: If the invoice doesn't belong to the current event
-        PermissionDenied: If user lacks orga_invoices permission (via check_event_context)
+        PermissionDenied: If user lacks orga_payments permission (via check_event_context)
 
     """
     # Check user permissions and get event context
-    context = check_event_context(request, event_slug, "orga_invoices")
+    context = check_event_context(request, event_slug, "orga_payments")
 
     # Retrieve the payment invoice by number
     backend_get(context, PaymentInvoice, invoice_uuid)
@@ -210,21 +188,50 @@ def orga_invoices_confirm(request: HttpRequest, event_slug: str, invoice_uuid: s
         msg = "i'm sorry, what?"
         raise Http404(msg)
 
+    is_frame = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+
+    # Show a confirmation page before applying the change: bare frame popup when
+    # opened via the iframe modal, full-chrome confirm page on a direct GET otherwise
+    if request.method != "POST":
+        context["frame"] = is_frame
+        context["el_name"] = str(context["el"])
+        template = "elements/dashboard/approve_confirm.html" if is_frame else "elements/confirm_action.html"
+        return render(request, template, context)
+
     # Check if invoice can be confirmed (must be CREATED or SUBMITTED)
     if context["el"].status == PaymentStatus.CREATED or context["el"].status == PaymentStatus.SUBMITTED:
         # Update status to confirmed and save
         context["el"].status = PaymentStatus.CONFIRMED
     else:
         # Invoice already processed - show warning and redirect
-        messages.warning(request, _("Receipt already confirmed") + ".")
-        return redirect("orga_invoices", event_slug=context["run"].get_slug())
+        messages.warning(request, _("Receipt already confirmed."))
+        if is_frame:
+            return render(request, "elements/dashboard/form_success.html", context)
+        return redirect("orga_payments", event_slug=context["run"].get_slug())
 
     # Save the updated invoice status
     context["el"].save()
 
     # Show success message and redirect to invoices list
-    messages.success(request, _("Element approved") + "!")
-    return redirect("orga_invoices", event_slug=context["run"].get_slug())
+    messages.success(request, _("Element approved!"))
+    if is_frame:
+        return render(request, "elements/dashboard/form_success.html", context)
+    return redirect("orga_payments", event_slug=context["run"].get_slug())
+
+
+@login_required
+def orga_invoices_delete(request: HttpRequest, event_slug: str, invoice_uuid: str) -> HttpResponse:
+    """Delete a payment invoice and redirect to payments."""
+    context = check_event_context(request, event_slug, "orga_payments")
+    if request.GET.get("frame") == "1" or request.POST.get("frame") == "1":
+        context["frame"] = True
+        return backend_delete_frame(request, context, PaymentInvoice, invoice_uuid)
+    if request.method != "POST":
+        backend_get(context, PaymentInvoice, invoice_uuid)
+        context["el_name"] = str(context["el"])
+        return render(request, "elements/confirm_action.html", context)
+    backend_delete(request, context, PaymentInvoice, invoice_uuid)
+    return redirect("orga_payments", event_slug=context["run"].get_slug())
 
 
 @login_required
@@ -275,6 +282,7 @@ def orga_tokens(request: HttpRequest, event_slug: str) -> HttpResponse:
                 ("value", _("Value")),  # Token monetary value
                 ("created", _("Date")),  # Token creation timestamp
             ],
+            "delete_view": "orga_tokens_delete",
         },
     )
 
@@ -290,9 +298,21 @@ def orga_tokens(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_tokens_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new organization token for a specific event."""
+    return orga_new(request, event_slug, OrgaAction.TOKENS)
+
+
+@login_required
 def orga_tokens_edit(request: HttpRequest, event_slug: str, token_uuid: str) -> HttpResponse:
     """Edit an organization token for a specific event."""
-    return orga_edit(request, event_slug, "orga_tokens", OrgaTokenForm, token_uuid)
+    return orga_edit(request, event_slug, OrgaAction.TOKENS, token_uuid)
+
+
+@login_required
+def orga_tokens_delete(request: HttpRequest, event_slug: str, token_uuid: str) -> HttpResponse:
+    """Delete token for event."""
+    return orga_delete(request, event_slug, OrgaAction.TOKENS, token_uuid)
 
 
 @login_required
@@ -310,6 +330,9 @@ def orga_credits(request: HttpRequest, event_slug: str) -> HttpResponse:
     # Check user permissions for accessing organization credits functionality
     context = check_event_context(request, event_slug, "orga_credits")
 
+    # Determine if page must be readonly in events
+    context["readonly_event"] = _is_credit_readonly(context)
+
     # Configure context with relationship selectors and field definitions
     context.update(
         {
@@ -323,6 +346,7 @@ def orga_credits(request: HttpRequest, event_slug: str) -> HttpResponse:
                 ("value", _("Value")),
                 ("created", _("Date")),
             ],
+            "delete_view": "orga_credits_delete",
         },
     )
 
@@ -336,10 +360,52 @@ def orga_credits(request: HttpRequest, event_slug: str) -> HttpResponse:
     )
 
 
+def _is_credit_readonly(context: dict) -> bool:
+    """Check if credits cannot be edited in orga pages."""
+    return get_association_config(
+        context["event"].association_id,
+        "credit_readonly_event",
+        context=context,
+    )
+
+
+@login_required
+def orga_credits_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create new organization credits."""
+    # Check user permissions for accessing organization credits functionality
+    context = check_event_context(request, event_slug, "orga_credits")
+
+    # Check if user is allowed
+    if _is_credit_readonly(context):
+        raise UserPermissionError
+
+    return orga_new(request, event_slug, OrgaAction.CREDITS)
+
+
 @login_required
 def orga_credits_edit(request: HttpRequest, event_slug: str, credit_uuid: str) -> HttpResponse:
     """Edit organization credits."""
-    return orga_edit(request, event_slug, "orga_credits", OrgaCreditForm, credit_uuid)
+    # Check user permissions for accessing organization credits functionality
+    context = check_event_context(request, event_slug, "orga_credits")
+
+    # Check if user is allowed
+    if _is_credit_readonly(context):
+        raise UserPermissionError
+
+    return orga_edit(request, event_slug, OrgaAction.CREDITS, credit_uuid)
+
+
+@login_required
+def orga_credits_delete(request: HttpRequest, event_slug: str, credit_uuid: str) -> HttpResponse:
+    """Delete credit for event."""
+    # Check user permissions for accessing organization credits functionality
+    context = check_event_context(request, event_slug, "orga_credits")
+
+    # Check if user is allowed
+    if _is_credit_readonly(context):
+        raise UserPermissionError
+
+    return orga_delete(request, event_slug, OrgaAction.CREDITS, credit_uuid)
 
 
 @login_required
@@ -357,6 +423,17 @@ def orga_payments(request: HttpRequest, event_slug: str) -> HttpResponse:
     # Check user permissions for accessing organization payments
     context = check_event_context(request, event_slug, "orga_payments")
 
+    # Pending registration invoice approvals for this run
+    context["pending_invoices"] = (
+        PaymentInvoice.objects.filter(
+            registration__run=context["run"],
+            status=PaymentStatus.SUBMITTED,
+            typ=PaymentType.REGISTRATION,
+        )
+        .select_related("member", "method")
+        .order_by("-created")
+    )
+
     # Define base table fields for payment display
     fields = [
         ("member", _("Member")),
@@ -366,6 +443,7 @@ def orga_payments(request: HttpRequest, event_slug: str) -> HttpResponse:
         ("net", _("Net")),
         ("trans", _("Fee")),
         ("created", _("Date")),
+        ("receipt", _("Receipt")),
     ]
 
     # Add VAT fields if VAT feature is enabled
@@ -390,6 +468,17 @@ def orga_payments(request: HttpRequest, event_slug: str) -> HttpResponse:
                 "status": lambda el: el.inv.get_status_display() if el.inv else "",
                 "net": lambda el: format_decimal(el.net),
                 "trans": lambda el: format_decimal(el.trans) if el.trans else "",
+                "receipt": lambda el: f"<a href='{el.inv.download()}' target='_blank' download>{_('Download')}</a>"
+                if el.inv and el.inv.invoice and el.pay == PaymentChoices.MONEY
+                else "",
+            },
+            "delete_view": "orga_payments_delete",
+            # DB paths for callback fields, enabling sort and search on these columns
+            "field_db_paths": {
+                "member": ["registration__member__surname", "registration__member__name"],
+                "method": ["inv__method__name"],
+                "net": ["net"],
+                "trans": ["trans"],
             },
         },
     )
@@ -405,9 +494,79 @@ def orga_payments(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_payments_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new payment for an event."""
+    return orga_new(request, event_slug, OrgaAction.PAYMENTS)
+
+
+def payment_edit(
+    request: HttpRequest,
+    context: dict,
+    payment_uuid: str,
+    payment_form_class: type,
+    redirect_fn: callable,
+) -> HttpResponse:
+    """Edit payment and its linked invoice in a combined form.
+
+    Args:
+        request: HTTP request object
+        context: Context dictionary (already initialized with permission check)
+        payment_uuid: UUID of the payment to edit
+        payment_form_class: Form class to use for the payment (ExePaymentForm or OrgaPaymentForm)
+        redirect_fn: Callable returning the redirect response on success
+
+    Returns:
+        HttpResponse with the edit form or redirect on success
+
+    """
+    backend_get(context, AccountingItemPayment, payment_uuid)
+    el = context["el"]
+    invoice = el.inv
+
+    if request.method == "POST":
+        payment_form = payment_form_class(request.POST, request.FILES, instance=el, context=context)
+        invoice_form = (
+            ExeInvoiceForm(request.POST, request.FILES, instance=invoice, context=context) if invoice else None
+        )
+
+        payment_valid = payment_form.is_valid()
+        invoice_valid = invoice_form.is_valid() if invoice_form else True
+
+        if payment_valid and invoice_valid:
+            saved_payment = payment_form.save()
+            save_log(context, AccountingItemPayment, saved_payment, el.uuid)
+            if invoice_form:
+                saved_invoice = invoice_form.save()
+                save_log(context, type(saved_invoice), saved_invoice, None, operation_type=LogOperationType.UPDATE)
+            messages.success(request, _("Element saved!"))
+            return redirect_fn()
+
+        context["form1"] = payment_form
+        context["form2"] = invoice_form
+    else:
+        context["form1"] = payment_form_class(instance=el, context=context)
+        context["form2"] = ExeInvoiceForm(instance=invoice, context=context) if invoice else None
+
+    return render(request, "larpmanager/orga/edit_multi.html", context)
+
+
+@login_required
 def orga_payments_edit(request: HttpRequest, event_slug: str, payment_uuid: str) -> HttpResponse:
-    """Edit an existing payment for an event."""
-    return orga_edit(request, event_slug, "orga_payments", OrgaPaymentForm, payment_uuid)
+    """Edit payment and its linked invoice (if present) in a combined form."""
+    context = check_event_context(request, event_slug, "orga_payments")
+    return payment_edit(
+        request,
+        context,
+        payment_uuid,
+        OrgaPaymentForm,
+        lambda: redirect("orga_payments", context["run"].get_slug()),
+    )
+
+
+@login_required
+def orga_payments_delete(request: HttpRequest, event_slug: str, payment_uuid: str) -> HttpResponse:
+    """Delete payment for event."""
+    return orga_delete(request, event_slug, OrgaAction.PAYMENTS, payment_uuid)
 
 
 @login_required
@@ -440,15 +599,16 @@ def orga_outflows(request: HttpRequest, event_slug: str) -> HttpResponse:
                 ("descr", _("Description")),
                 ("value", _("Value")),
                 ("payment_date", _("Date")),
-                ("statement", _("Statement")),
+                ("statement", _("Receipt")),
             ],
             # Define custom display callbacks for specific fields
             "callbacks": {
                 # Create download link for statement documents
-                "statement": lambda el: f"<a href='{el.download()}'>Download</a>",
+                "statement": lambda el: f"<a href='{el.download()}' target='_blank' download>Download</a>",
                 # Display human-readable type labels
                 "type": lambda el: el.get_exp_display(),
             },
+            "delete_view": "orga_outflows_delete",
         },
     )
 
@@ -463,9 +623,21 @@ def orga_outflows(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_outflows_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new outflow entry for an event."""
+    return orga_new(request, event_slug, OrgaAction.OUTFLOWS)
+
+
+@login_required
 def orga_outflows_edit(request: HttpRequest, event_slug: str, outflow_uuid: str) -> HttpResponse:
     """Edit an outflow entry for an event."""
-    return orga_edit(request, event_slug, "orga_outflows", OrgaOutflowForm, outflow_uuid)
+    return orga_edit(request, event_slug, OrgaAction.OUTFLOWS, outflow_uuid)
+
+
+@login_required
+def orga_outflows_delete(request: HttpRequest, event_slug: str, outflow_uuid: str) -> HttpResponse:
+    """Delete outflow for event."""
+    return orga_delete(request, event_slug, OrgaAction.OUTFLOWS, outflow_uuid)
 
 
 @login_required
@@ -497,12 +669,13 @@ def orga_inflows(request: HttpRequest, event_slug: str) -> HttpResponse:
                 ("descr", _("Description")),
                 ("value", _("Value")),
                 ("payment_date", _("Date")),
-                ("statement", _("Statement")),
+                ("statement", _("Receipt")),
             ],
             # Define custom callback functions for rendering specific table cells
             "callbacks": {
-                "statement": lambda el: f"<a href='{el.download()}'>Download</a>",
+                "statement": lambda el: f"<a href='{el.download()}' target='_blank' download>Download</a>",
             },
+            "delete_view": "orga_inflows_delete",
         },
     )
 
@@ -517,9 +690,21 @@ def orga_inflows(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_inflows_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new inflow entry for an event."""
+    return orga_new(request, event_slug, OrgaAction.INFLOWS)
+
+
+@login_required
 def orga_inflows_edit(request: HttpRequest, event_slug: str, inflow_uuid: str) -> HttpResponse:
     """Edit an existing inflow entry for an event."""
-    return orga_edit(request, event_slug, "orga_inflows", OrgaInflowForm, inflow_uuid)
+    return orga_edit(request, event_slug, OrgaAction.INFLOWS, inflow_uuid)
+
+
+@login_required
+def orga_inflows_delete(request: HttpRequest, event_slug: str, inflow_uuid: str) -> HttpResponse:
+    """Delete inflow for event."""
+    return orga_delete(request, event_slug, OrgaAction.INFLOWS, inflow_uuid)
 
 
 @login_required
@@ -544,7 +729,6 @@ def orga_expenses(request: HttpRequest, event_slug: str) -> HttpResponse:
     context["disable_approval"] = get_association_config(
         context["event"].association_id,
         "expense_disable_orga",
-        default_value=False,
         context=context,
     )
 
@@ -559,24 +743,25 @@ def orga_expenses(request: HttpRequest, event_slug: str) -> HttpResponse:
             "fields": [
                 ("member", _("Member")),
                 ("type", _("Type")),
+                ("action", _("Action")),
                 ("run", _("Event")),
                 ("descr", _("Description")),
+                ("statement", _("Receipt")),
                 ("value", _("Value")),
                 ("created", _("Date")),
-                ("statement", _("Statement")),
-                ("action", _("Action")),
             ],
             # Define callback functions for custom column rendering
             "callbacks": {
                 # Generate download link for expense statement documents
-                "statement": lambda el: f"<a href='{el.download()}'>Download</a>",
+                "statement": lambda el: f"<a href='{el.download()}' target='_blank' download>Download</a>",
                 # Show approval link only for unapproved items when approval is enabled
-                "action": lambda el: f"<a href='{reverse('orga_expenses_approve', args=[context['run'].get_slug(), el.id])}'>{approve}</a>"
+                "action": lambda el: f"<a href='{reverse('orga_expenses_approve', args=[context['run'].get_slug(), el.uuid])}' class='frame-confirm'>{approve}</a>"
                 if not el.is_approved and not context["disable_approval"]
                 else "",
                 # Display human-readable expense type from model choices
                 "type": lambda el: el.get_exp_display(),
             },
+            "delete_view": "orga_expenses_delete",
         },
     )
 
@@ -591,9 +776,21 @@ def orga_expenses(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_expenses_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new expense for an event."""
+    return orga_new(request, event_slug, OrgaAction.EXPENSES)
+
+
+@login_required
 def orga_expenses_edit(request: HttpRequest, event_slug: str, expense_uuid: str) -> HttpResponse:
     """Edit an expense for an event."""
-    return orga_edit(request, event_slug, "orga_expenses", OrgaExpenseForm, expense_uuid)
+    return orga_edit(request, event_slug, OrgaAction.EXPENSES, expense_uuid)
+
+
+@login_required
+def orga_expenses_delete(request: HttpRequest, event_slug: str, expense_uuid: str) -> HttpResponse:
+    """Delete expense for event."""
+    return orga_delete(request, event_slug, OrgaAction.EXPENSES, expense_uuid)
 
 
 @login_required
@@ -621,9 +818,7 @@ def orga_expenses_approve(request: HttpRequest, event_slug: str, expense_uuid: s
     context = check_event_context(request, event_slug, "orga_expenses")
 
     # Verify that expense functionality is enabled for this association
-    if get_association_config(
-        context["event"].association_id, "expense_disable_orga", default_value=False, context=context
-    ):
+    if get_association_config(context["event"].association_id, "expense_disable_orga", context=context):
         msg = "eh no caro mio"
         raise Http404(msg)
 
@@ -635,10 +830,22 @@ def orga_expenses_approve(request: HttpRequest, event_slug: str, expense_uuid: s
         msg = "not your orga"
         raise Http404(msg)
 
+    is_frame = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+
+    # Show a confirmation page before applying the change: bare frame popup when
+    # opened via the iframe modal, full-chrome confirm page on a direct GET otherwise
+    if request.method != "POST":
+        context["frame"] = is_frame
+        context["el_name"] = str(exp)
+        template = "elements/dashboard/approve_confirm.html" if is_frame else "elements/confirm_action.html"
+        return render(request, template, context)
+
     # Update expense approval status and save to database
     exp.is_approved = True
     exp.save()
 
     # Display success message and redirect to expenses list
     messages.success(request, _("Request approved"))
+    if is_frame:
+        return render(request, "elements/dashboard/form_success.html", context)
     return redirect("orga_expenses", event_slug=context["run"].get_slug())

@@ -19,19 +19,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 from __future__ import annotations
 
-import ast
 import json
 from collections import defaultdict
 from decimal import Decimal
 from typing import Any
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
-from django.db.models import Prefetch, Q, Sum
-from django.db.models.functions import Coalesce
+from django.db.models import Prefetch, Q
 
 from larpmanager.cache.config import get_event_config, save_all_element_configs, save_single_config
+from larpmanager.cache.experience import get_event_exp_systems
 from larpmanager.cache.feature import get_event_features
-from larpmanager.models.experience import AbilityPx, DeliveryPx, ModifierPx, Operation, RulePx
+from larpmanager.models.event import Event
+from larpmanager.models.experience import AbilityExp, CriterionExp, DeliveryExp, ModifierExp, Operation, RuleExp
 from larpmanager.models.form import (
     QuestionApplicable,
     WritingAnswer,
@@ -40,27 +41,42 @@ from larpmanager.models.form import (
     WritingQuestion,
     WritingQuestionType,
 )
-from larpmanager.models.writing import Character, CharacterConfig
+from larpmanager.models.writing import Character, CharacterConfig, Faction
+from larpmanager.utils.larpmanager.tasks import background_auto
+
+_CRITERION_OPERATIONS = {
+    Operation.ADDITION: lambda tot, amt: int(tot + amt),
+    Operation.SUBTRACTION: lambda tot, amt: int(tot - amt),
+    Operation.MULTIPLICATION: lambda tot, amt: int(tot * amt),
+    Operation.DIVISION: lambda tot, amt: int(tot / amt) if amt != 0 else tot,
+}
 
 
-def _build_px_context(character: Any) -> tuple[set[int], set[int], dict[int, list[tuple[int, set[int], set[int]]]]]:
+def _get_character_faction_ids(character: Any) -> set[int]:
+    """Return the set of faction IDs the character belongs to."""
+    return set(character.factions_list.values_list("id", flat=True))
+
+
+def _build_exp_context(
+    character: Any,
+) -> tuple[set[int], set[int], dict[int, list[tuple[int, set[int], set[int], set[int]]]]]:
     """Build context for character experience point calculations.
 
     Gathers character abilities, choices, and modifiers with optimized queries
-    to create the foundation for PX cost and availability calculations.
+    to create the foundation for EXP cost and availability calculations.
 
     Args:
-        character: Character instance for which to build the PX context.
+        character: Character instance for which to build the EXP context.
 
     Returns:
         A tuple containing:
         - Set of ability IDs already learned by the character
         - Set of option IDs selected for the character
-        - Dictionary mapping ability IDs to lists of modifier tuples (cost, prerequisites, requirements)
+        - Dictionary mapping ability IDs to lists of modifier tuples (cost, prerequisites, requirements, factions)
 
     """
     # Get all abilities already learned by the character
-    current_character_abilities = set(character.px_ability_list.values_list("pk", flat=True))
+    current_character_abilities = set(character.exp_ability_list.values_list("pk", flat=True))
 
     # Get the options selected for the character from writing choices
     current_character_choices = set(
@@ -71,30 +87,36 @@ def _build_px_context(character: Any) -> tuple[set[int], set[int], dict[int, lis
     )
 
     # Check if modifiers are enabled for this event; return empty if disabled
-    if not get_event_config(character.event_id, "px_modifiers", default_value=False):
+    if not get_event_config(character.event_id, "exp_modifiers"):
         return current_character_abilities, current_character_choices, {}
 
     # Get all modifiers
     all_modifiers = (
-        character.event.get_elements(ModifierPx)
+        character.event.get_elements(ModifierExp)
         .only("id", "order", "cost")
         .order_by("order")
         .prefetch_related(
-            Prefetch("abilities", queryset=AbilityPx.objects.only("id")),
-            Prefetch("prerequisites", queryset=AbilityPx.objects.only("id")),
-            Prefetch("requirements", queryset=WritingOption.objects.only("id")),
+            Prefetch("abilities", queryset=AbilityExp.objects.only("id")),
+            Prefetch("prerequisites", queryset=AbilityExp.objects.only("id")),
+            Prefetch("requirements", queryset=WritingOption.objects.only("id", "question_id")),
+            Prefetch("factions", queryset=Faction.objects.only("id")),
         )
     )
 
-    # Build mapping for cost, prerequisites, and requirements by ability
+    # Build mapping for cost, prerequisites, requirements, and factions by ability
     modifiers_by_ability = defaultdict(list)
     for modifier in all_modifiers:
         ability_ids = [ability.id for ability in modifier.abilities.all()]
         prerequisite_ids = {ability.id for ability in modifier.prerequisites.all()}
-        requirement_ids = {option.id for option in modifier.requirements.all()}
+        faction_ids = {faction.id for faction in modifier.factions.all()}
+
+        # Group requirements by question: AND between questions, OR within each question
+        requirements_by_question: dict[int, set[int]] = defaultdict(set)
+        for option in modifier.requirements.all():
+            requirements_by_question[option.question_id].add(option.id)
 
         # Map each ability to its applicable modifiers
-        payload = (modifier.cost, prerequisite_ids, requirement_ids)
+        payload = (modifier.cost, prerequisite_ids, dict(requirements_by_question), faction_ids)
         for ability_id in ability_ids:
             modifiers_by_ability[ability_id].append(payload)
 
@@ -106,37 +128,136 @@ def _apply_modifier_cost(
     modifiers_by_ability_id: dict[int, list[tuple]],
     character_ability_ids: set[int],
     character_choice_ids: set[int],
+    character_faction_ids: set[int] | None = None,
 ) -> None:
     """Apply the first matching modifier cost to an ability.
 
     Iterates through modifiers for the given ability and applies the cost from
-    the first modifier whose prerequisites and requirements are satisfied.
+    the first modifier whose prerequisites, requirements and factions are satisfied.
 
     Args:
         ability: Ability object to modify.
-        modifiers_by_ability_id: Mapping of ability IDs to lists of (cost, prereq_ids, req_ids) tuples.
+        modifiers_by_ability_id: Mapping of ability IDs to lists of (cost, prereq_ids, req_ids, faction_ids) tuples.
         character_ability_ids: Set of ability IDs the character currently has.
         character_choice_ids: Set of choice IDs the character currently has.
+        character_faction_ids: Set of faction IDs the character currently belongs to.
 
     """
+    character_faction_ids = character_faction_ids or set()
     # Look only at modifiers for this specific ability
-    for cost, prerequisite_ability_ids, required_choice_ids in modifiers_by_ability_id.get(ability.id, ()):
+    for cost, prerequisite_ability_ids, required_choice_ids, required_faction_ids in modifiers_by_ability_id.get(
+        ability.id, ()
+    ):
         # Check if ability prerequisites are met
         if prerequisite_ability_ids and not prerequisite_ability_ids.issubset(character_ability_ids):
             continue
-        # Check if choice requirements are met
-        if required_choice_ids and not required_choice_ids.issubset(character_choice_ids):
+        # Check if choice requirements are met (AND between questions, OR within each question)
+        if required_choice_ids and not all(
+            bool(option_ids & character_choice_ids) for option_ids in required_choice_ids.values()
+        ):
+            continue
+        # Check if character is in all required factions (empty = applies to all)
+        if required_faction_ids and not required_faction_ids.issubset(character_faction_ids):
             continue
         # Apply the cost from the first valid modifier
         ability.cost = cost
         break  # First valid wins
 
 
+def _get_current_abilities(
+    character: Any,
+    current_character_abilities: set[int],
+    current_character_choices: set[int],
+    modifiers_by_ability: dict[int, list[tuple]],
+) -> list:
+    """Get current abilities with modified costs.
+
+    Args:
+        character: Character instance.
+        current_character_abilities: Set of ability IDs the character currently has.
+        current_character_choices: Set of choice IDs the character currently has.
+        modifiers_by_ability: Mapping of ability IDs to modifier tuples.
+
+    Returns:
+        List of abilities with modified costs applied.
+
+    """
+    abilities_queryset = (
+        character.exp_ability_list.select_related("system").only("id", "cost", "system_id").order_by("name")
+    )
+    character_faction_ids = _get_character_faction_ids(character)
+    abilities_with_modified_costs = []
+    for ability in abilities_queryset:
+        _apply_modifier_cost(
+            ability,
+            modifiers_by_ability,
+            current_character_abilities,
+            current_character_choices,
+            character_faction_ids,
+        )
+        abilities_with_modified_costs.append(ability)
+    return abilities_with_modified_costs
+
+
+def _get_available_abilities(
+    char: Any,
+    current_character_abilities: set[int],
+    current_character_choices: set[int],
+    modifiers_by_ability: dict[int, list[tuple]],
+    px_avail_by_system: dict[int, int],
+    *,
+    visible_only: bool = True,
+) -> list:
+    """Get available abilities for purchase.
+
+    Args:
+        char: Character instance.
+        current_character_abilities: Set of ability IDs the character currently has.
+        current_character_choices: Set of choice IDs the character currently has.
+        modifiers_by_ability: Mapping of ability IDs to modifier tuples.
+        px_avail_by_system: Mapping of system_id to available EXP points for that system.
+        visible_only: If True, only return visible abilities.
+
+    Returns:
+        List of AbilityExp instances the character can purchase.
+
+    """
+    qs = char.event.get_elements(AbilityExp).exclude(pk__in=current_character_abilities)
+    if visible_only:
+        qs = qs.filter(visible=True, system__hidden=False)
+    all_abilities = (
+        qs.select_related("typ", "system")
+        .order_by("name")
+        .prefetch_related(
+            Prefetch("prerequisites", queryset=AbilityExp.objects.only("id")),
+            Prefetch("requirements", queryset=WritingOption.objects.only("id", "question_id")),
+        )
+    )
+
+    character_faction_ids = _get_character_faction_ids(char)
+    available_abilities = []
+    for ability in all_abilities:
+        if not check_available_ability_exp(ability, current_character_abilities, current_character_choices):
+            continue
+        _apply_modifier_cost(
+            ability,
+            modifiers_by_ability,
+            current_character_abilities,
+            current_character_choices,
+            character_faction_ids,
+        )
+        if ability.cost > px_avail_by_system.get(ability.system_id, 0):
+            continue
+        available_abilities.append(ability)
+
+    return available_abilities
+
+
 def get_free_abilities(char: Character) -> list:
     """Return the list of free abilities for a character."""
     config_name = _free_abilities_cache_key()
-    config_value = char.get_config(config_name, default_value="[]")
-    return ast.literal_eval(config_value)
+    config_value = char.get_config(config_name)
+    return json.loads(config_value)
 
 
 def _free_abilities_cache_key() -> str:
@@ -150,63 +271,331 @@ def set_free_abilities(char: Character, frees: list[int]) -> None:
     save_single_config(char, config_name, json.dumps(frees))
 
 
-def calculate_character_experience_points(character: Any) -> None:
-    """Update character experience points and apply ability calculations.
+def _auto_buy_abilities(
+    character: Any,
+    current_character_abilities: set[int],
+    current_character_choices: set[int],
+    modifiers_by_ability: dict[int, list[tuple]],
+    px_avail_by_system: dict[int, int],
+) -> set[int]:
+    """Automatically buy the most expensive available ability in a loop.
+
+    Repeatedly selects and assigns the most expensive ability the character can
+    afford, until no affordable non-free abilities remain.
 
     Args:
-        character: Character instance to update
+        character: Character instance to assign abilities to.
+        current_character_abilities: Set of ability IDs the character currently has.
+        current_character_choices: Set of choice IDs the character currently has.
+        modifiers_by_ability: Mapping of ability IDs to modifier tuples.
+        px_avail_by_system: Mapping of system_id to available EXP points for that system.
+
+    Returns:
+        Updated set of ability IDs the character now has.
 
     """
-    if "px" not in get_event_features(character.event_id):
+    while True:
+        available = _get_available_abilities(
+            character, current_character_abilities, current_character_choices, modifiers_by_ability, px_avail_by_system
+        )
+        # Only consider abilities with a cost > 0 (free ones are handled separately)
+        affordable = [a for a in available if a.cost > 0]
+        if not affordable:
+            break
+        most_expensive = max(affordable, key=lambda a: a.cost)
+        character.exp_ability_list.add(most_expensive)
+        current_character_abilities = current_character_abilities | {most_expensive.id}
+        px_avail_by_system[most_expensive.system_id] = (
+            px_avail_by_system.get(most_expensive.system_id, 0) - most_expensive.cost
+        )
+
+    return current_character_abilities
+
+
+def _fetch_criterions(character: Any) -> list:
+    """Fetch and materialise CriterionExp queryset for a character's event."""
+    return list(
+        character.event.get_elements(CriterionExp)
+        .select_related("system")
+        .order_by("order")
+        .prefetch_related(
+            Prefetch("prerequisites", queryset=AbilityExp.objects.only("id")),
+            Prefetch("requirements", queryset=WritingOption.objects.only("id", "question_id")),
+            Prefetch("factions", queryset=Faction.objects.only("id")),
+        )
+    )
+
+
+def _apply_criterion_exp(
+    character: Any,
+    deliveries_by_system: dict[int, int],
+    current_character_abilities: set[int] | None = None,
+    current_character_choices: set[int] | None = None,
+    criterions: list | None = None,
+) -> None:
+    """Apply all matching CriterionExp rules to deliveries_by_system in order."""
+    if not get_event_config(character.event_id, "exp_criterions"):
         return
 
-    starting_experience_points = get_event_config(character.event_id, "px_start", default_value=0)
+    if criterions is None:
+        criterions = _fetch_criterions(character)
 
-    _handle_free_abilities(character)
+    ability_ids = current_character_abilities or set()
+    choice_ids = current_character_choices or set()
+    faction_ids = _get_character_faction_ids(character)
 
-    current_abilities = get_current_ability_px(character)
+    for criterion in criterions:
+        required_faction_ids = {faction.id for faction in criterion.factions.all()}
+        if not check_available_ability_exp(criterion, ability_ids, choice_ids, faction_ids, required_faction_ids):
+            continue
 
-    total_experience_points = int(starting_experience_points) + (
-        character.px_delivery_list.aggregate(total=Coalesce(Sum("amount"), 0))["total"] or 0
+        system_id = criterion.system_id
+        current_total = deliveries_by_system.get(system_id, 0)
+        op_func = _CRITERION_OPERATIONS.get(criterion.operation)
+        if op_func:
+            deliveries_by_system[system_id] = op_func(current_total, criterion.amount)
+
+
+def _build_deliveries_by_system(
+    character: Any,
+    systems: list,
+    starting_experience_points: int,
+    current_character_abilities: set[int] | None = None,
+    current_character_choices: set[int] | None = None,
+    criterions: list | None = None,
+) -> dict[int, int]:
+    """Fetch deliveries, apply starting XP and criteria. Returns system->total dict."""
+    deliveries_by_system: dict[int, int] = {}
+    for delivery in character.exp_delivery_list.select_related("system").all():
+        deliveries_by_system[delivery.system_id] = deliveries_by_system.get(delivery.system_id, 0) + delivery.amount
+    if systems:
+        first_system_id = systems[0].id
+        deliveries_by_system[first_system_id] = deliveries_by_system.get(first_system_id, 0) + int(
+            starting_experience_points
+        )
+    _apply_criterion_exp(
+        character, deliveries_by_system, current_character_abilities, current_character_choices, criterions
     )
-    used_experience_points = sum(ability.cost for ability in current_abilities)
+    return deliveries_by_system
 
-    experience_data = {
-        "px_tot": total_experience_points,
-        "px_used": used_experience_points,
-        "px_avail": total_experience_points - used_experience_points,
-    }
+
+def _build_px_avail_by_system(
+    character: Any,
+    current_abilities: list,
+    starting_experience_points: int,
+    current_character_abilities: set[int] | None = None,
+    current_character_choices: set[int] | None = None,
+    criterions: list | None = None,
+) -> dict[int, int]:
+    """Build a mapping of system_id -> available EXP points.
+
+    Args:
+        character: Character instance.
+        current_abilities: List of current abilities with costs (must have .system_id).
+        starting_experience_points: Global starting EXP added to the first system found.
+        current_character_abilities: Set of ability IDs the character currently has.
+        current_character_choices: Set of choice IDs the character currently has.
+        criterions: Pre-fetched CriterionExp list; fetched from DB if None.
+
+    Returns:
+        Dict mapping system_id to available EXP points.
+
+    """
+    systems = get_event_exp_systems(character.event)
+    if not systems:
+        return {}
+
+    deliveries_by_system = _build_deliveries_by_system(
+        character,
+        systems,
+        starting_experience_points,
+        current_character_abilities,
+        current_character_choices,
+        criterions,
+    )
+
+    used_by_system: dict[int, int] = {}
+    for ability in current_abilities:
+        used_by_system[ability.system_id] = used_by_system.get(ability.system_id, 0) + ability.cost
+
+    px_avail_by_system: dict[int, int] = {}
+    for system in systems:
+        tot = deliveries_by_system.get(system.id, 0)
+        used = used_by_system.get(system.id, 0)
+        px_avail_by_system[system.id] = tot - used
+
+    return px_avail_by_system
+
+
+def _build_experience_data(
+    character: Any,
+    current_abilities: list,
+    starting_experience_points: int,
+    current_character_abilities: set[int] | None = None,
+    current_character_choices: set[int] | None = None,
+    criterions: list | None = None,
+) -> dict:
+    """Build experience data dict with global and per-system values.
+
+    Args:
+        character: Character instance.
+        current_abilities: List of current abilities with costs.
+        starting_experience_points: Global starting EXP.
+        current_character_abilities: Set of ability IDs the character currently has.
+        current_character_choices: Set of choice IDs the character currently has.
+        criterions: Pre-fetched CriterionExp list; fetched from DB if None.
+
+    Returns:
+        Dict with exp_tot/exp_used/exp_avail and per-system keys.
+
+    """
+    systems = get_event_exp_systems(character.event)
+
+    deliveries_by_system = _build_deliveries_by_system(
+        character,
+        systems,
+        starting_experience_points,
+        current_character_abilities,
+        current_character_choices,
+        criterions,
+    )
+
+    used_by_system: dict[int, int] = {}
+    for ability in current_abilities:
+        used_by_system[ability.system_id] = used_by_system.get(ability.system_id, 0) + ability.cost
+
+    experience_data: dict = {}
+    total_tot = 0
+    total_used = 0
+    for system in systems:
+        tot = deliveries_by_system.get(system.id, 0)
+        used = used_by_system.get(system.id, 0)
+        avail = tot - used
+        total_tot += tot
+        total_used += used
+        sys_uuid = str(system.uuid)
+        experience_data[f"exp_tot_{sys_uuid}"] = tot
+        experience_data[f"exp_used_{sys_uuid}"] = used
+        experience_data[f"exp_avail_{sys_uuid}"] = avail
+
+    # Global aggregates for backward compatibility
+    experience_data["exp_tot"] = total_tot
+    experience_data["exp_used"] = total_used
+    experience_data["exp_avail"] = total_tot - total_used
+
+    return experience_data
+
+
+def calculate_character_experience_points(character: Any) -> None:
+    """Update character experience points and apply ability calculations."""
+    if "experience" not in get_event_features(character.event_id):
+        return
+
+    starting_experience_points = get_event_config(character.event_id, "exp_start")
+
+    # Automatically obtain abilities with cost 0
+    current_character_abilities, current_character_choices, modifiers_by_ability = _handle_free_abilities(character)
+
+    # Get current abilities, with updated cost (need system_id for per-system grouping)
+    current_abilities = _get_current_abilities(
+        character, current_character_abilities, current_character_choices, modifiers_by_ability
+    )
+
+    # Pre-fetch criterions once so the auto-buy loop and final data build share the same list.
+    criterions: list | None = None
+    if get_event_config(character.event_id, "exp_criterions"):
+        criterions = _fetch_criterions(character)
+
+    # Auto-buy abilities if configured; loop until convergence so that criterion
+    # bonuses unlocked by auto-bought abilities are reflected in subsequent iterations.
+    if get_event_config(character.event_id, "exp_auto_buy"):
+        while True:
+            px_avail_by_system = _build_px_avail_by_system(
+                character,
+                current_abilities,
+                starting_experience_points,
+                current_character_abilities,
+                current_character_choices,
+                criterions,
+            )
+            new_abilities = _auto_buy_abilities(
+                character,
+                current_character_abilities,
+                current_character_choices,
+                modifiers_by_ability,
+                px_avail_by_system,
+            )
+            if new_abilities == current_character_abilities:
+                break
+            current_character_abilities = new_abilities
+            current_abilities = _get_current_abilities(
+                character, current_character_abilities, current_character_choices, modifiers_by_ability
+            )
+
+    experience_data = _build_experience_data(
+        character,
+        current_abilities,
+        starting_experience_points,
+        current_character_abilities,
+        current_character_choices,
+        criterions,
+    )
 
     save_all_element_configs(character, experience_data)
 
-    apply_rules_computed(character)
+    apply_rules_computed(character, current_character_abilities)
 
 
-def _handle_free_abilities(character: Any) -> None:
+def _handle_free_abilities(
+    character: Any,
+) -> tuple[set[int], set[int], dict[int, list[tuple]]]:
     """Handle free abilities that characters should automatically receive.
 
     Args:
-        character: Character instance to process
-
+        character: Character instance to process.
     """
     free_ability_ids = get_free_abilities(character)
 
+    # Build EXP context
+    current_character_abilities, current_character_choices, modifiers_by_ability = _build_exp_context(character)
+
     # look for available ability with cost 0, and not already in the free list: get them!
-    for ability in get_available_ability_px(character, 0):
-        if ability.visible and ability.cost == 0 and ability.id not in free_ability_ids:
-            character.px_ability_list.add(ability)
+    # Use a dict with 0 for all systems (we only want cost=0 abilities here)
+    zero_avail: dict[int, int] = defaultdict(int)
+    newly_added_ids: set[int] = set()
+    for ability in _get_available_abilities(
+        character,
+        current_character_abilities,
+        current_character_choices,
+        modifiers_by_ability,
+        zero_avail,
+        visible_only=False,
+    ):
+        if ability.cost == 0 and ability.id not in free_ability_ids and (ability.visible or ability.system.hidden):
+            character.exp_ability_list.add(ability)
             free_ability_ids.append(ability.id)
+            newly_added_ids.add(ability.id)
+
+    # Update context with newly added abilities
+    updated_character_abilities = current_character_abilities | newly_added_ids
 
     # look for current abilities with cost non 0, yet got in the past as free: remove them!
-    for ability in get_current_ability_px(character):
-        if ability.visible and ability.cost > 0 and ability.id in free_ability_ids:
+    all_removed_ids: set[int] = set()
+    for ability in _get_current_abilities(
+        character, updated_character_abilities, current_character_choices, modifiers_by_ability
+    ):
+        if ability.cost > 0 and ability.id in free_ability_ids:
             removed_ability_ids = remove_char_ability(character, ability.id)
             free_ability_ids = list(set(free_ability_ids) - set(removed_ability_ids))
+            all_removed_ids |= removed_ability_ids
 
     set_free_abilities(character, free_ability_ids)
 
+    final_character_abilities = updated_character_abilities - all_removed_ids
+    return final_character_abilities, current_character_choices, modifiers_by_ability
 
-def get_current_ability_px(character: Character) -> list[AbilityPx]:
+
+def get_current_ability_exp(character: Character) -> list[AbilityExp]:
     """Get current abilities with modified costs for a character.
 
     Retrieves character abilities and applies cost modifications based on
@@ -219,102 +608,93 @@ def get_current_ability_px(character: Character) -> list[AbilityPx]:
         List of abilities with modified costs applied
 
     """
-    # Build the context for PX calculations including current abilities and modifiers
-    current_character_abilities, current_character_choices, modifiers_by_ability = _build_px_context(character)
-
-    # Get character abilities ordered by name, only fetching needed fields for performance
-    abilities_queryset = character.px_ability_list.only("id", "cost").order_by("name")
-
-    # Process each ability and apply cost modifications
-    abilities_with_modified_costs = []
-    for ability in abilities_queryset:
-        # Apply modifier-based cost adjustments based on character context
-        _apply_modifier_cost(ability, modifiers_by_ability, current_character_abilities, current_character_choices)
-        abilities_with_modified_costs.append(ability)
-    return abilities_with_modified_costs
+    current_character_abilities, current_character_choices, modifiers_by_ability = _build_exp_context(character)
+    return _get_current_abilities(
+        character, current_character_abilities, current_character_choices, modifiers_by_ability
+    )
 
 
-def check_available_ability_px(ability: Any, current_char_abilities: Any, current_char_choices: Any) -> bool:
-    """Check if an ability is available based on prerequisites and requirements.
+def check_available_ability_exp(
+    ability: Any,
+    current_char_abilities: Any,
+    current_char_choices: Any,
+    current_char_factions: set[int] | None = None,
+    required_faction_ids: set[int] | None = None,
+) -> bool:
+    """Check if an ability is available based on prerequisites, requirements and factions.
 
-    Args:
-        ability: Ability to check availability for
-        current_char_abilities: Set of current character abilities
-        current_char_choices: Set of current character choices
-
-    Returns:
-        True if all prerequisites and requirements are met, False otherwise
-
+    Prerequisites: all must be met (AND).
+    Requirements: grouped by writing question field - all fields must be satisfied (AND between fields),
+    but within each field at least one option must be selected (OR within field).
+    Factions: if required_faction_ids is provided and not empty, the character must be in all
+    of those factions (AND); empty or not provided means it applies to all factions.
     """
-    # Extract prerequisite IDs from the ability
-    prerequisite_ids = {ability.id for ability in ability.prerequisites.all()}
+    # Check prerequisites: all must be in current abilities (AND)
+    prerequisite_ids = {a.id for a in ability.prerequisites.all()}
+    if not prerequisite_ids.issubset(current_char_abilities):
+        return False
 
-    # Extract requirement IDs from the ability
-    requirement_ids = {option.id for option in ability.requirements.all()}
+    # Group requirements by question (AND between questions, OR within each question)
+    requirements_by_question: dict[int, set[int]] = defaultdict(set)
+    for option in ability.requirements.all():
+        requirements_by_question[option.question_id].add(option.id)
 
-    # Check if all prerequisites and requirements are satisfied
-    return prerequisite_ids.issubset(current_char_abilities) and requirement_ids.issubset(current_char_choices)
+    if not all(bool(option_ids & current_char_choices) for option_ids in requirements_by_question.values()):
+        return False
+
+    # Check factions, if the caller supplied any to check against
+    return not required_faction_ids or required_faction_ids.issubset(current_char_factions or set())
 
 
-def get_available_ability_px(char: Any, px_avail: int | None = None) -> list:
-    """Get list of abilities available for purchase with character's PX.
+def get_available_ability_exp(char: Any, px_avail_by_system: dict[int, int] | None = None) -> list:
+    """Get list of abilities available for purchase with character's EXP.
 
     Retrieves all visible abilities that the character can purchase based on their
-    available PX points, prerequisites, and requirements. Applies cost modifiers
+    available EXP points, prerequisites, and requirements. Applies cost modifiers
     and filters out unaffordable abilities.
 
     Args:
         char: Character instance to check abilities for
-        px_avail: Available PX points. If None, calculated from character's
-            additional data
+        px_avail_by_system: Mapping of system_id to available EXP. If None,
+            built from character's additional data.
 
     Returns:
-        List of AbilityPx instances that the character can purchase with their
-        current PX and that meet all prerequisites and requirements
+        List of AbilityExp instances that the character can purchase with their
+        current EXP and that meet all prerequisites and requirements
 
     """
-    # Build context with current character abilities, choices, and modifiers
-    current_character_abilities, current_character_choices, modifiers_by_ability = _build_px_context(char)
+    current_character_abilities, current_character_choices, modifiers_by_ability = _build_exp_context(char)
 
-    # Calculate available PX if not provided
-    if px_avail is None:
+    if px_avail_by_system is None:
         add_char_addit(char)
-        px_avail = int(char.addit.get("px_avail", 0))
+        px_avail_by_system = build_exp_avail_by_system_from_addit(char)
 
-    # Get all visible abilities excluding those already owned by character
-    all_abilities = (
-        char.event.get_elements(AbilityPx)
-        .filter(visible=True)
-        .exclude(pk__in=current_character_abilities)
-        .select_related("typ")
-        .order_by("name")
-        .prefetch_related(
-            Prefetch("prerequisites", queryset=AbilityPx.objects.only("id")),
-            Prefetch("requirements", queryset=WritingOption.objects.only("id")),
-        )
+    return _get_available_abilities(
+        char, current_character_abilities, current_character_choices, modifiers_by_ability, px_avail_by_system
     )
 
-    available_abilities = []
-    for ability in all_abilities:
-        # Check if character meets prerequisites and requirements
-        if not check_available_ability_px(ability, current_character_abilities, current_character_choices):
-            continue
 
-        # Apply cost modifiers based on character's current state
-        _apply_modifier_cost(ability, modifiers_by_ability, current_character_abilities, current_character_choices)
+def build_exp_avail_by_system_from_addit(char: Any) -> dict[int, int]:
+    """Build px_avail_by_system dict from character addit data.
 
-        # Filter out abilities that cost more than available PX
-        if ability.cost > px_avail:
-            continue
+    Args:
+        char: Character instance with populated addit dict.
 
-        available_abilities.append(ability)
+    Returns:
+        Dict mapping system_id to available EXP points.
 
-    return available_abilities
+    """
+    systems = get_event_exp_systems(char.event)
+    px_avail_by_system: dict[int, int] = {}
+    for system in systems:
+        avail_key = f"exp_avail_{system.uuid}"
+        px_avail_by_system[system.id] = int(char.addit.get(avail_key, 0))
+    return px_avail_by_system
 
 
 def on_experience_characters_m2m_changed(
     sender: Any,  # noqa: ARG001
-    instance: DeliveryPx | None,
+    instance: DeliveryExp | None,
     action: str,
     pk_set: set | None,
     **kwargs: Any,  # noqa: ARG001
@@ -326,19 +706,16 @@ def on_experience_characters_m2m_changed(
 
     # Handle direct Character instance updates
     if isinstance(instance, Character):
-        calculate_character_experience_points(instance)
+        calculate_character_experience_points_bgk(instance.id)
     else:
-        # Get characters from pk_set or instance relationship
-        characters = Character.objects.filter(pk__in=pk_set) if pk_set else instance.characters.all()
-
-        # Update experience points for each affected character
-        for char in characters:
-            calculate_character_experience_points(char)
+        # Get character IDs from pk_set or instance relationship
+        char_ids = list(pk_set) if pk_set else list(instance.characters.values_list("id", flat=True))
+        calculate_character_experience_points_bgk(char_ids)
 
 
 def on_rule_abilities_m2m_changed(
     sender: type,  # noqa: ARG001
-    instance: RulePx,
+    instance: RuleExp,
     action: str,
     pk_set: set[int] | None,  # noqa: ARG001
     **kwargs: Any,  # noqa: ARG001
@@ -352,17 +729,12 @@ def on_rule_abilities_m2m_changed(
     if action not in {"post_add", "post_remove", "post_clear"}:
         return
 
-    # Get the parent event containing this rule
-    event = instance.event.get_class_parent(RulePx)
-
-    # Recalculate experience for all characters in the event
-    for char in event.get_elements(Character).all():
-        calculate_character_experience_points(char)
+    _recalcuate_characters_experience_points(instance)
 
 
 def on_modifier_abilities_m2m_changed(
     sender: type,  # noqa: ARG001
-    instance: ModifierPx,
+    instance: ModifierExp,
     action: str,
     pk_set: set[int] | None,  # noqa: ARG001
     **kwargs: Any,  # noqa: ARG001
@@ -372,15 +744,10 @@ def on_modifier_abilities_m2m_changed(
     if action not in {"post_add", "post_remove", "post_clear"}:
         return
 
-    # Get the event containing this modifier
-    event = instance.event.get_class_parent(ModifierPx)
-
-    # Recalculate experience for all characters in the event
-    for char in event.get_elements(Character).all():
-        calculate_character_experience_points(char)
+    _recalcuate_characters_experience_points(instance)
 
 
-def apply_rules_computed(char: Any) -> None:
+def apply_rules_computed(char: Any, character_ability_ids: set[int] | None = None) -> None:
     """Apply computed field rules to calculate character statistics.
 
     This function processes all computed writing questions for a character's event,
@@ -390,7 +757,7 @@ def apply_rules_computed(char: Any) -> None:
     Args:
         char: Character instance to apply rules to. Must have an associated event
               and ability list.
-
+        character_ability_ids: Optional set of character ability IDs already fetched
     Returns:
         None: Function modifies character data in-place by creating/updating
               WritingAnswer objects.
@@ -406,11 +773,12 @@ def apply_rules_computed(char: Any) -> None:
     computed_field_values = {question.id: Decimal(0) for question in computed_questions}
 
     # Retrieve character's ability IDs for rule filtering
-    character_ability_ids = char.px_ability_list.values_list("pk", flat=True)
+    if character_ability_ids is None:
+        character_ability_ids = char.exp_ability_list.values_list("pk", flat=True)
 
     # Get applicable rules: either global rules or rules matching character's abilities
     applicable_rules = (
-        event.get_elements(RulePx)
+        event.get_elements(RuleExp)
         .filter(Q(abilities__isnull=True) | Q(abilities__in=character_ability_ids))
         .distinct()
         .order_by("order")
@@ -443,12 +811,7 @@ def apply_rules_computed(char: Any) -> None:
 
 
 def add_char_addit(character: Any) -> None:
-    """Add additional configuration data to character object.
-
-    Args:
-        character: Character instance to add additional data to
-
-    """
+    """Add additional configuration data to character object (especially experience points data)."""
     character.addit = {}
     if not CharacterConfig.objects.filter(character__id=character.id).exists():
         calculate_character_experience_points(character)
@@ -459,18 +822,14 @@ def add_char_addit(character: Any) -> None:
 
 
 def remove_char_ability(char: Any, ability_id: Any) -> set:
-    """Remove character ability and all dependent abilities.
-
-    Args:
-        char: Character instance
-        ability_id: ID of ability to remove
-
-    """
+    """Remove character ability and all dependent abilities."""
     ability_ids_to_remove = {ability_id}
 
     while True:
         dependent_abilities_queryset = (
-            char.px_ability_list.filter(prerequisites__in=ability_ids_to_remove).values_list("id", flat=True).distinct()
+            char.exp_ability_list.filter(prerequisites__in=ability_ids_to_remove)
+            .values_list("id", flat=True)
+            .distinct()
         )
         newly_found_dependent_ids = set(dependent_abilities_queryset) - ability_ids_to_remove
         if not newly_found_dependent_ids:
@@ -479,36 +838,39 @@ def remove_char_ability(char: Any, ability_id: Any) -> set:
 
     # atomic removal
     with transaction.atomic():
-        char.px_ability_list.remove(*ability_ids_to_remove)
+        char.exp_ability_list.remove(*ability_ids_to_remove)
 
     return ability_ids_to_remove
 
 
-def update_characters_experience_on_ability_change(instance: AbilityPx) -> None:
-    """Update experience points for all characters with this ability."""
-    # Recalculate experience for each character that has this ability
-    for character in instance.characters.all():
+@background_auto(queue="experience", skip_duplicates=True)
+def calculate_character_experience_points_bgk(character_ids: int | list) -> None:
+    """Update experience points for a character."""
+    if not isinstance(character_ids, list):
+        character_ids = [character_ids]
+
+    for character_id in character_ids:
+        try:
+            character = Character.objects.get(pk=character_id)
+            calculate_character_experience_points(character)
+        except ObjectDoesNotExist:
+            # Character was deleted, nothing to do
+            pass
+
+
+@background_auto(queue="experience", skip_duplicates=True)
+def calculate_event_experience_points_bgk(event_id: int) -> None:
+    """Update experience points for all event characters."""
+    try:
+        event = Event.objects.get(pk=event_id)
+    except ObjectDoesNotExist:
+        # Event was deleted, nothing to do
+        return
+
+    for character in event.get_elements(Character).all():
         calculate_character_experience_points(character)
 
 
-def refresh_delivery_characters(instance: DeliveryPx) -> None:
-    """Refresh all characters associated with this delivery option."""
-    for character in instance.characters.all():
-        character.save()
-
-
-def update_characters_experience_on_rule_change(instance: RulePx) -> None:
-    """Update experience points for all characters when experience rules change."""
-    # Get the event containing the rule
-    parent_event = instance.event.get_class_parent(RulePx)
-
-    # Recalculate experience for all characters in the event
-    for character in parent_event.get_elements(Character).all():
-        calculate_character_experience_points(character)
-
-
-def update_characters_experience_on_modifier_change(instance: ModifierPx) -> None:
-    """Update experience points for all characters when a modifier changes."""
-    parent_event = instance.event.get_class_parent(ModifierPx)
-    for character in parent_event.get_elements(Character).all():
-        calculate_character_experience_points(character)
+def _recalcuate_characters_experience_points(instance: Any) -> None:
+    """Handle recomputing experience points of characters."""
+    calculate_event_experience_points_bgk(instance.event.get_class_parent(instance.__class__).id)

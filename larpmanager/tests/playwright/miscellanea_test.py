@@ -25,22 +25,24 @@ Test: Miscellanea tests that don't fit a single test suite
 - Check that organizers can access gallery regardless of restrictions
 - Check reset cache
 """
-
+import re
 from typing import Any
 
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import (
-    check_feature,
-    expect_normalized,
-    go_to,
-    just_wait,
-    login_orga,
-    login_user,
-    logout,
-    submit_confirm,
-)
+from larpmanager.tests.utils import (submit_register,
+                                     delete_modal,
+                                     check_feature,
+                                     expect_normalized,
+                                     fill_date,
+                                     go_to,
+                                     login_orga,
+                                     login_user,
+                                     logout,
+                                     submit_confirm, sidebar,
+                                     get_modal_iframe, save_modal, _wait_lm_ready,
+                                     )
 
 pytestmark = pytest.mark.e2e
 
@@ -63,11 +65,11 @@ def test_miscellanea(pw_page: Any) -> None:
 
 def check_user_fee(live_server: Any, page: Any) -> None:
     go_to(page, live_server, "/manage/")
-    page.locator("#exe_features").get_by_role("link", name="Features").click()
+    sidebar(page, "Features")
     check_feature(page, "Payments")
     submit_confirm(page)
     page.get_by_role("checkbox", name="Wire").check()
-    just_wait(page)
+    page.locator("#id_wire_descr").wait_for(state="visible")
     page.locator("#id_wire_descr").click()
     page.locator("#id_wire_descr").fill("aaaa")
     page.locator("#id_wire_fee").click()
@@ -78,20 +80,20 @@ def check_user_fee(live_server: Any, page: Any) -> None:
     page.locator("#id_wire_iban").fill("3sadsadsa")
     page.locator("#id_wire_bic").fill("test iban")
     submit_confirm(page)
-    page.locator("#exe_features").get_by_role("link", name="Features").click()
+    sidebar(page, "Features")
     check_feature(page, "Donation")
     submit_confirm(page)
-    page.locator("#exe_config").get_by_role("link", name="Configuration").click()
-    page.get_by_role("link", name="Payments ").click()
+    sidebar(page, "Configuration")
+    page.get_by_role("link", name=re.compile(r"^Payments ")).click()
     page.locator("#id_payment_fees_user").check()
     submit_confirm(page)
-    page.get_by_role("link", name=" Accounting").click()
+    go_to(page, live_server, "/accounting/")
     page.get_by_role("link", name="follow this link").click()
+    _wait_lm_ready(page)
     expect_normalized(
         page,
         page.locator("#wrapper"),
-        "Indicate the amount of your donation: Please enter the occasion for which you wish to make "
-        "the donation Choose the payment method: Wire Fee: +2% aaaa",
+        "amount description Choose the payment method: Wire Fee: +2% aaaa",
     )
 
 
@@ -101,36 +103,34 @@ def gallery_hide_configs(live_server: Any, page: Any) -> None:
     # create event
     go_to(page, live_server, "/manage/events/")
     page.get_by_role("link", name="New event").click()
-    page.locator("#id_form1-name").click()
-    page.locator("#id_form1-name").fill("Test Access")
-
-    page.locator("#id_form2-development").select_option("1")
-    page.locator("#id_form2-start").fill("2055-06-11")
-    just_wait(page)
-    page.locator("#id_form2-start").click()
-    page.locator("#id_form2-end").fill("2055-06-13")
-    just_wait(page)
-    page.locator("#id_form2-end").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_form1-name").click()
+    edit_iframe.locator("#id_form1-name").fill("Test Access")
+    edit_iframe.locator('label[for="id_form2-development_1"]').click()
+    edit_iframe.locator('label[for="id_form2-registration_status_1"]').click()
+    fill_date(edit_iframe, "#id_form2-start", "2055-06-11")
+    fill_date(edit_iframe, "#id_form2-end", "2055-06-13")
+    save_modal(page, edit_iframe)
 
     # Verify we're on the new event
     go_to(page, live_server, "/testaccess/manage/")
 
     # Enable Characters feature
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     check_feature(page, "Characters")
     submit_confirm(page)
 
     # Create a test character to have something in the gallery
-    page.locator("#orga_characters").get_by_role("link", name="Characters").click()
+    sidebar(page, "Characters")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Test Gallery Character")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Test Gallery Character")
+    save_modal(page, edit_iframe)
 
     # Test 1: Gallery should be visible without any restrictions
     logout(page)
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
     expect_normalized(page, page.locator("body"), "Test Gallery Character")
 
     # Test 2: Enable gallery_hide_login and verify non-authenticated users cannot access
@@ -143,7 +143,7 @@ def gallery_hide_configs(live_server: Any, page: Any) -> None:
 
     # Logout and try to access gallery - should be redirected
     logout(page)
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
 
     # Should be redirected to register page with warning message
     expect_normalized(page, page.locator("body"), "Login")
@@ -151,7 +151,7 @@ def gallery_hide_configs(live_server: Any, page: Any) -> None:
 
     # Login as regular user and verify access is now allowed
     login_user(page, live_server)
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
     expect_normalized(page, page.locator("body"), "Test Gallery Character")
 
     # Test 3: Enable gallery_hide_signup and verify non-registered users cannot access
@@ -167,7 +167,7 @@ def gallery_hide_configs(live_server: Any, page: Any) -> None:
     # Logout and login as regular user who is NOT registered
     logout(page)
     login_user(page, live_server)
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
 
     # Should be redirected with warning message
     expect_normalized(page, page.locator("body"), "Register")
@@ -175,28 +175,24 @@ def gallery_hide_configs(live_server: Any, page: Any) -> None:
 
     # Register the user to the event
     page.get_by_role("link", name="Register").click()
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
+    submit_register(page)
 
     # Now user is registered, they should be able to access the gallery
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
     expect_normalized(page, page.locator("body"), "Test Gallery Character")
 
     # Delete registration and verify access is denied again
     logout(page)
     login_orga(page, live_server)
     go_to(page, live_server, "/testaccess/manage/")
-    page.locator("#orga_registrations").get_by_role("link", name="Registrations").click()
+    sidebar(page, "Registrations")
     # Find and delete the user's registration
-    page.locator("a:has(i.fas.fa-edit)").click()
-    page.get_by_role("link", name="Delete").click()
-    just_wait(page)
-    page.get_by_role("button", name="Confirmation delete").click()
+    delete_modal(page)
 
     # Logout and login as user - now without registration
     logout(page)
     login_user(page, live_server)
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
 
     # Should be redirected because user is no longer registered
     expect_normalized(page, page.locator("body"), "Register")
@@ -214,13 +210,13 @@ def gallery_hide_configs(live_server: Any, page: Any) -> None:
 
     # Logout and try to access - should be blocked (not logged in)
     logout(page)
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
     expect_normalized(page, page.locator("body"), "Login")
     expect(page.locator("#one")).not_to_contain_text("Test Gallery Character")
 
     # login as user - now without registration
     login_user(page, live_server)
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
 
     # Should be redirected because user is no longer registered
     expect_normalized(page, page.locator("body"), "Register")
@@ -228,11 +224,10 @@ def gallery_hide_configs(live_server: Any, page: Any) -> None:
 
     # Register again
     page.get_by_role("link", name="Register").click()
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
+    submit_register(page)
 
     # Now can access again
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
     expect_normalized(page, page.locator("body"), "Test Gallery Character")
 
     # Test 5: Orga can access even with both configs enabled and without being registered
@@ -247,12 +242,12 @@ def gallery_hide_configs(live_server: Any, page: Any) -> None:
 
     # Verify orga is NOT registered to the event
     go_to(page, live_server, "/testaccess/manage/")
-    page.locator("#orga_registrations").get_by_role("link", name="Registrations").click()
+    sidebar(page, "Registrations")
     # Check that "Admin Test" (orga user) is NOT in the registrations list
     expect(page.locator("#one")).not_to_contain_text("Admin Test")
 
     # Now go to gallery - orga should have access even without being registered
-    go_to(page, live_server, "/testaccess/")
+    go_to(page, live_server, "/testaccess/gallery/")
     expect_normalized(page, page.locator("body"), "Test Gallery Character")
 
     # Cleanup: Disable both configs
@@ -271,10 +266,12 @@ def reset_caches(live_server, page):
     go_to(page, live_server, "/test/manage/")
 
     page.get_by_role("link", name="Reset Cache").click()
-    expect_normalized(page, page.locator("#banner"), "Dashboard")
+    _wait_lm_ready(page)
+    expect_normalized(page, page.locator("body"), "Dashboard")
 
     # Test association-level cache reset
     go_to(page, live_server, "/manage/")
 
     page.get_by_role("link", name="Reset Cache").click()
-    expect_normalized(page, page.locator("#banner"), "Dashboard")
+    _wait_lm_ready(page)
+    expect_normalized(page, page.locator("body"),"Dashboard")

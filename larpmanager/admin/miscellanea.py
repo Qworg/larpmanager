@@ -27,13 +27,15 @@ from django.utils.html import format_html
 
 from larpmanager.admin.base import AssociationFilter, DefModelAdmin, EventFilter, RunFilter, reduced
 from larpmanager.admin.character import TargetFilter
+from larpmanager.models.member import NotificationQueue
 from larpmanager.models.miscellanea import (
     Album,
     AlbumImage,
     AlbumUpload,
     ChatMessage,
     Contact,
-    Email,
+    EmailContent,
+    EmailRecipient,
     HelpQuestion,
     OneTimeAccessToken,
     OneTimeContent,
@@ -256,19 +258,60 @@ class PlayerRelationshipAdmin(DefModelAdmin):
         return f"{instance.registration} ({instance.registration.run.number})"
 
 
-@admin.register(Email)
-class EmailAdmin(DefModelAdmin):
-    """Admin interface for Email model."""
+class EmailRecipientInline(admin.TabularInline):
+    """Inline admin for email recipients."""
 
-    list_display: ClassVar[tuple] = ("id", "association", "run", "recipient", "sent", "subj", "body_red", "uuid")
+    model = EmailRecipient
+    extra = 0
+    readonly_fields = ("recipient", "sent", "language_code")
+    fields = ("recipient", "sent", "language_code")
+    can_delete = False
+
+    def has_add_permission(self, request: object, obj: object | None = None) -> bool:  # noqa: ARG002
+        """Disable adding recipients through inline."""
+        return False
+
+
+@admin.register(EmailContent)
+class EmailContentAdmin(DefModelAdmin):
+    """Admin interface for EmailContent model."""
+
+    list_display: ClassVar[tuple] = (
+        "id",
+        "association",
+        "run",
+        "subj",
+        "body_red",
+        "recipient_count",
+        "sent_count",
+        "uuid",
+    )
     list_filter: ClassVar[tuple] = (AssociationFilter, RunFilter)
     autocomplete_fields: ClassVar[list] = ["association", "run"]
-    search_fields: ClassVar[list] = ["id", "subj", "body", "recipient", "uuid"]
+    search_fields: ClassVar[list] = ["id", "subj", "body", "uuid"]
+    inlines: ClassVar[list] = [EmailRecipientInline]
 
     @staticmethod
-    def body_red(instance: Email) -> str:
+    def body_red(instance: EmailContent) -> str:
         """Return reduced body text for admin display."""
         return reduced(instance.body)
+
+    body_red.short_description = "Body"
+
+
+@admin.register(EmailRecipient)
+class EmailRecipientAdmin(DefModelAdmin):
+    """Admin interface for EmailRecipient model."""
+
+    list_display: ClassVar[tuple] = ("id", "recipient", "email_content", "sent", "language_code", "uuid")
+    list_filter: ClassVar[tuple] = ("sent",)
+    autocomplete_fields: ClassVar[list] = ["email_content"]
+    search_fields: ClassVar[list] = ["id", "recipient", "email_content__subj", "uuid"]
+    readonly_fields: ClassVar[tuple] = ("email_content", "recipient", "sent", "language_code")
+
+    def has_add_permission(self, request: HttpRequest) -> bool:  # noqa: ARG002
+        """Disable manual creation of email recipients."""
+        return False
 
 
 class OneTimeAccessTokenInline(admin.TabularInline):
@@ -367,7 +410,7 @@ class OneTimeAccessTokenAdmin(DefModelAdmin):
 
     list_display = ("token_short", "content", "note", "used", "used_at", "used_by", "ip_address")
     list_filter = ("used", "used_at", "content__event")
-    search_fields: ClassVar[tuple] = ("id", "token", "note", "content__name", "used_by__name", "ip_address")
+    search_fields: ClassVar[tuple] = ("id", "note", "content__name", "used_by__name")
     readonly_fields = ("token", "used", "used_at", "used_by", "ip_address", "user_agent")
     autocomplete_fields: ClassVar[list] = ["content", "used_by"]
 
@@ -430,3 +473,26 @@ class ProblemAdmin(DefModelAdmin):
     search_fields: ClassVar[tuple] = ("id", "uuid")
     autocomplete_fields: ClassVar[list] = ["event"]
     list_filter = (EventFilter, "severity")
+
+
+class EventFilter(AutocompleteFilter):
+    """Admin filter for Event autocomplete."""
+
+    title = "Event"
+    field_name = "event"
+
+
+@admin.register(NotificationQueue)
+class NotificationQueueAdmin(DefModelAdmin):
+    """Admin interface for NotificationQueue model."""
+
+    list_display: ClassVar[tuple] = (
+        "run",
+        "member",
+        "notification_type",
+        "object_id",
+        "created_at",
+        "sent",
+        "sent_at",
+    )
+    list_filter: ClassVar[tuple] = ("notification_type", "sent", RunFilter)

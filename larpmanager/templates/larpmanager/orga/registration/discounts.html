@@ -1,10 +1,10 @@
 {% extends "utils.html" %}
 {% load show_tags i18n %}
 {% block title %}
-    {% trans "Discounts" %} - {{ registration.member }} - {{ run }}
+    {% trans "Discounts" %} - {{ registration.member }} - {{ run.search | truncatechars:50 }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows active discounts on the participant, allows you to activate or deactivate them" %}
+    {% trans "Manage discounts applied to a participant's registration by adding or removing available discount entries" %}
 {% endblock info %}
 {% block content %}
     {% if active %}
@@ -12,6 +12,7 @@
         <table id="discounts_active" class="go_datatable">
             <thead>
                 <tr>
+                    <th></th>
                     <th>{% trans "Discount" %}</th>
                     <th>{% trans "Value" %}</th>
                     <th></th>
@@ -20,10 +21,12 @@
             <tbody>
                 {% for el in active %}
                     <tr>
+                        <td></td>
                         <td>{{ el.disc }}</td>
                         <td>{{ el.value }}</td>
                         <td>
-                            <a href="{% url 'orga_registration_discount_del' run.get_slug registration.uuid el.uuid %}">{% trans "Delete" %}</a>
+                            <a href="{% url 'orga_registration_discount_del' run.get_slug registration.uuid el.disc.uuid %}"
+                               class="frame-confirm"><i class="fa-solid fa-xmark"></i> {% trans "Delete" %}</a>
                         </td>
                     </tr>
                 {% endfor %}
@@ -35,6 +38,7 @@
         <table id="discounts_availble" class="go_datatable">
             <thead>
                 <tr>
+                    <th></th>
                     <th>{% trans "Discount" %}</th>
                     <th>{% trans "Value" %}</th>
                     <th></th>
@@ -43,10 +47,12 @@
             <tbody>
                 {% for el in available %}
                     <tr>
+                        <td></td>
                         <td>{{ el }}</td>
                         <td>{{ el.value }}</td>
                         <td>
-                            <a href="{% url 'orga_registration_discount_add' run.get_slug registration.uuid el.uuid %}">{% trans "Add" %}</a>
+                            <a href="{% url 'orga_registration_discount_add' run.get_slug registration.uuid el.uuid %}"
+                               class="frame-confirm"><i class="fa-solid fa-check"></i> {% trans "Add" %}</a>
                         </td>
                     </tr>
                 {% endfor %}

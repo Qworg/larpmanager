@@ -1,0 +1,74 @@
+{% load show_tags i18n %}
+{% if features.experience and not exp_auto_buy %}
+    <h2>{% trans "Experience points" %}</h2>
+    {% if exp_systems_data %}
+        {% for sys in exp_systems_data %}
+            <div class="exp-summary">
+                {% if exp_systems_data|length > 1 %}<span class="exp-system-name">{{ sys.name }}</span>{% endif %}
+                <div class="exp-stat-row">
+                    <div class="exp-stat">
+                        <span class="exp-stat-value">{{ sys.tot }}</span>
+                        <span class="exp-stat-label">{% trans "Total" %}</span>
+                    </div>
+                    <div class="exp-stat exp-stat-used">
+                        <span class="exp-stat-value">{{ sys.used }}</span>
+                        <span class="exp-stat-label">{% trans "Used" %}</span>
+                    </div>
+                    <div class="exp-stat exp-stat-avail">
+                        <span class="exp-stat-value">{{ sys.avail }}</span>
+                        <span class="exp-stat-label">{% trans "Available" %}</span>
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    {% endif %}
+    {% if sheet_abilities %}
+        <h2>{% trans "Abilities" %}</h2>
+        <table class="mob abilities">
+            {% for typ, ls in sheet_abilities.items %}
+                <tr>
+                    <th colspan="2">
+                        <h3>{{ typ }}</h3>
+                    </th>
+                </tr>
+                {% for el in ls %}
+                    <tr>
+                        <th>
+                            <h4>
+                                {% if exp_systems_data|length > 1 %}
+                                    {{ el.name }} ({{ el.cost }}, {{ el.system.name }})
+                                {% else %}
+                                    {{ el.name }} ({{ el.cost }})
+                                {% endif %}
+                                {% if undo_abilities and el.uuid in undo_abilities %}
+                                    <a href="{% url 'character_abilities_del' run.get_slug character.uuid el.uuid %}"
+                                       qtip="{% trans "Remove" %}">
+                                        <i class="fa-solid fa-xmark"></i>
+                                    </a>
+                                {% endif %}
+                            </h4>
+                        </th>
+                        <td>
+                            {% if el.get_description %}{{ el.get_description | safe }}{% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            {% endfor %}
+        </table>
+    {% endif %}
+    {% if character.exp_delivery_list.count %}
+        <h2>{% trans "Awards" %}</h2>
+        <div class="exp-stat-row">
+            {% for el in character.exp_delivery_list.all %}
+                <div class="exp-stat">
+                    <span class="exp-stat-value">{{ el.amount }}</span>
+                    <span class="exp-stat-label">
+                        {{ el.name }}
+                        {% if exp_systems_data|length > 1 %}({{ el.system.name }}){% endif %}
+                    </span>
+                </div>
+            {% endfor %}
+        </div>
+        <hr class="clear" />
+    {% endif %}
+{% endif %}

@@ -30,7 +30,8 @@ from typing import Any
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, go_to, load_image, login_orga, submit_confirm, expect_normalized
+from larpmanager.tests.utils import go_to, load_image, login_orga, submit_confirm, expect_normalized, submit_register, \
+    delete_modal, expand_options, sidebar
 
 pytestmark = pytest.mark.e2e
 
@@ -48,34 +49,29 @@ def test_user_signup_simple(pw_page: Any) -> None:
 
 
 def signup(live_server: Any, page: Any) -> None:
-    # deactivate registration open
-    go_to(page, live_server, "/test/manage/features/registration_open/off")
-
     # sign up
     go_to(page, live_server, "/")
     expect_normalized(page, page.locator("#one"), "Registration is open!")
     page.get_by_role("link", name="Registration is open!").click()
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
+    submit_register(page)
 
     # test mails
     go_to(page, live_server, "/debug/mail")
 
     # delete sign up
     go_to(page, live_server, "/test/manage/registrations")
-    page.locator("a:has(i.fas.fa-edit)").click()
-    page.get_by_role("link", name="Delete").click()
-    just_wait(page)
-    page.get_by_role("button", name="Confirmation delete").click()
+    delete_modal(page)
 
     # sign up, confirm profile
     go_to(page, live_server, "/test/register")
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
-    expect_normalized(page, page.locator("#one"), "Registration confirmed")
-    expect_normalized(page, page.locator("#one"), "please fill in your profile.")
+    submit_register(page)
 
-    page.locator("#one").get_by_role("table").get_by_role("link", name="please fill in your profile.").click()
+    go_to(page, live_server, "/test/register")
+    sidebar(page, "Event")
+    expect_normalized(page, page.locator("#one"), "Your registration for this event has been confirmed")
+    expect_normalized(page, page.locator("#one"), "Fill in the missing information in your profile")
+
+    page.locator("#one").get_by_role("link", name="Fill in the missing information in your profile").click()
     page.get_by_role("checkbox", name="Authorisation").check()
     submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "Registration confirmed (Standard)")
@@ -111,8 +107,8 @@ def help_questions(live_server: Any, page: Any) -> None:
     submit_confirm(page)
 
     go_to(page, live_server, "/manage/questions")
-    page.get_by_role("link", name="Close").click()
-    page.get_by_role("link", name="Show questions already").click()
+    page.get_by_role("link", name="Close", exact=True).click()
+    page.get_by_role("link", name="Show closed questions").click()
     submit_confirm(page)
 
 
@@ -126,14 +122,13 @@ def pre_register(live_server: Any, page: Any) -> None:
     page.locator("#id_mail_signup_del").check()
     page.locator("#id_mail_payment").check()
 
-    # Activate pre-register
+    # Activate pre-register feature (enables PRE option in registration_status)
     go_to(page, live_server, "/manage/features/pre_register/on")
-    # Activate registration open
-    go_to(page, live_server, "/test/manage/features/registration_open/on")
 
-    go_to(page, live_server, "/test/manage/config")
-    page.get_by_role("link", name=re.compile(r"^Pre-registration\s.+")).click()
-    page.locator("#id_pre_register_active").check()
+    # Set registration_status to PRE (Pre-registration)
+    go_to(page, live_server, "/test/manage/run")
+    expand_options(page)
+    page.locator('label[for="id_registration_status_2"]').click()
     submit_confirm(page)
 
     go_to(page, live_server, "/")
@@ -142,14 +137,14 @@ def pre_register(live_server: Any, page: Any) -> None:
 
     submit_confirm(page)
     page.get_by_role("link", name="Delete").click()
-    page.get_by_role("textbox", name="Informations").click()
-    page.get_by_role("textbox", name="Informations").fill("bauuu")
+    page.get_by_role("textbox", name='General information').click()
+    page.get_by_role("textbox", name='General information').fill("bauuu")
     page.get_by_label("Event").select_option("u1")
     submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "bauuu")
 
-    # disable preregistration, sign up really
-    go_to(page, live_server, "/test/manage/config")
-    page.get_by_role("link", name=re.compile(r"^Pre-registration\s.+")).click()
-    page.locator("#id_pre_register_active").uncheck()
+    # Change registration_status to OPEN for normal registration
+    go_to(page, live_server, "/test/manage/run")
+    expand_options(page)
+    page.locator('label[for="id_registration_status_1"]').click()
     submit_confirm(page)

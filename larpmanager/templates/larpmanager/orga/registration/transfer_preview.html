@@ -1,10 +1,10 @@
 {% extends "utils.html" %}
 {% load show_tags i18n %}
 {% block title %}
-    {% trans "Transfer preview" %} - {{ run }}
+    {% trans "Transfer preview" %} - {{ run.search }}
 {% endblock title %}
 {% block info %}
-    {% trans "Review the transfer before confirming" %}
+    {% trans "Review the ticket mapping and transfer details before confirming the move to the target run" %}
 {% endblock info %}
 {% block content %}
     <table class="table">
@@ -13,16 +13,16 @@
             <td>{{ registration.member.display_member }}</td>
         </tr>
         <tr>
-            <th>{% trans "From" %}</th>
+            <th>{% trans "Source" %}</th>
             <td>{{ registration.run }}</td>
         </tr>
         <tr>
-            <th>{% trans "To" %}</th>
+            <th>{% trans "Destination" %}</th>
             <td>{{ target_run }} ({{ target_run.event.name }})</td>
         </tr>
         {% if registration.ticket %}
             <tr>
-                <th>{% trans "Ticket" %}:</th>
+                <th>{% trans "Ticket:" %}</th>
                 <td>{{ registration.ticket.name }} ({{ registration.ticket.get_tier_display }})</td>
             </tr>
         {% endif %}

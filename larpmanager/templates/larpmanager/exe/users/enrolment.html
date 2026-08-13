@@ -4,7 +4,7 @@
     {% trans "Membership" %} - {% trans "Organization" %}
 {% endblock title %}
 {% block info %}
-    {% trans "This page summarises the list of members, formatted ready to be sent to the insurance company. It only displays members who have renewed their membership in this calendar year, in order of renewal" %}
+    {% trans "View the yearly enrollment list of members with card numbers and renewal dates" %}
 {% endblock info %}
 {% block content %}
     <table class="go_datatable">
@@ -17,10 +17,7 @@
                 <th>{% trans "Gender" %}</th>
                 <th>{% trans "Birth place" %}</th>
                 <th>{% trans "Birth date" %}</th>
-                <th></th>
-                <th></th>
                 <th>{% trans "Fiscal code" %}</th>
-                <th></th>
                 <th>{% trans "Last membership date" %}</th>
                 <th>{% trans "Phone contact" %}</th>
                 <th>{% trans "Email" %}</th>
@@ -34,13 +31,11 @@
                 {% if not el.last_enrolment %}class="hide n_payed"{% endif %}>
                 <td>{{ el.membership.card_number }}</td>
                 <td>{{ el.surname }}</td>
-                <td>{{ el.name }}</td>
+                <td>{{ el.legal_name|default:el.name }}</td>
                 <td>{{ el.get_residence }}</td>
                 <td>{{ el.gender }}</td>
                 <td>{{ el.birth_place }}</td>
                 <td>{{ el.birth_date }}</td>
-                <td>PROXIMA APS</td>
-                <td>Tessera B</td>
                 <td>
                     {% if el.fiscal_code %}
                         {{ el.fiscal_code }}
@@ -48,7 +43,6 @@
                         N/A
                     {% endif %}
                 </td>
-                <td>-</td>
                 <td>{{ el.last_enrolment| date:"d/m/Y" }}</td>
                 <td>{{ el.phone_contact }}</td>
                 <td>{{ el.email }}</td>
@@ -58,6 +52,11 @@
             </tr>
         {% endfor %}
     </table>
+    {% if not list %}
+        <p class="no-elements-available">
+            {% trans "No members have enrolled yet. Members will appear here once they have completed their yearly enrollment." %}
+        </p>
+    {% endif %}
 {% endblock content %}
 {% block js2 %}
     <script>window.addEventListener('DOMContentLoaded', function() {

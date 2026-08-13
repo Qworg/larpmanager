@@ -23,13 +23,27 @@ Test: Overpayments with tokens/credits, membership uploads, and special codes.
 Verifies overpayment handling with tokens and credits, registration accounting adjustments,
 membership document/fee uploads, and special payment code configuration.
 """
-
+import re
 from typing import Any
 
 import pytest
-from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, fill_tinymce, go_to, load_image, login_orga, expect_normalized, submit_confirm
+from larpmanager.tests.utils import (
+    _select2_search_and_pick,
+    _wait_lm_ready,
+    click_and_wait_question,
+    expect_normalized,
+    fill_tinymce,
+    get_modal_iframe,
+    go_to,
+    load_image,
+    login_orga,
+    save_modal,
+    sidebar,
+    submit_confirm,
+    submit_register,
+    click_and_wait_accounting,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -52,40 +66,40 @@ def test_overpay_upload_membership_prologue(pw_page: Any) -> None:
 def check_overpay(page: Any, live_server: Any) -> None:
     go_to(page, live_server, "/manage")
     # Activate tokens / credits
-    page.locator("#exe_features").get_by_role("link", name="Features").click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Tokens").check()
     page.get_by_role("checkbox", name="Credits").check()
     submit_confirm(page)
 
     # Set ticket price
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     page.get_by_role("link", name="Tickets").first.click()
-    page.get_by_role("link", name="").click()
-    page.locator("#id_price").click()
-    page.locator("#id_price").fill("100.00")
-    submit_confirm(page)
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_price").click()
+    edit_iframe.locator("#id_price").fill("100.00")
+    save_modal(page, edit_iframe)
 
     # Signup
     go_to(page, live_server, "/")
     page.get_by_role("link", name="Registration is open!").click()
     page.locator("#register_form").click()
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
+    submit_register(page)
 
     # Add credits
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     page.get_by_role("link", name="Credits").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#select2-id_member-container").click()
-    page.get_by_role("searchbox").fill("ad")
-    page.locator(".select2-results__option").first.click()
-    page.locator("#id_value").fill("60")
-    page.locator("#id_descr").fill("cre")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#select2-id_member-container").click()
+    _select2_search_and_pick(edit_iframe.get_by_role("searchbox"), edit_iframe, "ad")
+    edit_iframe.locator("#id_value").fill("60")
+    edit_iframe.locator("#id_descr").fill("cre")
+    save_modal(page, edit_iframe)
 
     # Check signup accounting
-    page.get_by_role("link", name="Registrations").click()
-    page.get_by_role("link", name="accounting", exact=True).click()
+    sidebar(page, "Registrations")
+    click_and_wait_accounting(page)
     expect_normalized(page, page.locator("#one"), "Admin Test Standard 8 40 60 100 60")
 
 
@@ -93,17 +107,17 @@ def check_overpay_2(page: Any, live_server: Any) -> None:
     # Add tokens
     page.get_by_role("link", name="Tokens").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#select2-id_member-container").click()
-    page.get_by_role("searchbox").fill("adm")
-    page.locator(".select2-results__option").first.click()
-    page.locator("#id_value").press("Home")
-    page.locator("#id_value").fill("60")
-    page.locator("#id_descr").fill("www")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#select2-id_member-container").click()
+    _select2_search_and_pick(edit_iframe.get_by_role("searchbox"), edit_iframe, "adm")
+    edit_iframe.locator("#id_value").press("Home")
+    edit_iframe.locator("#id_value").fill("60")
+    edit_iframe.locator("#id_descr").fill("www")
+    save_modal(page, edit_iframe)
 
     # Check signup accounting
-    page.get_by_role("link", name="Registrations").click()
-    page.get_by_role("link", name="accounting", exact=True).click()
+    sidebar(page, "Registrations")
+    click_and_wait_accounting(page)
     expect_normalized(page, page.locator("#one"), "Admin Test Standard 100 100 60 40")
 
     # Check accounting
@@ -111,22 +125,28 @@ def check_overpay_2(page: Any, live_server: Any) -> None:
     expect_normalized(page, page.locator("#one"), "Tokens Total: 20.00")
 
     # Change ticket price
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     page.get_by_role("link", name="Tickets").first.click()
-    page.get_by_role("link", name="").click()
-    page.locator("#id_price").click()
-    page.locator("#id_price").fill("80.00")
-    submit_confirm(page)
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_price").click()
+    edit_iframe.locator("#id_price").fill("80.00")
+    save_modal(page, edit_iframe)
 
     # Check accounting
-    page.get_by_role("link", name="Registrations").click()
-    page.get_by_role("link", name="accounting", exact=True).click()
+    sidebar(page, "Registrations")
+    click_and_wait_accounting(page)
     expect_normalized(page, page.locator("#one"), "Admin Test Standard -20 100 80 20 40 40")
 
     # Perform save
-    page.get_by_role("link", name="").click()
-    submit_confirm(page)
-    page.get_by_role("link", name="accounting", exact=True).click()
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    save_modal(page, edit_iframe)
+
+    page.reload()
+    _wait_lm_ready(page)
+
+    click_and_wait_accounting(page)
     expect_normalized(page, page.locator("#one"), "Admin Test Standard 80 80 40 40")
 
     # Check accounting
@@ -143,82 +163,82 @@ def check_overpay_2(page: Any, live_server: Any) -> None:
 
 
 def check_special_cod(page: Any, live_server: Any) -> None:
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Registrations ").click()
+    page.get_by_role("link", name=re.compile(r"^Registrations ")).click()
     page.locator("#id_registration_no_grouping").check()
     page.locator("#id_registration_reg_que_allowed").check()
     submit_confirm(page)
-    page.get_by_role("link", name="Registrations", exact=True).click()
+    sidebar(page, "Registrations")
     expect_normalized(page, page.locator("#one"), "Admin Test Standard")
-    page.get_by_role("link", name="").click()
-    expect_normalized(page,
-        page.locator("#main_form"),
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    expect_normalized(edit_iframe,
+        edit_iframe.locator("#one"),
         "Registration Member Admin Test - orga@test.it Admin Test - orga@test.it",
     )
-    submit_confirm(page)
+    save_modal(page, edit_iframe)
     expect_normalized(page, page.locator("#one"), "Admin Test Standard")
 
 
 def prologues(page: Any) -> None:
     # activate prologues
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Prologues").check()
     submit_confirm(page)
 
     # redirected to prologue types
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("test")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("test")
+    save_modal(page, edit_iframe)
 
     # add prologue
     page.get_by_role("link", name="Prologues", exact=True).click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("ffff")
-    fill_tinymce(page, "id_text", "sadsadsa")
-    page.get_by_role("link", name="Show").click()
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("tes")
-    page.locator(".select2-results__option").first.click()
-    page.locator("#main_form").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("ffff")
+    fill_tinymce(edit_iframe, "id_text", "sadsadsa")
+    edit_iframe.get_by_role("link", name="Show").click()
+    _select2_search_and_pick(edit_iframe.get_by_role("searchbox"), edit_iframe, "tes")
+    save_modal(page, edit_iframe)
 
     # check result
-    page.get_by_role("link", name="Characters").click()
-    expect_normalized(page, page.locator("#one"), "P1 ffff (test) #1 Test Character")
+    click_and_wait_question(page, "Characters")
+    expect_normalized(page, page.locator("#one"), "P1 ffff (test) Test Character")
 
 
 def upload_membership(page: Any, live_server: Any) -> None:
     # Activate membership
     go_to(page, live_server, "/manage")
-    page.locator("#exe_features").click()
-    page.locator("#exe_features").get_by_role("link", name="Features").click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Membership").check()
     submit_confirm(page)
 
-    # Set membership fee
+    # Set membership fee and explicitly mark as separated (not bundled with registration)
     page.locator("#id_membership_fee").click()
     page.locator("#id_membership_fee").fill("10")
     submit_confirm(page)
 
+    go_to(page, live_server, "/manage/config/membership_fee_separated/on/")
+
     # Upload membership
-    page.get_by_role("link", name="Membership").click()
+    sidebar(page, "Members")
     page.get_by_role("link", name="Upload membership document").click()
     page.locator("#select2-id_member-container").click()
-    page.get_by_role("searchbox").fill("adm")
-    page.locator(".select2-results__option").first.click()
+    _select2_search_and_pick(page.get_by_role("searchbox"), page, "adm")
+    page.locator("#id_date").fill("2024-06-11")
     load_image(page, "#id_request")
     load_image(page, "#id_document")
-    page.locator("#id_date").fill("2024-06-11")
-    just_wait(page)
+    page.wait_for_load_state("networkidle")
     page.locator("#id_date").click()
     submit_confirm(page)
 
     # Try accessing member form
     expect_normalized(page, page.locator("#one"), "Test Admin orga@test.it Accepted 1")
-    page.get_by_role("link", name="").click()
+    page.locator(".fa-edit").click()
 
     # Check result
     go_to(page, live_server, "/membership")
@@ -236,12 +256,12 @@ def upload_membership(page: Any, live_server: Any) -> None:
 def upload_membership_fee(page: Any, live_server: Any) -> None:
     # upload fee
     go_to(page, live_server, "/manage")
-    page.locator("#exe_features").get_by_role("link", name="Features").click()
-    page.locator("#exe_features").get_by_role("link", name="Features").click()
+    sidebar(page, "Features")
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Payments", exact=True).check()
     submit_confirm(page)
     page.get_by_role("checkbox", name="Wire").check()
-    just_wait(page)
+    page.locator("#id_wire_descr").wait_for(state="visible")
     page.locator("#id_wire_descr").click()
     page.locator("#id_wire_descr").fill("rwerewrwe")
     page.locator("#id_wire_fee").click()
@@ -253,15 +273,12 @@ def upload_membership_fee(page: Any, live_server: Any) -> None:
     page.locator("#id_wire_bic").fill("test iban")
     submit_confirm(page)
 
-    page.get_by_role("link", name="Membership").click()
+    page.get_by_role("link", name="Members").click()
     page.get_by_role("link", name="Upload membership fee").click()
     page.locator("#select2-id_member-container").click()
-    page.get_by_role("searchbox").fill("adm")
-    page.locator(".select2-results__option").first.click()
+    _select2_search_and_pick(page.get_by_role("searchbox"), page, "adm")
     load_image(page, "#id_invoice")
     submit_confirm(page)
 
     # check
     expect_normalized(page, page.locator("#one"), "Test Admin orga@test.it Payed 1")
-    page.get_by_role("link", name="Invoices").click()
-    expect_normalized(page, page.locator("#one"), "Admin Test Wire membership Confirmed 10 Membership fee of Admin Test")

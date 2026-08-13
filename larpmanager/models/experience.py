@@ -25,20 +25,40 @@ from django.db.models import Q, UniqueConstraint
 from django.utils.translation import gettext_lazy as _
 from tinymce.models import HTMLField
 
-from larpmanager.models.base import UuidMixin
+from larpmanager.models.base import OrderMixin, UuidMixin
 from larpmanager.models.event import BaseConceptModel
 from larpmanager.models.form import WritingOption, WritingQuestion
-from larpmanager.models.writing import Character
+from larpmanager.models.writing import Character, Faction
 
 
-class AbilityTemplatePx(UuidMixin, BaseConceptModel):
-    """Represents AbilityTemplatePx model."""
+class SystemExp(UuidMixin, OrderMixin, BaseConceptModel):
+    """Represents a named experience system for an event."""
+
+    hidden = models.BooleanField(default=False, verbose_name=_("Hidden"))
+
+    class Meta:
+        indexes: ClassVar[list] = [models.Index(fields=["number", "event"])]
+        constraints: ClassVar[list] = [
+            UniqueConstraint(
+                fields=["event", "number", "deleted"],
+                name="unique_system_px_with_optional",
+            ),
+            UniqueConstraint(
+                fields=["event", "number"],
+                condition=Q(deleted=None),
+                name="unique_system_px_without_optional",
+            ),
+        ]
+
+
+class AbilityTemplateExp(UuidMixin, OrderMixin, BaseConceptModel):
+    """Represents AbilityTemplateExp model."""
 
     name = models.CharField(max_length=150)
     descr = HTMLField(max_length=5000, blank=True, null=True, verbose_name=_("Description"))
 
     def __str__(self) -> str:
-        """Return string representation of AbilityTemplatePx."""
+        """Return string representation of AbilityTemplateExp."""
         return self.name
 
     def get_full_name(self) -> str:
@@ -46,8 +66,8 @@ class AbilityTemplatePx(UuidMixin, BaseConceptModel):
         return self.name
 
 
-class AbilityTypePx(UuidMixin, BaseConceptModel):
-    """Represents AbilityTypePx model."""
+class AbilityTypeExp(UuidMixin, OrderMixin, BaseConceptModel):
+    """Represents AbilityTypeExp model."""
 
     name = models.CharField(max_length=150, blank=True)
 
@@ -66,11 +86,18 @@ class AbilityTypePx(UuidMixin, BaseConceptModel):
         ]
 
 
-class AbilityPx(UuidMixin, BaseConceptModel):
-    """Represents AbilityPx model."""
+class AbilityExp(UuidMixin, OrderMixin, BaseConceptModel):
+    """Represents AbilityExp model."""
+
+    system = models.ForeignKey(
+        SystemExp,
+        on_delete=models.CASCADE,
+        related_name="abilities",
+        verbose_name=_("System"),
+    )
 
     typ = models.ForeignKey(
-        AbilityTypePx,
+        AbilityTypeExp,
         on_delete=models.CASCADE,
         blank=True,
         null=True,
@@ -79,7 +106,7 @@ class AbilityPx(UuidMixin, BaseConceptModel):
     )
 
     template = models.ForeignKey(
-        AbilityTemplatePx,
+        AbilityTemplateExp,
         on_delete=models.SET_NULL,
         blank=True,
         null=True,
@@ -94,16 +121,16 @@ class AbilityPx(UuidMixin, BaseConceptModel):
 
     visible = models.BooleanField(
         default=True,
-        help_text=_("Indicate whether the ability is visible to users, and can be freely purchased"),
+        help_text=_("Enter whether the ability is visible to users, and can be freely purchased"),
     )
 
     prerequisites = models.ManyToManyField(
         "self",
-        related_name="px_ability_unlock",
+        related_name="exp_ability_unlock",
         blank=True,
         symmetrical=False,
         verbose_name=_("Pre-requisites"),
-        help_text=_("Indicate the prerequisite abilities, which must be possessed before one can acquire this"),
+        help_text=_("The prerequisite abilities, which must be possessed before one can acquire this"),
     )
 
     requirements = models.ManyToManyField(
@@ -111,10 +138,10 @@ class AbilityPx(UuidMixin, BaseConceptModel):
         related_name="abilities",
         blank=True,
         verbose_name=_("Requirements"),
-        help_text=_("Indicate the character options, which must be selected to make the skill available"),
+        help_text=_("The character options, which must be selected to make the ability available"),
     )
 
-    characters = models.ManyToManyField(Character, related_name="px_ability_list", blank=True)
+    characters = models.ManyToManyField(Character, related_name="exp_ability_list", blank=True)
 
     class Meta:
         indexes: ClassVar[list] = [models.Index(fields=["number", "event"])]
@@ -140,12 +167,19 @@ class AbilityPx(UuidMixin, BaseConceptModel):
         return self.template.descr if self.template else self.descr
 
 
-class DeliveryPx(UuidMixin, BaseConceptModel):
-    """Represents DeliveryPx model."""
+class DeliveryExp(UuidMixin, OrderMixin, BaseConceptModel):
+    """Represents DeliveryExp model."""
+
+    system = models.ForeignKey(
+        SystemExp,
+        on_delete=models.CASCADE,
+        related_name="deliveries",
+        verbose_name=_("System"),
+    )
 
     amount = models.IntegerField()
 
-    characters = models.ManyToManyField(Character, related_name="px_delivery_list", blank=True)
+    characters = models.ManyToManyField(Character, related_name="exp_delivery_list", blank=True)
 
     class Meta:
         indexes: ClassVar[list] = [models.Index(fields=["number", "event"])]
@@ -175,16 +209,15 @@ class Operation(models.TextChoices):
     DIVISION = "DIV", _("Division")
 
 
-class RulePx(UuidMixin, BaseConceptModel):
-    """Represents RulePx model."""
+class RuleExp(UuidMixin, OrderMixin, BaseConceptModel):
+    """Represents RuleExp model."""
 
     abilities = models.ManyToManyField(
-        AbilityPx,
+        AbilityExp,
         related_name="rules",
         blank=True,
         help_text=_(
-            "The rule will be applied, only one time, if the character has any of the abilities. "
-            "If no abilities are chosen, the rule is applied to all characters.",
+            "The rule will be applied only once if the character has any of the abilities. If no abilities are chosen, it applies to all characters.",
         ),
     )
 
@@ -202,22 +235,22 @@ class RulePx(UuidMixin, BaseConceptModel):
 
     amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
-    order = models.IntegerField(default=0)
 
+class ModifierExp(UuidMixin, OrderMixin, BaseConceptModel):
+    """Represents ModifierExp model."""
 
-class ModifierPx(UuidMixin, BaseConceptModel):
-    """Represents ModifierPx model."""
-
-    abilities = models.ManyToManyField(AbilityPx, related_name="modifiers_abilities", blank=True)
+    abilities = models.ManyToManyField(AbilityExp, related_name="modifiers_abilities", blank=True)
 
     cost = models.IntegerField(default=0, help_text=_("Note that if the cost is 0, it will be automatically assigned"))
 
     prerequisites = models.ManyToManyField(
-        AbilityPx,
+        AbilityExp,
         related_name="modifiers_prerequisites",
         blank=True,
         verbose_name=_("Pre-requisites"),
-        help_text=_("Indicate the prerequisite abilities"),
+        help_text=_(
+            "If you select one (or more) character abilities, this modifier applies only to characters with all of them"
+        ),
     )
 
     requirements = models.ManyToManyField(
@@ -225,10 +258,20 @@ class ModifierPx(UuidMixin, BaseConceptModel):
         related_name="modifiers_requirements",
         blank=True,
         verbose_name=_("Requirements"),
-        help_text=_("Indicate the required character options"),
+        help_text=_(
+            "If you select one (or more) character options, this modifier applies only to characters with all of them"
+        ),
     )
 
-    order = models.IntegerField()
+    factions = models.ManyToManyField(
+        Faction,
+        related_name="modifiers_exp",
+        blank=True,
+        verbose_name=_("Faction list"),
+        help_text=_(
+            "If you select one (or more) factions, this modifier applies only to characters belonging to all of them"
+        ),
+    )
 
     class Meta:
         indexes: ClassVar[list] = [models.Index(fields=["number", "event"])]
@@ -247,3 +290,66 @@ class ModifierPx(UuidMixin, BaseConceptModel):
     def display(self) -> str:
         """Return display name with cost."""
         return f"{self.name} ({self.cost})"
+
+
+class CriterionExp(UuidMixin, OrderMixin, BaseConceptModel):
+    """Applies a conditional operation to an experience system's total based on character prerequisites and requirements."""
+
+    system = models.ForeignKey(
+        SystemExp,
+        on_delete=models.CASCADE,
+        related_name="criterions",
+        verbose_name=_("System"),
+    )
+
+    operation = models.CharField(
+        max_length=3,
+        choices=Operation.choices,
+        default=Operation.ADDITION,
+    )
+
+    amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    prerequisites = models.ManyToManyField(
+        AbilityExp,
+        related_name="criterion_prerequisites",
+        blank=True,
+        verbose_name=_("Pre-requisites"),
+        help_text=_(
+            "If you select one (or more) abilities, this criterion applies only to characters with all of them"
+        ),
+    )
+
+    requirements = models.ManyToManyField(
+        WritingOption,
+        related_name="criterion_requirements",
+        blank=True,
+        verbose_name=_("Requirements"),
+        help_text=_(
+            "If you select one (or more) character options, this criterion applies only to characters with all of them"
+        ),
+    )
+
+    factions = models.ManyToManyField(
+        Faction,
+        related_name="criterions_exp",
+        blank=True,
+        verbose_name=_("Faction list"),
+        help_text=_(
+            "If you select one (or more) factions, this criterion applies only to characters belonging to all of them"
+        ),
+    )
+
+    class Meta:
+        indexes: ClassVar[list] = [models.Index(fields=["number", "event"])]
+        constraints: ClassVar[list] = [
+            UniqueConstraint(
+                fields=["event", "number", "deleted"],
+                name="unique_criterion_with_optional",
+            ),
+            UniqueConstraint(
+                fields=["event", "number"],
+                condition=Q(deleted=None),
+                name="unique_criterion_without_optional",
+            ),
+        ]

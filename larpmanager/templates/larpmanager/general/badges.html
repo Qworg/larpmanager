@@ -3,13 +3,18 @@
 {% block title %}
     Badges
 {% endblock title %}
+{% block info %}
+    {% trans "View badges you have earned" %}
+{% endblock info %}
 {% block content %}
+    {% include "larpmanager/member/profile_nav.html" %}
+    <hr />
     <h2>Gonna catch 'em all!</h2>
     <p>
-        {% trans "Show the" %} <a href="{% url 'leaderboard' %}">{% trans "leaderboard" %}</a>
+        <a href="{% url 'leaderboard' %}">{% trans "Show the leaderboard" %}</a>
     </p>
     <p>
-        {% trans "You think you should have an achievement" %}? <a href="{% url 'help' %}">{% trans "Tell us here" %}!</a>
+        {% trans "You think you should have an achievement?" %} <a href="{% url 'help' %}">{% trans "Tell us here!" %}</a>
     </p>
     <hr />
     {% include "elements/badges.html" %}

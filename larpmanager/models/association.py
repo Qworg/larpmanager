@@ -42,14 +42,15 @@ from larpmanager.models.base import (
 )
 from larpmanager.models.utils import UploadToPathAndRename
 from larpmanager.utils.core.validators import FileTypeValidator
+from larpmanager.utils.larpmanager.versions import LATEST_AVAILABLE_VERSION
 
 
 class MemberFieldType(models.TextChoices):
     """Represents MemberFieldType model."""
 
-    ABSENT = "a", _("Absent")
+    ABSENT = "a", _("Hidden")
     OPTIONAL = "o", _("Optional")
-    MANDATORY = "m", _("Mandatory")
+    MANDATORY = "m", _("Required")
 
 
 class Currency(models.TextChoices):
@@ -60,6 +61,7 @@ class Currency(models.TextChoices):
     GBP = "g", "GBP"
     CAD = "c", "CAD"
     JPY = "j", "JPY"
+    SEK = "s", "SEK"
 
 
 class AssociationPlan(models.TextChoices):
@@ -103,14 +105,19 @@ class Association(UuidMixin, BaseModel):
 
     skin = models.ForeignKey(AssociationSkin, on_delete=models.CASCADE, default=1)
 
-    name = models.CharField(max_length=100, help_text=_("Complete name of the Organization"))
+    name = models.CharField(
+        max_length=100,
+        verbose_name=_("Organization name"),
+        help_text=_("The full name of your organization as it will appear throughout the platform"),
+    )
 
     slug = models.CharField(
-        max_length=20,
-        verbose_name=_("URL identifier"),
-        help_text=_("The subdomain identifier")
-        + " - "
-        + _("Only lowercase characters and numbers are allowed, no spaces or symbols"),
+        max_length=50,
+        verbose_name=_("Subdomain"),
+        help_text=_("Your organization's unique subdomain in the platform")
+        + " ("
+        + _("Only lowercase letters and numbers allowed, no spaces or special characters")
+        + ")",
         validators=[AlphanumericValidator],
         db_index=True,
     )
@@ -123,7 +130,10 @@ class Association(UuidMixin, BaseModel):
         verbose_name=_("Logo"),
         null=True,
         blank=True,
-        help_text=_("Optional logo image - you can upload a file of any size, it will be automatically resized"),
+        help_text=_("Your organization's logo")
+        + " ("
+        + _("Upload an image of any size; it will be automatically optimized. Square images work best.")
+        + ")",
     )
 
     profile_thumb = ImageSpecField(
@@ -143,7 +153,8 @@ class Association(UuidMixin, BaseModel):
     main_mail = models.EmailField(
         blank=True,
         null=True,
-        help_text="(" + _("Optional") + ") " + _("Indicate an organization contact address for sending communications"),
+        verbose_name=_("Contact email"),
+        help_text=_("The main email address participants can use to contact your organization"),
     )
 
     mandatory_fields = models.CharField(max_length=1000, blank=True)
@@ -154,8 +165,8 @@ class Association(UuidMixin, BaseModel):
         PaymentMethod,
         related_name="associations_payments",
         blank=True,
-        verbose_name=_("Payment Methods"),
-        help_text=_("Indicate the payment methods you wish to be available to participants"),
+        verbose_name=_("Payment methods"),
+        help_text=_("Select which payment methods participants can use"),
     )
 
     payment_currency = models.CharField(
@@ -165,7 +176,7 @@ class Association(UuidMixin, BaseModel):
         blank=True,
         null=True,
         verbose_name=_("Payment currency"),
-        help_text=_("Indicates the currency in which to receive payments"),
+        help_text=_("The currency you want to use for all payments and pricing"),
     )
 
     promoter = models.ImageField(
@@ -173,7 +184,8 @@ class Association(UuidMixin, BaseModel):
         upload_to=UploadToPathAndRename("promot/"),
         null=True,
         blank=True,
-        help_text=_("Image shown on homepage as promoter"),
+        verbose_name=_("Promotional image"),
+        help_text=_("Featured image displayed on the portal's homepage"),
     )
 
     promoter_thumb = ImageSpecField(
@@ -185,25 +197,12 @@ class Association(UuidMixin, BaseModel):
 
     features = models.ManyToManyField(Feature, related_name="associations", blank=True)
 
-    background = models.ImageField(
-        max_length=500,
-        upload_to="association_background/",
-        verbose_name=_("Background image"),
-        blank=True,
-        help_text=_("Background of web pages"),
-    )
-
-    background_red = ImageSpecField(
-        source="background",
-        processors=[ResizeToFit(width=1000)],
-        format="JPEG",
-        options={"quality": 80},
-    )
-
     font = models.FileField(
         upload_to=UploadToPathAndRename("association_font/"),
-        verbose_name=_("Title font"),
-        help_text=_("Font to be used in page titles"),
+        verbose_name=_("Custom title font"),
+        help_text=_(
+            "Upload a custom font file for page titles to match your organization's branding (TTF, OTF, or WOFF formats)"
+        ),
         blank=True,
         null=True,
         validators=[
@@ -221,25 +220,42 @@ class Association(UuidMixin, BaseModel):
         ],
     )
 
+    background = models.ImageField(
+        max_length=500,
+        upload_to="association_background/",
+        verbose_name=_("Background image"),
+        blank=True,
+        help_text=_(
+            "Background image displayed across all pages of your organization - use a subtle pattern or texture for best results"
+        ),
+    )
+
+    background_red = ImageSpecField(
+        source="background",
+        processors=[ResizeToFit(width=1000)],
+        format="JPEG",
+        options={"quality": 80},
+    )
+
     css_code = models.CharField(max_length=32, editable=False, default="")
 
     pri_rgb = ColorField(
-        verbose_name=_("Color texts"),
-        help_text=_("Indicate the color that will be used for the texts"),
+        verbose_name=_("Text color"),
+        help_text=_("Main color for text content throughout your organization's pages"),
         blank=True,
         null=True,
     )
 
     sec_rgb = ColorField(
-        verbose_name=_("Color highlight"),
-        help_text=_("Indicate the color that will be used to highlight texts"),
+        verbose_name=_("Highlight color"),
+        help_text=_("Color used to highlight important text"),
         blank=True,
         null=True,
     )
 
     ter_rgb = ColorField(
-        verbose_name=_("Color links"),
-        help_text=_("Indicate the color that will be used for the links"),
+        verbose_name=_("Link color"),
+        help_text=_("Color for clickable links and interactive elements"),
         blank=True,
         null=True,
     )
@@ -266,21 +282,26 @@ class Association(UuidMixin, BaseModel):
         blank=True,
         null=True,
         default="",
-        verbose_name=_("Nationality"),
-        help_text="("
-        + _("Optional")
-        + ") "
-        + _("Indicate the organization nationality to activate nation-specific features"),
+        verbose_name=_("Country"),
+        help_text=_("Your organization's country") + " (" + _("it will enable country-specific features") + ")",
     )
 
-    demo = models.BooleanField(default=False)
+    lite_mode = models.BooleanField(default=True)
+
+    demo_type = models.ForeignKey(
+        "larpmanager.LarpManagerDemoType",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="instances",
+    )
 
     maintainers = models.ManyToManyField(
         "larpmanager.Member",
         related_name="maintained_associations",
         blank=True,
-        verbose_name=_("Maintainers"),
-        help_text=_("Users who can manage support tickets and receive ticket notifications"),
+        verbose_name=_("Support staff"),
+        help_text=_("Staff members who will receive and manage support tickets"),
     )
 
     class Meta:
@@ -293,14 +314,25 @@ class Association(UuidMixin, BaseModel):
             ),
         ]
 
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        """Create version config on first save."""
+        is_new = not self.pk
+        super().save(*args, **kwargs)
+        if is_new:
+            AssociationConfig.objects.get_or_create(
+                association=self,
+                name="version",
+                defaults={"value": str(LATEST_AVAILABLE_VERSION)},
+            )
+
     def get_currency_symbol(self) -> str:
         """Return the currency symbol for the payment currency."""
         # noinspection PyUnresolvedReferences
         return get_currency_symbol(self.get_payment_currency_display())
 
-    def get_config(self, name: str, *, default_value: Any = None, bypass_cache: bool = False) -> Any:
+    def get_config(self, name: str, *, bypass_cache: bool = False) -> Any:
         """Get configuration value for this association."""
-        return get_element_config(self, name, default_value, bypass_cache=bypass_cache)
+        return get_element_config(self, name, bypass_cache=bypass_cache)
 
     def promoter_dict(self) -> dict[str, str]:
         """Return a dictionary with promoter information including slug, name, and optional thumbnail URL."""
@@ -347,10 +379,10 @@ class AssociationTextType(models.TextChoices):
     """Represents AssociationTextType model."""
 
     PROFILE = "p", _("Profile")
-    HOME = "h", _("Home")
-    SIGNUP = "u", _("Registration mail")
-    MEMBERSHIP = "m", _("Membership")
-    STATUTE = "s", _("Statute")
+    HOME = "h", _("Calendar")
+    SIGNUP = "u", _("Registration email")
+    MEMBERSHIP = "m", _("Membership request")
+    STATUTE = "s", _("Association Statute")
     LEGAL = "l", _("Legal notice")
     FOOTER = "f", _("Footer")
     TOC = "t", _("Terms and Conditions")
@@ -358,10 +390,10 @@ class AssociationTextType(models.TextChoices):
     SIGNATURE = "g", _("Mail signature")
     PRIVACY = "y", _("Privacy")
 
-    REMINDER_MEMBERSHIP = "rm", _("Reminder membership request")
-    REMINDER_MEMBERSHIP_FEE = "rf", _("Reminder membership fee")
-    REMINDER_PAY = "rp", _("Reminder payment")
-    REMINDER_PROFILE = "rr", _("Reminder profile")
+    REMINDER_MEMBERSHIP = "rm", _("Membership request reminder email")
+    REMINDER_MEMBERSHIP_FEE = "rf", _("Membership request reminder email")
+    REMINDER_PAY = "rp", _("Payment reminder email")
+    REMINDER_PROFILE = "rr", _("Profile completion reminder email")
 
 
 class AssociationText(UuidMixin, BaseModel):
@@ -437,7 +469,7 @@ class AssociationTranslation(UuidMixin, BaseModel):
         null=True,
         blank=True,
         verbose_name=_("Number"),
-        help_text=_("Optional ordering number"),
+        help_text=_("Optional sorting"),
     )
 
     association = models.ForeignKey(
@@ -481,12 +513,7 @@ class AssociationTranslation(UuidMixin, BaseModel):
     )
 
     def __str__(self) -> str:
-        """Return a human-readable string representation of the translation.
-
-        Returns:
-            A formatted string showing association, language, and truncated original text
-
-        """
+        """Return a human-readable string representation of the translation."""
         return f"{self.association.name} - {self.get_language_display()}: {self.msgid[:50]}"
 
     class Meta:
@@ -525,15 +552,7 @@ def hdr(association_or_related_object: Association | Any) -> str:
 
 
 def get_association_maintainers(association: Association) -> Any:
-    """Get all maintainers for an association.
-
-    Args:
-        association: Association instance
-
-    Returns:
-        QuerySet of Member instances who are maintainers for this association
-
-    """
+    """Get all maintainers for an association."""
     return association.maintainers.all()
 
 

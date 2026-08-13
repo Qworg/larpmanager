@@ -26,30 +26,30 @@ from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.db.models import Max
+from django.urls import reverse
+from django.utils.translation import gettext_lazy as _
 
 from larpmanager.cache.association import clear_association_cache
 from larpmanager.cache.association_text import clear_association_text_cache_on_delete
 from larpmanager.cache.association_translation import clear_association_translation_cache
-from larpmanager.cache.config import reset_element_configs
+from larpmanager.cache.config import get_association_config, get_event_config, reset_element_configs
 from larpmanager.cache.feature import reset_association_features
 from larpmanager.cache.links import reset_event_links
 from larpmanager.cache.permission import clear_index_permission_cache
 from larpmanager.cache.role import remove_association_role_cache
+from larpmanager.cache.widget import clear_widget_cache_association
 from larpmanager.cache.wwyltd import reset_features_cache, reset_guides_cache, reset_tutorials_cache
 from larpmanager.models.access import AssociationPermission, AssociationRole
 from larpmanager.models.association import Association, AssociationText
-from larpmanager.models.event import Run
+from larpmanager.models.event import Event, Run
 from larpmanager.models.member import Membership
+from larpmanager.models.registration import Registration, RegistrationCharacterRel
+from larpmanager.utils.core.clone_guard import is_clone_active
 from larpmanager.utils.services.event import reset_all_run
 
 
 def generate_association_encryption_key(association: Any) -> None:
-    """Generate Fernet encryption key for new associations.
-
-    Args:
-        association: Association instance being saved
-
-    """
+    """Generate Fernet encryption key for new associations."""
     if not association.key:
         association.key = Fernet.generate_key()
 
@@ -105,8 +105,9 @@ def prepare_association_skin_features(instance: Association) -> None:
     except ObjectDoesNotExist:
         return
 
-    # Mark instance for skin feature updates
-    instance._update_skin_features = True  # noqa: SLF001  # Internal flag for skin feature updates
+    # Mark instance for skin feature updates, keeping track of whether the
+    # association is brand new or switched to a different skin
+    instance._update_skin_features = "new" if not instance.pk else "changed"  # noqa: SLF001
 
     # Apply skin defaults only to empty/unset fields
     # Set default nationality if not already specified
@@ -140,13 +141,26 @@ def apply_skin_features_to_association(association: Association) -> None:
 
     """
     # Check if the association is marked for skin feature updates
-    if not hasattr(association, "_update_skin_features"):
+    update_mode = getattr(association, "_update_skin_features", None)
+    if not update_mode:
+        return
+
+    # Skip during bulk clones: the clone engine copies the template's actual features
+    if is_clone_active():
         return
 
     # Define the feature update operation to run after transaction commit
     def update_features() -> None:
-        """Replace all features with the skin's default features."""
-        association.features.set(association.skin.default_features.all())
+        """Apply the skin's default features.
+
+        A skin change replaces the whole feature set; a new association only
+        adds the defaults, preserving features enabled in the same transaction.
+        """
+        default_features = association.skin.default_features.all()
+        if update_mode == "changed":
+            association.features.set(default_features)
+        else:
+            association.features.add(*default_features)
 
     # Schedule the feature update to run after the current transaction commits
     transaction.on_commit(update_features)
@@ -189,6 +203,149 @@ def _reset_all_association(association_id: int, association_slug: str) -> None:
     for member_id in Membership.objects.filter(association__id=association_id).values_list("member_id", flat=True):
         reset_event_links(member_id, association_id)
 
+    # Clear widget caches for this association
+    clear_widget_cache_association(association_id)
+
     # Clear all events' caches for this association
     for run in Run.objects.filter(event__association_id=association_id):
         reset_all_run(run.event, run)
+
+
+def _get_registrations_url(association_id: int) -> str:
+    """Return URL to the registrations page of the first event."""
+    event = Event.objects.filter(association_id=association_id).first()
+    if event:
+        return reverse("register", kwargs={"event_slug": event.slug})
+    return reverse("exe_events")
+
+
+ACTIVATION_HINTS: dict[str, Any] = {
+    "exe_events": lambda: _(
+        "Click 'New' to create your first event; fill in the name, dates, and basic details, then save"
+    ),
+    "exe_methods": lambda: _(
+        "Choose how participants will pay: bank transfer, PayPal, Stripe, or other options; configure at least one method and save"
+    ),
+    "orga_registration_tickets": lambda: _(
+        "Create a ticket type by clicking 'New'; set the name, price, and availability, then save it"
+    ),
+    "orga_registration_form": lambda: _(
+        "Add a question to your registration form by clicking 'New'; for example, ask for dietary requirements or emergency contact details"
+    ),
+    "orga_registrations": lambda: _(
+        "You are now seeing the registration form as a participant would. Select a ticket, fill in the required fields, and complete the registration to experience the full flow."
+    ),
+    "orga_characters": lambda: _(
+        "Create a character by clicking 'New'; give it a name and fill in the character details, then save"
+    ),
+    "orga_casting": lambda: _(
+        "Edit an existing registration and assign a character to the participant using the drop-down list."
+    ),
+}
+
+
+def get_hint_for_slug(slug: str) -> str:
+    """Return the translated hint text for a given activation checklist slug."""
+    factory = ACTIVATION_HINTS.get(slug)
+    return str(factory()) if factory else ""
+
+
+def get_activation_checklist(association_id: int) -> tuple[list[dict], int]:
+    """Build the activation checklist and compute progress for a demo association.
+
+    Each item represents a required setup step. Progress is expressed as an
+    integer percentage (0-100) based on how many steps are complete.
+
+    Args:
+        association_id: Primary key of the association to evaluate.
+
+    Returns:
+        A tuple of (checklist, progress) where:
+            - checklist: list of dicts with keys slug, name, descr, done, url
+            - progress: integer percentage of completed steps (0-100)
+
+    """
+    association = Association.objects.only("skin_id").get(pk=association_id)
+
+    event_ids = list(Event.objects.filter(association_id=association_id).values_list("id", flat=True))
+
+    def _done(slug: str) -> bool:
+        config_key = f"{slug}_suggestion"
+        if slug.startswith("exe"):
+            return bool(get_association_config(association_id, config_key))
+        return any(get_event_config(eid, config_key) for eid in event_ids)
+
+    _not_used = [
+        {
+            "slug": "exe_tutorial",
+            "name": _("Tutorial"),
+            "descr": _("Visit the tutorial to learn the basics"),
+            "done": _done("exe_tutorial"),
+            "url": reverse("tutorials"),
+        }
+    ]
+
+    checklist = [
+        {
+            "slug": "exe_events",
+            "name": _("Event creation"),
+            "descr": _("Create your first event"),
+            "done": Event.objects.filter(association_id=association_id).exists(),
+            "url": reverse("exe_events"),
+        },
+        {
+            "slug": "exe_methods",
+            "name": _("Payment methods"),
+            "descr": _("Configure at least one payment method for participants"),
+            "done": _done("exe_methods"),
+            "url": reverse("exe_methods"),
+        },
+        {
+            "slug": "orga_registration_tickets",
+            "name": _("Registration tickets"),
+            "descr": _("Create at least one ticket type for event registrations"),
+            "done": _done("orga_registration_tickets"),
+            "url": reverse("redr", kwargs={"path": "event/manage/tickets/"}),
+        },
+        {
+            "slug": "orga_registration_form",
+            "name": _("Registration form"),
+            "descr": _("Define at least one question in the registration form"),
+            "done": _done("orga_registration_form"),
+            "url": reverse("redr", kwargs={"path": "event/manage/form/"}),
+        },
+        {
+            "slug": "orga_registrations",
+            "name": _("First registration"),
+            "descr": _("Have at least one participant registered for an event"),
+            "done": Registration.objects.filter(
+                run__event__association_id=association_id, cancellation_date__isnull=True, pending=False
+            ).exists(),
+            "url": _get_registrations_url(association_id),
+        },
+    ]
+
+    if association.skin_id == 1:
+        checklist += [
+            {
+                "slug": "orga_characters",
+                "name": _("First character"),
+                "descr": _("Create at least one character for one of your events"),
+                "done": _done("orga_characters"),
+                "url": reverse("redr", kwargs={"path": "event/manage/characters/"}),
+            },
+            {
+                "slug": "orga_casting",
+                "name": _("First character assignment"),
+                "descr": _("Assign a character to a registered participant"),
+                "done": RegistrationCharacterRel.objects.filter(
+                    registration__run__event__association_id=association_id
+                ).exists(),
+                "url": reverse("redr", kwargs={"path": "event/manage/registrations/"}),
+            },
+        ]
+
+    done_count = sum(1 for item in checklist if item["done"])
+    progress = round(done_count * 100 / len(checklist))
+
+    return checklist, progress

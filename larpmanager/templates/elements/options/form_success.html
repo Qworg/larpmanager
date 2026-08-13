@@ -1,0 +1,27 @@
+{% extends "utils.html" %}
+{% load i18n tz show_tags static %}
+{% block body_class %}
+    floating_iframe
+{% endblock body_class %}
+{% block title %}
+{% endblock title %}
+{% block info %}
+{% endblock info %}
+{% block content %}
+    <div class="success-message">
+        <strong><i class="fa-solid fa-check"></i> {% trans "Option saved successfully" %}</strong>
+    </div>
+    <div class="spinner"></div>
+    <p>{% trans "Closing" %}...</p>
+{% endblock content %}
+{% block js2 %}
+    <script>
+    $(document).ready(function() {
+        if (window.parent && window.parent !== window) {
+            window.parent.postMessage({type: 'option_saved'}, '*');
+        } else {
+            history.back();
+        }
+    });
+    </script>
+{% endblock js2 %}

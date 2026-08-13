@@ -26,19 +26,20 @@ from typing import Any, ClassVar
 
 from colorfield.fields import ColorField
 from django.conf import settings as conf_settings
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models import Q, QuerySet
 from django.db.models.constraints import UniqueConstraint
 from django.utils import formats
-from django.utils.translation import gettext_lazy as _
-from django.utils.translation import pgettext_lazy
+from django.utils.translation import gettext_lazy as _, pgettext_lazy
 from imagekit.models import ImageSpecField
 from imagekit.processors import ResizeToFit
+from safedelete.models import SOFT_DELETE, SOFT_DELETE_CASCADE
 from tinymce.models import HTMLField
 
 from larpmanager.cache.config import get_element_config
 from larpmanager.models.association import Association, AssociationPlan
-from larpmanager.models.base import AlphanumericValidator, BaseModel, Feature, UuidMixin
+from larpmanager.models.base import AlphanumericValidator, BaseModel, Feature, MediaTokenMixin, OrderMixin, UuidMixin
 from larpmanager.models.member import Member
 from larpmanager.models.utils import (
     UploadToPathAndRename,
@@ -55,35 +56,48 @@ class Event(UuidMixin, BaseModel):
     """Represents Event model."""
 
     slug = models.CharField(
-        max_length=30,
+        max_length=50,
         validators=[AlphanumericValidator],
         db_index=True,
         blank=True,
         null=True,
         verbose_name=_("URL identifier"),
-        help_text=_("Only lowercase characters and numbers are allowed, no spaces or symbols"),
+        help_text=_("Unique identifier for the event URL")
+        + " ("
+        + _("only lowercase letters and numbers allowed, no spaces or special characters")
+        + ")",
     )
 
     association = models.ForeignKey(Association, on_delete=models.CASCADE, related_name="events")
 
-    name = models.CharField(max_length=100)
+    name = models.CharField(
+        max_length=100,
+        verbose_name=_("Event name"),
+        help_text=_("The full name of your event as it will be displayed to participants"),
+    )
 
     tagline = models.CharField(
         max_length=500,
         blank=True,
         null=True,
         verbose_name=_("Tagline"),
-        help_text=_("A short tagline, slogan"),
+        help_text=_("A catchy short phrase or slogan to describe your event"),
     )
 
-    where = models.CharField(max_length=500, blank=True, null=True, help_text=_("Where it is held"))
+    where = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        verbose_name=_("Location"),
+        help_text=_("Where the event will take place"),
+    )
 
     authors = models.CharField(
         max_length=500,
         blank=True,
         null=True,
-        verbose_name=_("Authors"),
-        help_text=_("Names of the collaborators who are organizing it"),
+        verbose_name=_("Organizers"),
+        help_text=_("Names of the people or teams organizing and running this event"),
     )
 
     description = HTMLField(
@@ -91,14 +105,17 @@ class Event(UuidMixin, BaseModel):
         blank=True,
         default="",
         verbose_name=_("Description"),
-        help_text=_("Event description displayed on the event page"),
+        help_text=_("Full event description with all important details")
+        + " ("
+        + _("will be displayed on the main event page")
+        + ")",
     )
 
     genre = models.CharField(
         max_length=100,
         blank=True,
         verbose_name=pgettext_lazy("event", "Genre"),
-        help_text=_("The setting / genre of the event"),
+        help_text=_("The genre of your event"),
     )
 
     visible = models.BooleanField(default=True)
@@ -107,17 +124,37 @@ class Event(UuidMixin, BaseModel):
         max_length=500,
         upload_to="cover/",
         blank=True,
-        help_text=_("Cover image shown on the organization's homepage — rectangular, ideally 4:3 ratio"),
+        verbose_name=_("Cover image"),
+        help_text=_("Main event image displayed on your organization's homepage")
+        + " ("
+        + _("use a rectangular image, ideally 4:3 ratio for best results")
+        + ")",
     )
 
     cover_thumb = ImageSpecField(
         source="cover",
-        processors=[ResizeToFit(width=600)],
+        processors=[ResizeToFit(width=800)],
         format="JPEG",
-        options={"quality": 70},
+        options={"quality": 80},
     )
 
-    carousel_img = models.ImageField(max_length=500, upload_to="carousel/", blank=True, help_text=_("Carousel image"))
+    cover_full = ImageSpecField(
+        source="cover",
+        processors=[ResizeToFit(width=1600)],
+        format="JPEG",
+        options={"quality": 90},
+    )
+
+    carousel_img = models.ImageField(
+        max_length=500,
+        upload_to="carousel/",
+        blank=True,
+        verbose_name=_("Carousel image"),
+        help_text=_("Optional image for homepage carousel/slideshow")
+        + " ("
+        + _("use high-quality wide images for best visual impact")
+        + ")",
+    )
 
     carousel_thumb = ImageSpecField(source="carousel_img", format="JPEG", options={"quality": 70})
 
@@ -125,39 +162,35 @@ class Event(UuidMixin, BaseModel):
         max_length=2000,
         blank=True,
         verbose_name=_("Carousel description"),
+        help_text=_("Text displayed alongside the carousel image") + " (" + _("keep it short and engaging") + ")",
     )
 
     website = models.URLField(
         max_length=100,
         blank=True,
-        verbose_name=_("Website"),
-    )
-
-    register_link = models.URLField(
-        max_length=150,
-        blank=True,
-        verbose_name=_("External register link"),
-        help_text=_("Insert the link to an external tool where users will be redirected if they are not yet registered")
-        + ". "
-        + _("Registered users will be granted normal access"),
+        verbose_name=_("External website"),
+        help_text=_("Link to an external website with additional event information"),
     )
 
     max_pg = models.IntegerField(
         default=0,
-        verbose_name=_("Max participants"),
-        help_text=_("Maximum number of participants spots (0 = unlimited)"),
+        validators=[MinValueValidator(0)],
+        verbose_name=_("Maximum participants"),
+        help_text=_("Maximum number of participant slots available (set to 0 for unlimited)"),
     )
 
     max_filler = models.IntegerField(
         default=0,
-        verbose_name=_("Max fillers"),
-        help_text=_("Maximum number of filler spots (0 = unlimited)"),
+        validators=[MinValueValidator(0)],
+        verbose_name=_("Maximum reserves"),
+        help_text=_("Maximum number of reserve character slots available (set to 0 for unlimited)"),
     )
 
     max_waiting = models.IntegerField(
         default=0,
-        verbose_name=_("Max waitings"),
-        help_text=_("Maximum number of waiting spots (0 = unlimited)"),
+        validators=[MinValueValidator(0)],
+        verbose_name=_("Maximum waiting list"),
+        help_text=_("Maximum number of people allowed on the waiting list (set to 0 for unlimited)"),
     )
 
     features = models.ManyToManyField(Feature, related_name="events", blank=True)
@@ -167,12 +200,21 @@ class Event(UuidMixin, BaseModel):
         on_delete=models.CASCADE,
         null=True,
         blank=True,
-        verbose_name=_("Campaign"),
+        verbose_name=_("Parent campaign"),
+        help_text=_("Selecting an event makes you join its campaign and share your characters with it")
+        + " ("
+        + _("leave empty to start a new campaign")
+        + ")",
+    )
+
+    font = models.FileField(
+        upload_to=UploadToPathAndRename("event_font/"),
+        verbose_name=_("Custom title font"),
         help_text=_(
-            "If you select another event, it will be considered in the same campaign, and they will share the characters",
-        )
-        + " - "
-        + _("if you leave this empty, this can be the starting event of a new campaign"),
+            "Upload a custom font file for page titles to match your event's theme (TTF, OTF, or WOFF formats)"
+        ),
+        blank=True,
+        null=True,
     )
 
     background = models.ImageField(
@@ -180,7 +222,10 @@ class Event(UuidMixin, BaseModel):
         upload_to="event_background/",
         verbose_name=_("Background image"),
         blank=True,
-        help_text=_("Background image used across all event pages"),
+        help_text=_("Background image displayed across all event pages")
+        + " ("
+        + _("use a subtle pattern or texture for best results")
+        + ")",
     )
 
     background_red = ImageSpecField(
@@ -190,33 +235,25 @@ class Event(UuidMixin, BaseModel):
         options={"quality": 80},
     )
 
-    font = models.FileField(
-        upload_to=UploadToPathAndRename("event_font/"),
-        verbose_name=_("Title font"),
-        help_text=_("Font used for title texts across all event pages"),
-        blank=True,
-        null=True,
-    )
-
     css_code = models.CharField(max_length=32, editable=False, default="")
 
     pri_rgb = ColorField(
-        verbose_name=_("Color texts"),
-        help_text=_("Indicate the color that will be used for the texts"),
+        verbose_name=_("Text color"),
+        help_text=_("Main color for text content throughout your event's pages"),
         blank=True,
         null=True,
     )
 
     sec_rgb = ColorField(
-        verbose_name=_("Color background"),
-        help_text=_("Indicate the color that will be used for the background of texts"),
+        verbose_name=_("Background color"),
+        help_text=_("Color used for text backgrounds and content boxes"),
         blank=True,
         null=True,
     )
 
     ter_rgb = ColorField(
-        verbose_name=_("Color links"),
-        help_text=_("Indicate the color that will be used for the links"),
+        verbose_name=_("Link color"),
+        help_text=_("Color for clickable links and interactive elements"),
         blank=True,
         null=True,
     )
@@ -237,16 +274,16 @@ class Event(UuidMixin, BaseModel):
         """Return the name of the object as a string."""
         return self.name
 
+    def delete(self, force_policy: int | None = None, **kwargs: Any) -> tuple[int, dict[str, int]]:
+        """Override delete to propagate soft-delete cascade to Runs when deleted via Association cascade."""
+        # When cascade-deleted from Association (force_policy=SOFT_DELETE), propagate cascade to Runs.
+        is_cascade = kwargs.pop("is_cascade", False)
+        if force_policy == SOFT_DELETE and is_cascade:
+            force_policy = SOFT_DELETE_CASCADE
+        return super().delete(force_policy=force_policy, **kwargs)
+
     def get_elements(self, element_model_class: type[BaseModel]) -> QuerySet:
-        """Get ordered elements of specified type for the parent event.
-
-        Args:
-            element_model_class: Model class to query elements from
-
-        Returns:
-            Ordered queryset of elements
-
-        """
+        """Get ordered elements of specified type for the parent event."""
         # Get all elements for the parent event
         queryset = element_model_class.objects.filter(event=self.get_class_parent(element_model_class))
 
@@ -284,22 +321,24 @@ class Event(UuidMixin, BaseModel):
         inheritable_elements = [
             "character",
             "faction",
-            "abilitypx",
-            "deliverypx",
-            "abilitytypepx",
-            "pooltypeci",
+            "abilityexp",
+            "deliveryexp",
+            "abilitytypeexp",
+            "ruleexp",
+            "abilitytemplateexp",
+            "modifierexp",
+            "criterionexp",
+            "systemexp",
+            "systemexppooltypeci",
             "writingquestion",
             "writingoption",
+            "relationshiptag",
         ]
 
         # Check if inheritance conditions are met
         # Verify that campaign independence is not enabled for this element type
         # If independence is disabled (False), use parent's elements
-        if (
-            self.parent
-            and model_class in inheritable_elements
-            and not self.get_config(f"campaign_{model_class}_indep", default_value=False)
-        ):
+        if self.parent and model_class in inheritable_elements and not self.get_config(f"campaign_{model_class}_indep"):
             return self.parent
 
         # Return self if no parent exists, element not inheritable, or independence enabled
@@ -307,6 +346,9 @@ class Event(UuidMixin, BaseModel):
 
     def get_cover_thumb_url(self) -> str | None:
         """Get the URL of the cover thumbnail image, or None if unavailable."""
+        if not self.cover:
+            return None
+
         try:
             # noinspection PyUnresolvedReferences
             return self.cover_thumb.url
@@ -327,7 +369,7 @@ class Event(UuidMixin, BaseModel):
 
         Returns:
             dict[str, str]: Dictionary containing event attributes and media URLs.
-                Keys include: slug, name, tagline, description, website, genre,
+                Keys include: slug, name, tagline, description, website, keywords,
                 where, authors, cover, cover_thumb, carousel_img, carousel_thumb,
                 font, background, background_red (when available).
 
@@ -390,12 +432,26 @@ class Event(UuidMixin, BaseModel):
         # Build path to PDF directory using object slug
         pdf_directory_path = str(Path(conf_settings.MEDIA_ROOT) / f"pdf/{self.slug}/")
         # Ensure directory exists
-        Path(pdf_directory_path).mkdir(parents=True, exist_ok=True)
+        Path(pdf_directory_path).mkdir(mode=0o770, parents=True, exist_ok=True)
         return pdf_directory_path
 
-    def get_config(self, name: str, *, default_value: Any = None, bypass_cache: bool = False) -> Any:
+    def get_config(self, name: str, *, bypass_cache: bool = False) -> Any:
         """Get configuration value for this event."""
-        return get_element_config(self, name, default_value, bypass_cache=bypass_cache)
+        return get_element_config(self, name, bypass_cache=bypass_cache)
+
+    @property
+    def maps_url(self) -> str:
+        """Return a Google Maps URL if pub_lat/pub_lon are set, otherwise empty string."""
+        geo = getattr(self, "geo_configs", None)
+        if geo is not None:
+            lat = next((c.value for c in geo if c.name == "pub_lat"), "").strip()
+            lon = next((c.value for c in geo if c.name == "pub_lon"), "").strip()
+        else:
+            lat = get_element_config(self, "pub_lat").strip()
+            lon = get_element_config(self, "pub_lon").strip()
+        if lat and lon:
+            return f"https://www.google.com/maps?q={lat},{lon}"
+        return ""
 
 
 class EventConfig(BaseModel):
@@ -450,12 +506,14 @@ class BaseConceptModel(BaseModel):
         return self.name
 
 
-class EventButton(UuidMixin, BaseConceptModel):
+class EventButton(UuidMixin, OrderMixin, BaseConceptModel):
     """Represents EventButton model."""
 
     tooltip = models.CharField(max_length=200)
 
     link = models.URLField(max_length=150)
+
+    icon = models.CharField(max_length=50, blank=True, default="")
 
     class Meta:
         indexes: ClassVar[list] = [models.Index(fields=["number", "event"])]
@@ -479,12 +537,15 @@ class EventTextType(models.TextChoices):
     TOC = "t", _("Terms and conditions")
     REGISTER = "r", _("Registration form")
     SEARCH = "s", _("Search")
-    SIGNUP = "g", _("Registration mail")
-    ASSIGNMENT = "a", _("Mail assignment")
+    SIGNUP = "g", _("Registration email")
+    ASSIGNMENT = "a", _("Character assignment email")
+    USER_CHARACTER = "c", _("Player's character form")
 
     CHARACTER_PROPOSED = "cs", _("Proposed character")
     CHARACTER_APPROVED = "ca", _("Approved character")
     CHARACTER_REVIEW = "cr", _("Character review")
+
+    REGISTRATION_APPROVAL = "ra", _("Registration approval request")
 
 
 class EventText(UuidMixin, BaseModel):
@@ -527,10 +588,8 @@ class EventText(UuidMixin, BaseModel):
         ]
 
 
-class ProgressStep(UuidMixin, BaseConceptModel):
+class ProgressStep(UuidMixin, OrderMixin, BaseConceptModel):
     """Represents ProgressStep model."""
-
-    order = models.IntegerField(default=0)
 
     class Meta:
         indexes: ClassVar[list] = [models.Index(fields=["number", "event"])]
@@ -560,49 +619,114 @@ class DevelopStatus(models.TextChoices):
     DONE = "9", _("Concluded")
 
 
-class Run(UuidMixin, BaseModel):
+class RegistrationStatus(models.TextChoices):
+    """Registration status for event runs."""
+
+    PRE = "p", _("Pre-registration")
+    CLOSED = "c", _("Closed")
+    OPEN = "o", _("Open")
+    EXTERNAL = "e", _("External site")
+    FUTURE = "f", _("Open on date")
+    CLOSING = "g", _("Close on date")
+
+
+class Run(MediaTokenMixin, UuidMixin, BaseModel):
     """Represents Run model."""
 
     search = models.CharField(max_length=150, editable=False)
+
+    start = models.DateField(
+        blank=True,
+        null=True,
+        verbose_name=_("Start date"),
+        help_text=_("The date when this event begins"),
+    )
+
+    end = models.DateField(
+        blank=True,
+        null=True,
+        verbose_name=_("End date"),
+        help_text=_("The date when this event ends"),
+        db_index=True,
+    )
 
     development = models.CharField(
         max_length=1,
         choices=DevelopStatus.choices,
         default=DevelopStatus.START,
         verbose_name=_("Status"),
+        help_text=_("Current status of this event"),
+    )
+
+    registration_status = models.CharField(
+        max_length=1,
+        choices=RegistrationStatus.choices,
+        default=RegistrationStatus.CLOSED,
+        verbose_name=_("Registrations status"),
+        help_text=_("Registrations status for this event"),
     )
 
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="runs")
 
-    number = models.IntegerField()
-
-    start = models.DateField(blank=True, null=True, verbose_name=_("Start date"))
-
-    end = models.DateField(blank=True, null=True, verbose_name=_("End date"), db_index=True)
+    number = models.IntegerField(
+        verbose_name=_("Run number"),
+        help_text=_("Sequential number for this event"),
+    )
 
     registration_open = models.DateTimeField(
         blank=True,
         null=True,
-        verbose_name=_("Registration opening date"),
-        help_text=_("Enter the date and time when registrations open - leave blank to keep registrations closed"),
+        verbose_name=_("Registration date"),
+        help_text=_("Date and time of status change"),
+    )
+
+    register_link = models.URLField(
+        max_length=150,
+        blank=True,
+        verbose_name=_("External registration link"),
+        help_text=_("Link to an external registration system")
+        + " ("
+        + _("non-registered users will be redirected here, while registered users get normal access")
+        + ")",
     )
 
     registration_secret = models.CharField(
         default=my_uuid_short,
         max_length=50,
         unique=True,
-        verbose_name=_("Secret code"),
-        help_text=_(
-            "This code is used to generate the secret registration link, you may keep the default or customize it",
-        ),
+        verbose_name=_("Secret registration code"),
+        help_text=_("Unique code used to generate the secret registration link")
+        + " ("
+        + _("keep the auto-generated value or customize it")
+        + ")",
         db_index=True,
     )
 
-    balance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    balance = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Balance"),
+        help_text=_("Current financial balance for this event"),
+    )
 
-    paid = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    paid = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        blank=True,
+        null=True,
+        verbose_name=_("Amount paid"),
+        help_text=_("Total amount paid for platform management"),
+    )
 
-    plan = models.CharField(max_length=1, choices=AssociationPlan.choices, blank=True, null=True)
+    plan = models.CharField(
+        max_length=1,
+        choices=AssociationPlan.choices,
+        blank=True,
+        null=True,
+        verbose_name=_("Subscription plan"),
+        help_text=_("The subscription plan associated with this event"),
+    )
 
     class Meta:
         indexes: ClassVar[list] = [
@@ -621,6 +745,9 @@ class Run(UuidMixin, BaseModel):
     def __str__(self) -> str:
         """Return string representation of the run with event name and optional number."""
         s = self.event.name
+        max_length = 50
+        if len(s) > max_length:
+            s = f"{s[:max_length]}[...]"
         if self.number and self.number != 1:
             s = f"{s} #{self.number}"
         return s
@@ -637,10 +764,9 @@ class Run(UuidMixin, BaseModel):
         # noinspection PyUnresolvedReferences
         return self.event.where
 
-    def get_cover_url(self) -> str:
+    def get_cover_url(self) -> str | None:
         """Return the thumbnail URL of the associated event's cover image."""
-        # noinspection PyUnresolvedReferences
-        return self.event.cover_thumb.url
+        return self.event.get_cover_thumb_url()
 
     def pretty_dates(self) -> str:
         """Format start and end dates into a human-readable string.
@@ -677,18 +803,13 @@ class Run(UuidMixin, BaseModel):
         return f"{self.start.day} - {formats.date_format(self.end, 'j E Y')}"
 
     def get_media_filepath(self) -> str:
-        """Return the media file path for this run, creating the directory if needed.
-
-        Returns:
-            The absolute path to the run's media directory.
-
-        """
+        """Return the media file path for this run, creating the directory if needed."""
         # Build path by combining event media path with run number
         # noinspection PyUnresolvedReferences
-        run_media_path = str(Path(self.event.get_media_filepath()) / f"{self.number}/")
+        run_media_path = str(Path(self.event.get_media_filepath()) / f"{self.number}-{self.media_token}/")
 
         # Ensure directory exists
-        Path(run_media_path).mkdir(parents=True, exist_ok=True)
+        Path(run_media_path).mkdir(mode=0o770, parents=True, exist_ok=True)
 
         return run_media_path
 
@@ -700,9 +821,9 @@ class Run(UuidMixin, BaseModel):
         """Return the file path for the profiles PDF."""
         return self.get_media_filepath() + "profiles.pdf"
 
-    def get_config(self, name: str, *, default_value: Any = None, bypass_cache: bool = False) -> Any:
+    def get_config(self, name: str, *, bypass_cache: bool = False) -> Any:
         """Get configuration value for this run."""
-        return get_element_config(self, name, default_value, bypass_cache=bypass_cache)
+        return get_element_config(self, name, bypass_cache=bypass_cache)
 
 
 class RunConfig(BaseModel):

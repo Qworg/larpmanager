@@ -28,17 +28,16 @@ import re
 from typing import Any
 
 import pytest
-from playwright.sync_api import expect
 
-from larpmanager.tests.utils import (just_wait,
-    check_download,
-    go_to,
-    load_image,
-    login_orga,
-    submit,
-    submit_confirm,
-    expect_normalized,
-)
+from larpmanager.tests.utils import (check_download,
+                                     get_modal_iframe,
+                                     go_to,
+                                     load_image,
+                                     login_orga,
+                                     submit,
+                                     submit_confirm,
+                                     expect_normalized, logout, save_modal, sidebar, confirm_modal,
+                                     )
 
 pytestmark = pytest.mark.e2e
 
@@ -60,6 +59,10 @@ def signup(live_server: Any, page: Any) -> None:
     go_to(page, live_server, "/manage/features/payment/on")
     # Activate membership
     go_to(page, live_server, "/manage/features/membership/on")
+
+    # explicitly set membership fee as separated (not bundled with registration)
+    go_to(page, live_server, "/manage/config/membership_fee_separated/on/")
+
     go_to(page, live_server, "/manage/config")
     page.get_by_role("link", name=re.compile(r"^Email notifications\s.+")).click()
     page.locator("#id_mail_cc").check()
@@ -68,7 +71,7 @@ def signup(live_server: Any, page: Any) -> None:
     page.locator("#id_mail_signup_del").check()
     page.locator("#id_mail_payment").check()
 
-    page.get_by_role("link", name="Payments ").click()
+    page.get_by_role("link", name=re.compile(r"^Payments ")).click()
     page.locator("#id_payment_require_receipt").check()
 
     submit_confirm(page)
@@ -85,10 +88,11 @@ def signup(live_server: Any, page: Any) -> None:
     submit_confirm(page)
     # set ticket price
     go_to(page, live_server, "/test/manage/tickets")
-    page.locator("a:has(i.fas.fa-edit)").click()
-    page.locator("#id_price").click()
-    page.locator("#id_price").fill("100.00")
-    submit_confirm(page)
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_price").click()
+    edit_iframe.locator("#id_price").fill("100.00")
+    save_modal(page, edit_iframe)
     # signup
     go_to(page, live_server, "/test/register")
     page.get_by_role("button", name="Continue").click()
@@ -98,12 +102,12 @@ def signup(live_server: Any, page: Any) -> None:
 
 def membership(live_server: Any, page: Any) -> None:
     # send membership
-    go_to(page, live_server, "/test/register")
-    expect_normalized(page, page.locator("#one"), "Provisional registration")
-    expect_normalized(page, page.locator("#one"), "please upload your membership application to proceed")
-    page.get_by_role("link", name="please upload your membership").click()
+    go_to(page, live_server, "/test/")
+    expect_normalized(page, page.locator("#one"), "Your registration is provisional")
+    page.get_by_role("link", name="Fill in and upload your membership application").click()
     page.get_by_role("checkbox", name="Authorisation").check()
     submit_confirm(page)
+
     # compile request
     load_image(page, "#id_request")
     load_image(page, "#id_document")
@@ -123,27 +127,26 @@ def membership(live_server: Any, page: Any) -> None:
     submit_confirm(page)
     # check register
     go_to(page, live_server, "/test/register")
-    expect_normalized(page, page.locator("#one"), "to confirm it proceed with payment")
-    page.get_by_role("link", name="to confirm it proceed with").click()
+    page.get_by_role("link", name=re.compile(r"A payment of 100€ is due within 8 days to confirm your registration")).click()
 
 
 def pay(live_server: Any, page: Any) -> None:
-    # pay
-    page.get_by_role("cell", name="Wire", exact=True).click()
-    expect_normalized(page, page.locator("b"), "100")
-    submit(page)
+    # pay - single payment method, selection page is skipped automatically
+    expect_normalized(page, page.locator("#one"), "100")
     load_image(page, "#id_invoice")
     page.get_by_role("checkbox", name="Payment confirmation:").check()
 
     submit(page)
     # approve payment
-    go_to(page, live_server, "/test/manage/invoices")
-    page.get_by_role("link", name="Confirm", exact=True).click()
+    go_to(page, live_server, "/test/manage/payments")
+    page.get_by_role("link", name="Confirm").first.click()
+    confirm_modal(page)
+
     # check payment
     go_to(page, live_server, "/test/register")
-    expect_normalized(page, page.locator("#one"), "Registration confirmed (Standard)")
-    page.locator("a#menu-open").click()
-    page.get_by_role("link", name="Logout").click()
+    sidebar(page, "Event")
+    expect_normalized(page, page.locator("#one"), "Your registration for this event has been confirmed (Standard)")
+    logout(page)
     expect_normalized(page, page.locator("#one"), "Registration is open!")
     expect_normalized(page, page.locator("#one"), "Hurry: only 9 tickets available")
     # test mails

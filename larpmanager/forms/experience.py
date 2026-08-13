@@ -27,91 +27,117 @@ from larpmanager.forms.base import BaseForm, BaseModelForm
 from larpmanager.forms.utils import (
     AbilityS2WidgetMulti,
     AbilityTemplateS2WidgetMulti,
-    EventCharacterS2WidgetMulti,
+    AbilityTypePxS2Widget,
+    CharacterDualListWidget,
+    ComputedFieldS2Widget,
     EventWritingOptionS2WidgetMulti,
-    RunCampaignS2Widget,
+    FactionS2WidgetMulti,
+    SystemExpS2Widget,
+    WritingTinyMCE,
 )
-from larpmanager.models.event import Run
-from larpmanager.models.experience import AbilityPx, AbilityTemplatePx, AbilityTypePx, DeliveryPx, ModifierPx, RulePx
-from larpmanager.models.form import WritingQuestion, WritingQuestionType
+from larpmanager.models.experience import (
+    AbilityExp,
+    AbilityTemplateExp,
+    AbilityTypeExp,
+    CriterionExp,
+    DeliveryExp,
+    ModifierExp,
+    Operation,
+    RuleExp,
+    SystemExp,
+)
 
 
-class PxBaseForm(BaseModelForm):
+class OrgaSystemExpForm(BaseModelForm):
+    """Form for OrgaSystemPx."""
+
+    page_title = _("Experience System")
+
+    page_info = _("Manage the experience point systems available for this event")
+
+    class Meta:
+        model = SystemExp
+        exclude = ("number",)
+
+
+class ExpBaseForm(BaseModelForm):
     """Form for PxBase."""
 
     class Meta:
         abstract = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize the instance with variable arguments.
-
-        Args:
-            *args: Variable length argument list passed to parent class.
-            **kwargs: Arbitrary keyword arguments passed to parent class.
-
-        """
+        """Initialize the instance with variable arguments."""
         super().__init__(*args, **kwargs)
 
+    def save(self, commit: bool = True) -> Any:  # noqa: FBT001, FBT002
+        """Save instance, applying the default system when field is hidden."""
+        instance = super().save(commit=False)
+        if hasattr(instance, "_default_system") and not instance.system_id:
+            instance.system = instance._default_system  # noqa: SLF001
+        if commit:
+            instance.save()
+            self.save_m2m()
+            self.save_select2_m2m(instance)
+        return instance
 
-class OrgaDeliveryPxForm(PxBaseForm):
-    """Form for OrgaDeliveryPx."""
 
-    load_js: ClassVar[list] = ["characters-choices"]
+class OrgaDeliveryExpForm(ExpBaseForm):
+    """Form for OrgaDeliveryExp."""
 
-    page_title = _("Delivery")
+    page_title = _("Award")
 
-    page_info = _("Manage experience point deliveries")
-
-    auto_populate_run = forms.ModelChoiceField(
-        queryset=Run.objects.none(),
-        required=False,
-        label=_("Load from event"),
-        help_text=_(
-            "If you select an event, all characters from that event's registrations will be automatically loaded"
-        ),
-        widget=RunCampaignS2Widget,
-    )
+    page_info = _("Manage experience points awarded to characters")
 
     class Meta:
-        model = DeliveryPx
+        model = DeliveryExp
         exclude = ("number",)
 
-        widgets: ClassVar[dict] = {"characters": EventCharacterS2WidgetMulti}
+        widgets: ClassVar[dict] = {"characters": CharacterDualListWidget, "system": SystemExpS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize form with event configuration."""
         super().__init__(*args, **kwargs)
 
-        self.configure_field_event("auto_populate_run", self.params["event"])
+        event = self.params.get("event")
+        systems = list(event.get_elements(SystemExp)) if event else []
+        if len(systems) == 1:
+            self.delete_field("system")
+            self.instance._default_system = systems[0]  # noqa: SLF001
+        elif "system" in self.fields:
+            self.configure_field_event("system", event)
 
 
-class OrgaAbilityTemplatePxForm(BaseModelForm):
+class OrgaAbilityTemplateExpForm(BaseModelForm):
     """Form for OrgaAbilityTemplatePx."""
 
     page_title = _("Ability Template")
 
-    page_info = _("This page allows you to add or edit an ability template")
+    page_info = _("Define reusable ability templates that can be assigned to individual abilities")
 
     class Meta:
-        model = AbilityTemplatePx
+        model = AbilityTemplateExp
         exclude = ("number",)
 
+        widgets: ClassVar[dict] = {"descr": WritingTinyMCE()}
 
-class OrgaAbilityPxForm(PxBaseForm):
-    """Form for OrgaAbilityPx."""
 
-    load_js: ClassVar[list] = ["characters-choices"]
+class OrgaAbilityExpForm(ExpBaseForm):
+    """Form for OrgaAbilityExp."""
 
     page_title = _("Ability")
 
-    page_info = _("Manage experience point abilities")
+    page_info = _("Manage the abilities participants can purchase with experience points for this event")
 
     class Meta:
-        model = AbilityPx
+        model = AbilityExp
         exclude = ("number",)
 
         widgets: ClassVar[dict] = {
-            "characters": EventCharacterS2WidgetMulti,
+            "descr": WritingTinyMCE(),
+            "system": SystemExpS2Widget,
+            "typ": AbilityTypePxS2Widget,
+            "characters": CharacterDualListWidget,
             "prerequisites": AbilityS2WidgetMulti,
             "requirements": EventWritingOptionS2WidgetMulti,
             "template": AbilityTemplateS2WidgetMulti,
@@ -121,86 +147,90 @@ class OrgaAbilityPxForm(PxBaseForm):
         """Initialize form with event-specific ability configuration."""
         super().__init__(*args, **kwargs)
 
+        event = self.params.get("event")
+
+        # Handle system field visibility
+        systems = list(event.get_elements(SystemExp)) if event else []
+        if len(systems) == 1:
+            self.delete_field("system")
+            self.instance._default_system = systems[0]  # noqa: SLF001
+        elif "system" in self.fields:
+            self.configure_field_event("system", event)
+
         # Configure event-specific widgets
-        for field_name in ["characters", "prerequisites", "requirements", "template", "dependents"]:
+        for field_name in ["typ", "characters", "prerequisites", "requirements", "template", "dependents"]:
             if field_name in self.fields and hasattr(self.fields[field_name].widget, "set_event"):
-                self.configure_field_event(field_name, self.params["event"])
+                self.configure_field_event(field_name, event)
 
-        px_user = get_event_config(self.params["event"].id, "px_user", default_value=False, context=self.params)
-        px_templates = get_event_config(
-            self.params["event"].id, "px_templates", default_value=False, context=self.params
-        )
+        exp_user = get_event_config(event.id, "exp_user", context=self.params)
+        exp_templates = get_event_config(event.id, "exp_templates", context=self.params)
 
-        # Set ability type choices from event-specific elements
-        self.fields["typ"].choices = [
-            (el[0], el[1]) for el in self.params["event"].get_elements(AbilityTypePx).values_list("uuid", "name")
-        ]
-
-        # Remove template field if px_templates is disabled
-        if not px_templates:
+        # Remove template field if exp_templates is disabled
+        if not exp_templates:
             self.delete_field("template")
 
-        # Remove user-experience fields if px_user is disabled
-        if not px_user:
-            self.delete_field("requirements")
-            self.delete_field("prerequisites")
+        # Remove user-experience fields if exp_user is disabled
+        if not exp_user:
             self.delete_field("visible")
 
+    def clean(self) -> dict:
+        """Validate that the ability is not listed as its own prerequisite."""
+        cleaned_data = super().clean()
+        prerequisites = cleaned_data.get("prerequisites")
+        if prerequisites and self.instance and self.instance.pk and self.instance in prerequisites:
+            self.add_error("prerequisites", _("An ability cannot be a prerequisite of itself."))
+        return cleaned_data
 
-class OrgaAbilityTypePxForm(BaseModelForm):
+
+class OrgaAbilityTypeExpForm(BaseModelForm):
     """Form for OrgaAbilityTypePx."""
 
     page_title = _("Ability type")
 
-    page_info = _("Manage experience point ability types")
+    page_info = _("Organize purchasable abilities into categories by managing ability types")
 
     class Meta:
-        model = AbilityTypePx
+        model = AbilityTypeExp
         exclude = ("number",)
 
 
-class OrgaRulePxForm(BaseModelForm):
-    """Form for OrgaRulePx."""
+class OrgaRuleExpForm(BaseModelForm):
+    """Form for OrgaRuleExp."""
 
     page_title = _("Rule")
 
-    page_info = _("Manage rules for computed fields")
+    page_info = _("Define rules that determine how abilities modify computed character fields")
 
     class Meta:
-        model = RulePx
+        model = RuleExp
         exclude = ("number", "order")
-        widgets: ClassVar[dict] = {"abilities": AbilityS2WidgetMulti}
+        widgets: ClassVar[dict] = {"abilities": AbilityS2WidgetMulti, "field": ComputedFieldS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize form, configure fields for abilities and writing questions."""
         super().__init__(*args, **kwargs)
         self.delete_field("name")
 
-        # Configure abilities widget with event context
-        self.configure_field_event("abilities", self.params["event"])
-
-        # Filter writing questions to computed type only
-        qs = WritingQuestion.objects.filter(event=self.params["event"], typ=WritingQuestionType.COMPUTED)
-        self.fields["field"].queryset = qs
+        for field in ["abilities", "field"]:
+            # Configure abilities widget with event context
+            self.configure_field_event(field, self.params.get("event"))
 
 
-class OrgaModifierPxForm(BaseModelForm):
-    """Form for OrgaModifierPx."""
+class OrgaModifierExpForm(BaseModelForm):
+    """Form for OrgaModifierExp."""
 
     page_title = _("Rule")
 
-    page_info = _(
-        "Manage ability modifiers. Modifiers are triggered only if all prerequisites "
-        "and requirements are met. If multiple modifiers apply, only the first is used",
-    )
+    page_info = _("Configure cost modifiers that adjust ability prices based on prerequisites or character fields")
 
     class Meta:
-        model = ModifierPx
+        model = ModifierExp
         exclude = ("number", "order")
         widgets: ClassVar[dict] = {
             "abilities": AbilityS2WidgetMulti,
             "prerequisites": AbilityS2WidgetMulti,
             "requirements": EventWritingOptionS2WidgetMulti,
+            "factions": FactionS2WidgetMulti,
         }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -209,8 +239,51 @@ class OrgaModifierPxForm(BaseModelForm):
         self.delete_field("name")
 
         # Configure event-specific widgets
-        for field in ["abilities", "prerequisites", "requirements"]:
-            self.configure_field_event(field, self.params["event"])
+        for field in ["abilities", "prerequisites", "requirements", "factions"]:
+            self.configure_field_event(field, self.params.get("event"))
+
+
+class OrgaCriterionExpForm(ExpBaseForm):
+    """Form for OrgaCriterionExp."""
+
+    page_title = _("Criterion")
+
+    page_info = _(
+        "Define criteria that conditionally modify experience point totals based on prerequisites or character options"
+    )
+
+    class Meta:
+        model = CriterionExp
+        exclude = ("number", "order")
+        widgets: ClassVar[dict] = {
+            "system": SystemExpS2Widget,
+            "prerequisites": AbilityS2WidgetMulti,
+            "requirements": EventWritingOptionS2WidgetMulti,
+            "factions": FactionS2WidgetMulti,
+        }
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize form and configure event-related fields."""
+        super().__init__(*args, **kwargs)
+        self.delete_field("name")
+
+        event = self.params.get("event")
+        systems = list(event.get_elements(SystemExp)) if event else []
+        if len(systems) == 1:
+            self.delete_field("system")
+            self.instance._default_system = systems[0]  # noqa: SLF001
+        elif "system" in self.fields:
+            self.configure_field_event("system", event)
+
+        for field in ["prerequisites", "requirements", "factions"]:
+            self.configure_field_event(field, event)
+
+    def clean(self) -> dict:
+        """Validate that DIVISION criteria have a non-zero amount."""
+        cleaned = super().clean()
+        if cleaned.get("operation") == Operation.DIVISION and "amount" in cleaned and not cleaned["amount"]:
+            self.add_error("amount", _("Amount must be non-zero for division criteria"))
+        return cleaned
 
 
 class SelectNewAbility(BaseForm):

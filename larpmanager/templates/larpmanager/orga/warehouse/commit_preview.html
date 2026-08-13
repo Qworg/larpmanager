@@ -1,27 +1,27 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Commit warehouse quantities" %} - {{ run }}
+    {% trans "Commit warehouse quantities" %} - {{ run.search }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows what will happen when you commit the warehouse quantities based on the current assignments" %}
+    {% trans "Review the quantity changes that will be applied to warehouse stock before confirming the commit" %}
 {% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
+    {% include "elements/table/header.html" %}
     {% if preview_items %}
         <div class="alert alert-warning" role="alert">
             <i class="fas fa-exclamation-triangle"></i>
-            <strong>{% trans "Warning" %}:</strong>
+            <strong>{% trans "Warning:" %}</strong>
             {% trans "This operation is permanent and cannot be undone. Please review the changes carefully before confirming." %}
         </div>
         <h3>{% trans "Items that will be modified" %}</h3>
         <p>
-            {% trans "The following items will have their quantities reduced based on the assignments for this event" %}.
-            {% trans "Items marked in red will be deleted because their final quantity will be zero or negative" %}.
+            {% trans "The following items will have their quantities reduced based on the assignments for this event. Items marked in red will be deleted because their final quantity will be zero or negative." %}
         </p>
         <table class="go_datatable" id="preview_table">
             <thead>
                 <tr>
+                    <th></th>
                     <th>{% trans "Item" %}</th>
                     <th>{% trans "Container" %}</th>
                     <th>{% trans "Current quantity" %}</th>
@@ -33,6 +33,7 @@
             <tbody>
                 {% for item_data in preview_items %}
                     <tr {% if item_data.will_delete %}class="table-danger"{% endif %}>
+                        <td></td>
                         <td>{{ item_data.item.name }}</td>
                         <td>
                             {{ item_data.item.container }}
@@ -42,7 +43,7 @@
                         <td>{{ item_data.assigned_quantity }}</td>
                         <td>
                             {% if item_data.will_delete %}
-                                <span class="text-danger"><strong>{{ item_data.final_quantity }}</strong></span>
+                                <span class="redderized"><strong>{{ item_data.final_quantity }}</strong></span>
                             {% else %}
                                 {{ item_data.final_quantity }}
                             {% endif %}
@@ -62,10 +63,13 @@
                 {% endfor %}
             </tbody>
         </table>
+        {% if preview_items %}
+            <p class="no-elements-available">{% trans "No items with assigned quantities were found for this event." %}</p>
+        {% endif %}
         <div class="mt-4">
             <form method="post"
                   action="{% url 'orga_warehouse_commit_quantities' run.get_slug %}"
-                  onsubmit="return confirm('{% filter escapejs %}{% trans "Are you sure you want to commit these quantities? This operation cannot be undone!" %}{% endfilter %}');">
+                  onsubmit="return window.lmTesting ? true : confirm('{% filter escapejs %}{% trans "Are you sure you want to commit these quantities? This operation cannot be undone!" %}{% endfilter %}');">
                 {% csrf_token %}
                 <button type="submit" class="btn btn-danger btn-lg">
                     <i class="fas fa-check"></i> {% trans "Confirm and commit quantities" %}
@@ -79,13 +83,14 @@
     {% else %}
         <div class="alert alert-info" role="alert">
             <i class="fas fa-info-circle"></i>
-            {% trans "No items will be modified. Either no items have assigned quantities, or all assignments have zero quantity." %}
+            {% trans "No items will be modified. Either no items have been assigned quantities, or all assignments have a quantity of zero." %}
         </div>
         <a href="{% url 'orga_warehouse_manifest' run.get_slug %}"
            class="btn btn-primary">
             <i class="fas fa-arrow-left"></i> {% trans "Back to manifest" %}
         </a>
     {% endif %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}
 {% block js %}
     <script>

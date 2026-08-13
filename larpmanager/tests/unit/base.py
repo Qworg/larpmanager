@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 from django.contrib.auth.models import User
+from django.core.exceptions import ObjectDoesNotExist
 from django.test import TestCase
 
 from larpmanager.models.accounting import DiscountType
@@ -66,7 +67,7 @@ class BaseTestCase(TestCase):
             # Check if this user already has a member
             try:
                 member = user.member
-            except Member.DoesNotExist:
+            except ObjectDoesNotExist:
                 member = self.create_member(user=user)
 
         # Ensure the member has a membership attribute set
@@ -115,7 +116,7 @@ class BaseTestCase(TestCase):
     # Helper methods for creating specific test objects when needed
     def create_association(self, **kwargs: Any) -> Any:
         """Create a new association with defaults"""
-        defaults = {"name": "Test Association", "slug": "test-association", "email": "test@example.com"}
+        defaults = {"name": "Test Association", "slug": "test-association", "main_mail": "test@example.com"}
         defaults.update(kwargs)
         return Association.objects.create(**defaults)
 
@@ -151,7 +152,7 @@ class BaseTestCase(TestCase):
             if not member.surname:
                 member.surname = "Member"
             member.save()
-        except Member.DoesNotExist:
+        except ObjectDoesNotExist:
             # Fallback: create member if signal didn't fire (e.g., in some test scenarios)
             defaults = {"user": user, "name": "Test", "surname": "Member"}
             defaults.update(kwargs)
@@ -233,8 +234,9 @@ class BaseTestCase(TestCase):
 
     def payment_item(self, **kwargs: Any) -> Any:
         """Create a payment item for testing"""
-        from datetime import datetime
         from decimal import Decimal
+
+        from django.utils import timezone
 
         from larpmanager.models.accounting import AccountingItemPayment, PaymentChoices
 
@@ -244,7 +246,7 @@ class BaseTestCase(TestCase):
             "association": self.get_association(),
             "registration": self.get_registration(),
             "pay": PaymentChoices.MONEY,
-            "created": datetime.now(),
+            "created": timezone.now(),
         }
         defaults.update(kwargs)
         return AccountingItemPayment(**defaults)
@@ -440,7 +442,7 @@ class BaseTestCase(TestCase):
             # Check if this user already has a member
             try:
                 organizer = organizer_user.member
-            except Member.DoesNotExist:
+            except ObjectDoesNotExist:
                 organizer = Member.objects.create(user=organizer_user, name="Organizer", surname="Test", language="en")
         return organizer
 
@@ -494,6 +496,15 @@ class BaseTestCase(TestCase):
             # Add the current run to the discount
             discount.runs.add(self.get_run())
         return discount
+
+    def get_system_exp(self, event: Any = None) -> Any:
+        """Get or create a SystemExp for testing"""
+        from larpmanager.models.experience import SystemExp
+
+        if event is None:
+            event = self.get_event()
+        system, _ = SystemExp.objects.get_or_create(event=event, number=1, defaults={"name": "XP"})
+        return system
 
     def user_with_permissions(self) -> Any:
         """Get or create a user with permissions for testing"""

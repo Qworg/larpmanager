@@ -104,7 +104,15 @@ class FeatureCheckboxWidget(forms.CheckboxSelectMultiple):
         # Use format_html_join to safely generate the HTML
         return format_html_join(
             "\n",
-            '<div class="feature_checkbox lm_tooltip"><span class="hide lm_tooltiptext">{} ({})</span><input type="checkbox" name="{}" value="{}" id="{}" {}> <label for="{}">{}</label> <a href="#" feat="{}"><i class="fas fa-question-circle"></i></a></div>',
+            """
+            <div class="feature_checkbox">
+                <input type="checkbox" name="{2}" value="{3}" id="{4}" {5}>
+                <span class="lm_tooltip">
+                <span class="hide lm_tooltiptext">{0} ({1})</span>
+                <label for="{6}">{7}</label>
+                <a href="#" feat="{8}"><i class="fas fa-question-circle"></i></a>
+                </span>
+            </div>""",
             checkbox_elements,
         )
 
@@ -117,21 +125,24 @@ class FeatureForm(BaseModelForm):
         super().__init__(*args, **kwargs)
         self.prevent_canc = True
 
-    def _init_features(self, *, is_association: bool) -> None:
+    def _init_features(self, *, is_association: bool, source: Any = None) -> None:
         """Initialize feature selection fields organized by modules.
 
         Args:
             is_association: If True, initialize association-level features;
                                  if False, initialize event-level features
+            source: Instance to read current features from; defaults to self.instance
 
         Side effects:
             Adds feature selection fields to the form organized by modules
             Sets initial values based on current feature assignments
 
         """
+        if source is None:
+            source = self.instance
         selected_feature_ids = None
-        if self.instance.pk:
-            selected_feature_ids = [str(v) for v in self.instance.features.values_list("pk", flat=True)]
+        if source.pk:
+            selected_feature_ids = [str(v) for v in source.features.values_list("pk", flat=True)]
 
         feature_modules = FeatureModule.objects.exclude(order=0).order_by("order")
         if is_association:
@@ -181,6 +192,7 @@ class FeatureForm(BaseModelForm):
                 continue
             features_id.extend([int(v) for v in self.cleaned_data[key]])
 
+        features_id = list(Feature.get_all_dependencies(features_id))
         instance.features.set(features_id)
         instance.save()
 
@@ -217,9 +229,7 @@ class QuickSetupForm(BaseModelForm):
                 label=field_label,
                 help_text=field_help_text + "?",
             )
-            initial_value = (
-                config_key in features if is_feature_flag else self.instance.get_config(config_key, default_value=False)
-            )
+            initial_value = config_key in features if is_feature_flag else self.instance.get_config(config_key)
             self.initial[config_key] = initial_value
 
     def save(self, commit: bool = True) -> Association:  # noqa: FBT001, FBT002

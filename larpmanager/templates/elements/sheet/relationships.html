@@ -14,18 +14,16 @@
                     <span class="character-name"><a href="{% url 'character' run.get_slug el.uuid %}">{{ el.name }}</a> </span>
                     {% if el.title %}- <b>{{ el.title }}</b>{% endif %}
                     {% if el.pronoun %}({{ el.pronoun }}){% endif %}
-                </div>
-                {% if el.player_uuid %}
-                    <div class="go-inline">
-                        <b>{% trans "Player" %}:&nbsp;</b><a href="{% url 'public' el.player_uuid %}">{{ el.player }}</a>
-                    </div>
-                {% endif %}
-                <div class="go-inline">
-                    {% if el.factions_list %}
-                        <b>{% trans "Factions" %}:&nbsp;{{ el.factions_list }}</b>
+                    {% if el.player_uuid %}
+                        |
+                        <b>{% trans "Player:" %}&nbsp;</b><a href="{% url 'public' el.player_uuid %}">{{ el.player }}</a>
                     {% endif %}
+                    {% if el.factions_list %}| {{ el.factions_list }}{% endif %}
                 </div>
-                {% show_char el.text run 1 %}
+                {% if show_character.teaser and el.teaser %}
+                    <div class="plot">{% show_char el.teaser run 1 %}</div>
+                {% endif %}
+                <div class="plot">{% show_char el.text run 1 %}</div>
             </div>
         </div>
         <hr class="clear" />

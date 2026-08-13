@@ -21,15 +21,16 @@
 """
 Test: Registration form with multiple features and surcharges.
 Verifies registration form configuration with additional tickets, dynamic rates,
-surcharges, pay what you want, and filler tickets.
+surcharges, pay what you want, and reserve tickets.
 """
-
+import re
 from typing import Any
 
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, go_to, login_orga, expect_normalized, submit_confirm
+from larpmanager.tests.utils import fill_date, go_to, login_orga, expect_normalized, submit_confirm, sidebar, \
+    get_modal_iframe, save_modal, drag_reorder, expand_options
 
 pytestmark = pytest.mark.e2e
 
@@ -45,18 +46,17 @@ def test_orga_registration_form(pw_page: Any) -> None:
 
     signup(page, live_server)
 
-    check_filler(page, live_server)
+    check_reserve(page, live_server)
 
 
 def prepare_form(page: Any, live_server: Any) -> None:
     go_to(page, live_server, "test/manage")
     # check initial reg form
-    page.locator("#orga_registration_form").get_by_role("link", name="Form").click()
-
+    sidebar(page, "Form")
     expect_normalized(page, page.locator("#one"), "Ticket Your registration ticket Ticket")
 
     # Add features
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Additional tickets").check()
     page.get_by_role("checkbox", name="Dynamic rates").check()
     page.get_by_role("checkbox", name="Surcharge").check()
@@ -66,35 +66,64 @@ def prepare_form(page: Any, live_server: Any) -> None:
     # check there are questions for all features
     page.get_by_role("link", name="Form").click()
 
-    page.locator('[id="u1"]').get_by_role("cell", name="").click()
-    page.get_by_text("Your registration ticket").click()
-    page.get_by_text("Your registration ticket").fill("Your registration ticket2")
-    submit_confirm(page)
+    page.locator('[id="u1"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.get_by_text("Your registration ticket").click()
+    edit_iframe.get_by_text("Your registration ticket").fill("Your registration ticket2")
+    save_modal(page, edit_iframe)
 
     expect_normalized(page,
         page.locator("#one"),
-        "Ticket Your registration ticket2 Ticket Additional Reserve additional tickets beyond your own Additional Optional Pay what you want Freely indicate the amount of your donation Pay what you want Optional Rate Number of installments to split the fee: payments… Rate Optional Surcharge Registration surcharge Surcharge Optional",
-    )
-    page.locator('[id="u4"]').get_by_role("link", name="").click()
-    page.locator('[id="u2"]').get_by_role("link", name="").click()
+        """
+            Ticket Your registration ticket2 Ticket Additional Reserve additional tickets beyond your
+            own Additional Optional Pay what you want Freely indicate the amount of your donation Pay
+            what you want Optional payment installments select how many payments to split the fee into
+             """
+                      )
     expect_normalized(page,
         page.locator("#one"),
-        "Additional Reserve additional tickets beyond your own Additional Optional Ticket Your registration ticket2 Ticket Rate Number of installments to split the fee: payments… Rate Optional Pay what you want Freely indicate the amount of your donation Pay what you want Optional Surcharge Registration surcharge Surcharge Optional",
+    "Installments Optional Surcharge Registration surcharge Surcharge Optional",
     )
-    page.locator('[id="u2"]').get_by_role("link", name="").click()
-    page.get_by_text("Reserve additional tickets").click()
-    page.get_by_text("Reserve additional tickets").fill("Reserve additional tickets beyond your own2")
-    submit_confirm(page)
+    drag_reorder(
+        page,
+        page.locator('tr[id="u4"] td.reorder-handle'),
+        page.locator('tr[id="u4"]').locator("xpath=preceding-sibling::tr[1]"),
+    )
+    drag_reorder(
+        page,
+        page.locator('tr[id="u2"] td.reorder-handle'),
+        page.locator('tr[id="u2"]').locator("xpath=preceding-sibling::tr[1]"),
+    )
+    expect_normalized(page,
+        page.locator("#one"),
+        """
+            Additional Reserve additional tickets beyond your own Additional Optional Ticket Your
+            registration ticket2 Ticket payment installments select how many payments to split the fee into
+        """
+    )
+    expect_normalized(page,
+          page.locator("#one"),
+        """
+            Installments Optional Pay what you want Freely indicate the amount of your donation Pay what you want
+            Optional Surcharge Registration surcharge Surcharge Optional
+        """,
+    )
+    page.locator('[id="u2"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.get_by_text("Reserve additional tickets").click()
+    edit_iframe.get_by_text("Reserve additional tickets").fill("Reserve additional tickets beyond your own2")
+    save_modal(page, edit_iframe)
     expect_normalized(page, page.locator('[id="u2"]'), "Reserve additional tickets beyond your own2")
 
     # change ticket price
     page.get_by_role("link", name="Tickets").first.click()
-    page.get_by_role("link", name="").click()
-    page.locator("#id_price").click()
-    page.locator("#id_price").fill("5")
-    page.locator("#id_description").click()
-    page.locator("#id_description").fill("sadsadsadsa")
-    submit_confirm(page)
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_price").click()
+    edit_iframe.locator("#id_price").fill("5")
+    edit_iframe.locator("#id_description").click()
+    edit_iframe.locator("#id_description").fill("sadsadsadsa")
+    save_modal(page, edit_iframe)
 
 
 def prepare_surcharge(page: Any, live_server: Any) -> None:
@@ -102,20 +131,19 @@ def prepare_surcharge(page: Any, live_server: Any) -> None:
     # Add surcharges
     page.get_by_role("link", name="Surcharges").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_amount").click()
-    page.locator("#id_amount").fill("5")
-    page.locator("#id_date").fill("2024-06-11")
-    just_wait(page)
-    page.locator("#id_date").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_amount").click()
+    edit_iframe.locator("#id_amount").fill("5")
+    fill_date(edit_iframe, "#id_date", "2024-06-11")
+    save_modal(page, edit_iframe)
 
     # set up payments
     go_to(page, live_server, "manage")
-    page.locator("#exe_features").get_by_role("link", name="Features").click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Payments", exact=True).check()
     submit_confirm(page)
     page.get_by_role("checkbox", name="Wire").check()
-    just_wait(page)
+    page.locator("#id_wire_descr").wait_for(state="visible")
     page.locator("#id_wire_descr").click()
     page.locator("#id_wire_descr").fill("dasdsadsa")
     page.locator("#id_wire_fee").click()
@@ -140,47 +168,66 @@ def signup(page: Any, live_server: Any) -> None:
     page.get_by_role("button", name="Continue").click()
     expect_normalized(page, page.locator("#riepilogo"), "Your updated registration total is: 29€")
     submit_confirm(page)
-    expect_normalized(page, page.locator("#one"), "The total registration fee is: 29€")
+
+    # submit profile
+    page.get_by_role("checkbox", name="Authorisation").check()
+    submit_confirm(page)
+
+    expect_normalized(page, page.locator("#one"), "you are about to make a payment of: 29 €")
 
     # check form
-    page.get_by_role("link", name="Event").click()
-    page.get_by_role("link", name="Registration", exact=True).click()
+    sidebar(page, "Your registration")
+    # the registration already exists: unselected options start collapsed
+    expand_options(page)
     expect_normalized(page,
         page.locator("#register_form"),
-        "(*) : These fields are mandatory Additional 0 1 2 3 4 5 Reserve additional tickets beyond your own2 Ticket (*) Standard - 5€ Your registration ticket2 Standard: sadsadsadsa Pay what you want Freely indicate the amount of your donation Surcharge 5€ Registration surcharge",
+        """
+        (*) : These fields are required Additional 0 1 2 3 4 5 Reserve additional tickets beyond your own2
+        Ticket (*) Standard 5€ sadsadsadsa Your registration ticket2
+        Pay what you want Freely indicate the amount of your donation Surcharge 5€ Registration surcharge""",
     )
 
 
-def check_filler(page: Any, live_server: Any) -> None:
-    # set up filler
+def check_reserve(page: Any, live_server: Any) -> None:
+    # set up reserve
     go_to(page, live_server, "test/manage")
-    page.get_by_role("link", name="Features").first.click()
-    page.get_by_role("checkbox", name="Filler").check()
+    sidebar(page, "Features")
+    page.get_by_role("checkbox", name="Reserve").check()
     submit_confirm(page)
-    page.get_by_role("link", name="Event").click()
+
+    sidebar(page, "Event")
     page.locator("#id_form1-max_filler").click()
     page.locator("#id_form1-max_filler").fill("5")
     submit_confirm(page)
 
-    # check filler is not there
+    # check reserve is not there
     go_to(page, live_server, "test/")
-    page.get_by_role("link", name="Registration", exact=True).click()
-    page.get_by_label("Ticket (*)").click()
-    expect(page.get_by_label("Ticket (*)")).to_match_aria_snapshot(
-        '- combobox "Ticket (*)":\n  - option "Standard - 5€" [selected]'
+    sidebar(page, "Your registration")
+    # with a single option left, no show/hide options link is rendered
+    expect(page.locator("#id_ticket_tr")).to_match_aria_snapshot(
+        """
+        - row "Ticket (*) Standard 5€ sadsadsadsa Your registration ticket2":
+          - cell "Ticket (*)"
+          - cell "Standard 5€ sadsadsadsa Your registration ticket2":
+            - radio "Standard 5€ sadsadsadsa" [checked]
+        """
     )
 
     # enable config
     go_to(page, live_server, "test/manage")
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Ticket Filler ").click()
+    page.get_by_role("link", name=re.compile(r"^Reserve ")).click()
     page.locator("#id_filler_always").check()
     submit_confirm(page)
 
-    # check filler is not available
+    # check filler is available
     go_to(page, live_server, "test/")
-    page.get_by_role("link", name="Registration", exact=True).click()
-    page.get_by_label("Ticket (*)").click()
-    expect(page.get_by_label("Ticket (*)")).to_match_aria_snapshot(
-        '- combobox "Ticket (*)":\n  - option "Standard - 5€" [selected]\n  - option "Filler"'
-    )
+    sidebar(page, "Your registration")
+    # the reserve ticket is not the selected one, so it starts collapsed
+    ticket_row = page.locator("#id_ticket_tr")
+    expect(ticket_row.get_by_role("radio", name="Reserve")).to_be_hidden()
+    expand_options(page)
+    expect(ticket_row.get_by_role("radio", name="Standard 5€ sadsadsadsa")).to_be_checked()
+    expect(ticket_row.get_by_role("radio", name="Reserve")).not_to_be_checked()
+    # expanded options are part of the visible text of the row
+    expect_normalized(page, ticket_row, "Ticket (*) Standard 5€ sadsadsadsa Reserve")

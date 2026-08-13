@@ -4,24 +4,26 @@
     {{ member }} - {% trans "Membership requests" %}
 {% endblock title %}
 {% block info %}
-    {% trans "This page displays the application for membership in the organization. You can accept or reject the application" %}
+    {% trans "Evaluate a membership application and approve or reject it, with duplicate detection and document review" %}
 {% endblock info %}
 {% block content %}
     {% include "elements/membership_cf.html" %}
     {% if member_exists %}
-        <h2>{% trans "Warning: there is already an approved member with the same name" %}!</h2>
+        <h2>{% trans "Warning: there is already an approved member with the same name!" %}</h2>
         <hr />
     {% endif %}
-    <h1>{% trans "Request for" %}: {{ member }}</h1>
-    <form action="{{ request.path }}"
-          enctype="multipart/form-data"
-          method="post">
-        {% csrf_token %}
-        <table class="mob ">
-            {{ form.as_table }}
-        </table>
-        <input type="submit" value="{% trans "Confirm" %}">
-    </form>
+    <div class="form_container auto_resize">
+        <h1>{% trans "Request for:" %} {{ member }}</h1>
+        <form action="{{ request.path }}"
+              enctype="multipart/form-data"
+              method="post">
+            {% csrf_token %}
+            <table class="mob ">
+                {{ form.as_table }}
+            </table>
+            <input type="submit" value="{% trans "Confirm" %}">
+        </form>
+    </div>
     <hr class="c" />
     {% if '.pdf' in doc_path %}
         <embed src="{{ member.membership.get_document_filepath }}"
@@ -33,6 +35,7 @@
              src="{{ member.membership.get_document_filepath }}"
              alt="membership request" />
     {% endif %}
+    <a href="{{ member.membership.get_document_filepath }}" target="_blank">{% trans "Download" %}</a>
     <hr class="c" />
     {% if '.pdf' in req_path %}
         <embed src="{{ member.membership.get_request_filepath }}"
@@ -44,4 +47,5 @@
              src="{{ member.membership.get_request_filepath }}"
              alt="membership request" />
     {% endif %}
+    <a href="{{ member.membership.get_request_filepath }}" target="_blank">{% trans "Download" %}</a>
 {% endblock content %}

@@ -1,35 +1,55 @@
 {% load i18n %}
-{% for run in ongoing_runs %}
-    <div class="grid-item">
-        <h2>
-            <a href="{% url 'manage' run.get_slug %}" target="_blank">{{ run }}</a>
-        </h2>
-        <p>
-            <i>{{ run.pretty_dates }}</i>
-            {% if event.parent %}
-                | {% trans "Campaign" %}: {{ event.parent }}
-            {% endif %}
-        </p>
-        <p>
-            {% trans "Status" %}: {{ run.get_development_display }}
-            |
-            <a href="{% url 'gallery' run.get_slug %}" target="_blank">Event link</a>
-            <button class="copy-link-btn"
-                    data-url="{% url 'gallery' run.get_slug %}"
-                    title="{% trans "Copy link to clipboard" %}">
-                <i class="fa-solid fa-copy"></i>
-            </button>
-        </p>
-        <p>
-            <a href="{% url 'register' run.get_slug %}" target="_blank">{{ run.registration_status }}</a>
-            <button class="copy-link-btn"
-                    data-url="{% url 'register' run.get_slug %}"
-                    title="{% trans "Copy link to clipboard" %}">
-                <i class="fa-solid fa-copy"></i>
-            </button>
-            {% if run.registration_counts %}
-                {% for key, count in run.registration_counts.items %}&nbsp;| {{ key }}: {{ count }}{% endfor %}
-            {% endif %}
-        </p>
+{% if ongoing_runs %}
+    <div class="grid-item grid-line ">
+        <table class="go_datatable" no_header_cols="all" no_buttons>
+            <thead>
+                <tr>
+                    <th></th>
+                    <th></th>
+                    <th>{% trans "Event" %}</th>
+                    <th>{% trans "Dates" %}</th>
+                    <th>{% trans "Status" %}</th>
+                    <th>{% trans "Registrations" %}</th>
+                    <th>{% trans "Counts" %}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in ongoing_runs %}
+                    <tr>
+                        <td></td>
+                        <td>
+                            <a href="{% url 'manage' run.slug %}" qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
+                        </td>
+                        <th>
+                            {{ run.name }}
+                            {% if run.parent %}
+                                | {% trans "Campaign:" %} {{ run.parent }}
+                            {% endif %}
+                        </th>
+                        <td>
+                            <p>
+                                <i>{{ run.pretty_dates }}</i>
+                            </p>
+                        </td>
+                        <td>
+                            <a href="{% url 'event' run.slug %}" target="_blank">{{ run.development_display }}</a>
+                        </td>
+                        <td>
+                            <p>
+                                <a href="{% url 'register' run.slug %}" target="_blank">{{ run.registration_status }}</a>
+                            </p>
+                        </td>
+                        <td>
+                            {% if run.registration_counts %}
+                                {% for key, count in run.registration_counts.items %}
+                                    {% include "elements/comma.html" %}
+                                    {{ key }}: {{ count }}
+                                {% endfor %}
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
-{% endfor %}
+{% endif %}

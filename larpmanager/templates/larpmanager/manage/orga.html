@@ -1,45 +1,50 @@
 {% extends "base.html" %}
 {% load i18n static %}
 {% block title %}
-    Dashboard - {{ run }}
+    Dashboard - {{ run.search | truncatechars:50 }}
 {% endblock title %}
 {% block content %}
     <div id="manage">
         {% include "larpmanager/manage/sticky_messages.html" %}
-        {% include "larpmanager/manage/widgets/wwyltd.html" %}
-        <div {% if not old_dashboard %}class="grid"{% else %}class="old_dashboard"{% endif %}>
+        <div {% if effective_version >= 17 %}class="grid"{% else %}class="old_dashboard"{% endif %}>
+            {% include "larpmanager/manage/widgets/demo.html" %}
             {% include "larpmanager/manage/widgets/orga_event.html" %}
             {% include "larpmanager/manage/widgets/orga_registrations.html" %}
             {% include "larpmanager/manage/widgets/orga_accounting.html" %}
-            {% include "larpmanager/manage/widgets/orga_deadline.html" %}
-            {% include "larpmanager/manage/widgets/orga_user_character.html" %}
-            {% include "larpmanager/manage/widgets/orga_casting.html" %}
             {% with list=priorities typ="priorities" %}
                 {% include "larpmanager/manage/widgets/helpers.html" %}
             {% endwith %}
             {% with list=actions typ="actions" %}
                 {% include "larpmanager/manage/widgets/helpers.html" %}
             {% endwith %}
+            {% include "larpmanager/manage/widgets/orga_deadline.html" %}
+            {% include "larpmanager/manage/widgets/orga_user_character.html" %}
+            {% include "larpmanager/manage/widgets/orga_progress.html" %}
+            {% include "larpmanager/manage/widgets/orga_casting.html" %}
+            {% include "larpmanager/manage/widgets/orga_milestones.html" %}
+            {% include "larpmanager/manage/widgets/orga_logs.html" %}
             {% with list=suggestions typ="suggestions" %}
                 {% include "larpmanager/manage/widgets/helpers.html" %}
             {% endwith %}
         </div>
-        <hr />
-        <div class="staff-list">
-            <div class="orga-buttons">
-                <a class="new button" href="{% url 'orga_reload_cache' run.get_slug %}">
-                    <i class="fas fa-sync"></i>
-                    Reset cache
-                </a>
-                <a class="new button" href="{% url 'orga_backup' run.get_slug %}">
-                    <i class="fas fa-save"></i>
-                    Full backup
-                </a>
+        {% if not lite_mode and is_organizer %}
+            <div class="staff-list">
+                <div class="orga-buttons">
+                    <a class="new button" href="{% url 'orga_reload_cache' run.get_slug %}">
+                        <i class="fas fa-sync"></i>
+                        Reset cache
+                    </a>
+                    <a class="new button" href="{% url 'orga_backup' run.get_slug %}">
+                        <i class="fas fa-save"></i>
+                        Backup
+                    </a>
+                    <a class="new button" href="{% url 'orga_restore' run.get_slug %}">
+                        <i class="fas fa-undo"></i>
+                        Restore
+                    </a>
+                </div>
             </div>
-        </div>
-        <p>
-            <a href="#" id="intro_driver">{% trans "Launch guided interface tour" %}</a>
-        </p>
+        {% endif %}
     </div>
 {% endblock content %}
 {% block css %}
@@ -47,9 +52,8 @@
           href="{% static 'node_modules/driver.js/dist/driver.css' %}">
 {% endblock css %}
 {% block js %}
-    {% include "elements/tutorial_query.js" %}
-    {% include "elements/manage_driver.js.html" %}
-    {% include "elements/wwyltd.js.html" %}
+    {% include "elements/dashboard/tutorial_query.js" %}
+    {% include "elements/dashboard/driver.js.html" %}
     <script>
     window.addEventListener('DOMContentLoaded', function() {
         $(document).ready(function() {

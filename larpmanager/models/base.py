@@ -21,12 +21,17 @@ import contextlib
 import os
 import secrets
 import sys
+import time
 from itertools import chain
 from typing import Any, ClassVar
 
+import pycountry
 from django.conf import settings as conf_settings
+from django.core.cache import cache
 from django.core.validators import RegexValidator
 from django.db import IntegrityError, models, transaction
+from django.db.models import Q
+from django.db.models.constraints import UniqueConstraint
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -36,7 +41,7 @@ from pilkit.processors import ResizeToFill
 from safedelete.models import SOFT_DELETE_CASCADE, SafeDeleteModel
 from tinymce.models import HTMLField
 
-from larpmanager.models.utils import UploadToPathAndRename, get_attr, my_uuid_short
+from larpmanager.models.utils import UploadToPathAndRename, get_attr, my_uuid, my_uuid_short
 
 AlphanumericValidator = RegexValidator(r"^[0-9a-z_-]*$", "Only characters allowed are: 0-9, a-z, _, -.")
 
@@ -57,6 +62,31 @@ class UuidMixin(models.Model):
         abstract = True
 
 
+class MediaTokenMixin(models.Model):
+    """Adds a hidden random token used for PDF file paths."""
+
+    media_token = models.CharField(
+        max_length=32,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    _clone_excluded_fields: ClassVar[list[str]] = ["media_token"]
+
+    class Meta:
+        abstract = True
+
+
+class OrderMixin(models.Model):
+    """Adds an order field for user-controlled display ordering."""
+
+    order = models.IntegerField(default=0)
+
+    class Meta:
+        abstract = True
+
+
 class BaseModel(CloneMixin, SafeDeleteModel):
     """Represents BaseModel model."""
 
@@ -71,18 +101,7 @@ class BaseModel(CloneMixin, SafeDeleteModel):
         ordering: ClassVar[list] = ["-updated"]
 
     def upd_js_attr(self, dict_object: dict, attribute_name: str) -> dict:
-        """Update dict object with model attribute value.
-
-        Retrieves the value of the specified attribute from the model instance
-        and adds it to the provided object dictionary.
-
-        Args:
-            dict_object: object dictionary to update
-            attribute_name: Name of the model attribute to retrieve and add
-
-        Returns:
-            Updated dict object dictionary with the new attribute
-        """
+        """Update dict object with model attribute value."""
         dict_object[attribute_name] = get_attr(self, attribute_name)
         return dict_object
 
@@ -125,22 +144,12 @@ class BaseModel(CloneMixin, SafeDeleteModel):
         return super().__str__()
 
     def get_absolute_url(self) -> Any:
-        """Get absolute URL for the model instance.
-
-        Returns:
-            str: URL for the event view using model slug
-
-        """
+        """Get absolute URL for the model instance."""
         # noinspection PyUnresolvedReferences
         return reverse("event", kwargs={"event_slug": self.slug})
 
     def small_text(self) -> Any:
-        """Get truncated text preview.
-
-        Returns:
-            str: First 100 characters of text field or empty string
-
-        """
+        """Get truncated text preview."""
         if hasattr(self, "text"):
             return self.text[:100]
         return ""
@@ -165,12 +174,9 @@ class BaseModel(CloneMixin, SafeDeleteModel):
         serialized_data = {}
 
         # Process concrete and private fields (standard model fields)
-        # Extract field values using Django's field value accessor
         for field in chain(model_options.concrete_fields, model_options.private_fields):
             field_value = field.value_from_object(self)
-            # Only include fields with truthy values to keep dict clean
-            if field_value:
-                serialized_data[field.name] = field_value
+            serialized_data[field.name] = field_value
 
         # Process many-to-many relationships if requested
         if many_to_many:
@@ -186,13 +192,16 @@ class BaseModel(CloneMixin, SafeDeleteModel):
         return serialized_data
 
 
-class FeatureNationality(models.TextChoices):
-    """Represents FeatureNationality model."""
+class FeatureNationality:
+    """Nationality choices from pycountry, sorted by name."""
 
-    ITALY = "it", _("Italy")
+    choices: ClassVar[list] = sorted(
+        [(c.alpha_2.lower(), c.name) for c in pycountry.countries],
+        key=lambda x: x[1],
+    )
 
 
-class FeatureModule(BaseModel):
+class FeatureModule(OrderMixin, BaseModel):
     """Represents FeatureModule model."""
 
     name = models.CharField(max_length=100)
@@ -201,12 +210,10 @@ class FeatureModule(BaseModel):
 
     icon = models.CharField(max_length=100)
 
-    order = models.IntegerField()
-
     nationality = models.CharField(max_length=2, choices=FeatureNationality.choices, blank=True, null=True)
 
 
-class Feature(BaseModel):
+class Feature(OrderMixin, BaseModel):
     """Represents Feature model."""
 
     name = models.CharField(max_length=100)
@@ -214,8 +221,6 @@ class Feature(BaseModel):
     descr = models.TextField(max_length=500, blank=True)
 
     slug = models.SlugField(max_length=100, validators=[AlphanumericValidator], db_index=True, unique=True)
-
-    order = models.IntegerField()
 
     overall = models.BooleanField(default=False)
 
@@ -238,17 +243,34 @@ class Feature(BaseModel):
 
     hidden = models.BooleanField(default=False)
 
+    dependencies = models.ManyToManyField(
+        "self",
+        blank=True,
+        symmetrical=False,
+        related_name="dependents",
+    )
+
     class Meta:
         ordering: ClassVar[list] = ["module", "order"]
 
     def __str__(self) -> str:
-        """Return string representation of the feature.
-
-        Returns:
-            str: Feature name and module combination
-
-        """
+        """Return string representation of the feature."""
         return f"{self.name} - {self.module}"
+
+    @classmethod
+    def get_all_dependencies(cls, feature_ids: list[int]) -> set[int]:
+        """Return all feature IDs needed, including transitive dependencies."""
+        all_ids: set[int] = set(feature_ids)
+        to_process = list(feature_ids)
+        while to_process:
+            deps = cls.objects.filter(pk__in=to_process).prefetch_related("dependencies")
+            to_process = []
+            for feature in deps:
+                for dep in feature.dependencies.all():
+                    if dep.pk not in all_ids:
+                        all_ids.add(dep.pk)
+                        to_process.append(dep.pk)
+        return all_ids
 
 
 class PaymentMethod(UuidMixin, BaseModel):
@@ -277,16 +299,17 @@ class PaymentMethod(UuidMixin, BaseModel):
         options={"quality": 90},
     )
 
+    nationality = models.CharField(
+        max_length=2,
+        choices=FeatureNationality.choices,
+        blank=True,
+        null=True,
+        verbose_name=_("Country"),
+        help_text=_("If set, this payment method is only available for organizations of this country"),
+    )
+
     def as_dict(self, **kwargs: Any) -> Any:  # noqa: ARG002
-        """Convert payment method to dictionary with profile image.
-
-        Args:
-            **kwargs: Additional keyword arguments
-
-        Returns:
-            dict: Payment method data with slug, name, and optional profile URL
-
-        """
+        """Convert payment method to dictionary with profile image."""
         # noinspection PyUnresolvedReferences
         result = {"slug": self.slug, "name": self.name}
         if self.profile:
@@ -319,26 +342,55 @@ class PublisherApiKey(BaseModel):
         return f"{self.name} ({'Active' if self.active else 'Inactive'})"
 
 
-def auto_assign_sequential_numbers(instance: Any) -> None:
-    """Auto-populate number and order fields for model instances."""
+def auto_assign_sequential_numbers(instance: Any) -> None:  # noqa: C901
+    """Auto-populate number and order fields for model instances using cache-based locking."""
     for field_name in ["number", "order"]:
         if hasattr(instance, field_name) and not getattr(instance, field_name):
             queryset = None
+            scope_id = None
             if hasattr(instance, "event") and instance.event:
                 queryset = instance.__class__.objects.filter(event=instance.event)
+                scope_id = f"event_{instance.event.id}"
             if hasattr(instance, "association") and instance.association:
                 queryset = instance.__class__.objects.filter(association=instance.association)
+                scope_id = f"assoc_{instance.association.id}"
             if hasattr(instance, "character") and instance.character:
                 queryset = instance.__class__.objects.filter(character=instance.character)
-            if queryset is not None:
-                # Use select_for_update() to lock rows and prevent race conditions
-                with transaction.atomic():
-                    max_instance = queryset.select_for_update().order_by(f"-{field_name}").first()
-                    if not max_instance:
-                        setattr(instance, field_name, 1)
-                    else:
-                        max_value = getattr(max_instance, field_name)
-                        setattr(instance, field_name, max_value + 1)
+                scope_id = f"char_{instance.character.id}"
+
+            if queryset is not None and scope_id is not None:
+                # Create a unique lock key for this model + scope combination
+                model_name = instance.__class__.__name__
+                lock_key = f"auto_number_lock_{model_name}_{field_name}_{scope_id}"
+
+                # Try to acquire lock with retries (max 3 seconds total)
+                max_retries = 30
+                retry_delay = 0.1  # 100ms
+                lock_acquired = False
+
+                for _ in range(max_retries):
+                    # cache.add() is atomic - returns True only if key doesn't exist
+                    if cache.add(lock_key, "locked", timeout=10):
+                        lock_acquired = True
+                        break
+                    time.sleep(retry_delay)
+
+                if not lock_acquired:
+                    # Fallback: force set the lock and continue (prevents indefinite blocking)
+                    cache.set(lock_key, "locked", timeout=10)
+
+                try:
+                    # Now safely query for max number within transaction
+                    with transaction.atomic():
+                        max_instance = queryset.select_for_update().order_by(f"-{field_name}").first()
+                        if not max_instance:
+                            setattr(instance, field_name, 1)
+                        else:
+                            max_value = getattr(max_instance, field_name)
+                            setattr(instance, field_name, max_value + 1)
+                finally:
+                    # Always release the lock
+                    cache.delete(lock_key)
 
 
 def auto_set_uuid(instance: Any) -> None:
@@ -359,17 +411,35 @@ def auto_set_uuid(instance: Any) -> None:
     raise RuntimeError(msg)
 
 
+def auto_set_media_token(instance: Any) -> None:
+    """Set media_token field if missing value."""
+    if not hasattr(instance, "media_token") or instance.media_token:
+        return
+
+    model_cls = type(instance)
+    for _try in range(UUID_RETRY_LIMIT):
+        token = my_uuid(32)
+        if not model_cls.objects.filter(media_token=token).exists():
+            instance.media_token = token
+            return
+
+    msg = "media_token collision after retries"
+    raise RuntimeError(msg)
+
+
 def debug_set_uuid(instance: Any, *, created: bool) -> None:
     """Simplifiy uuid for debug purposes."""
     # Check if running in PyCharm via pytest runner
-    is_pycharm = (
-        os.getenv("PYCHARM_DEBUG") == "1"
-        or os.getenv("PYCHARM_HOSTED") == "1"
-        or any("_jb_pytest_runner" in arg or "pycharm" in arg.lower() for arg in sys.argv)
+    is_pycharm = os.getenv("PYCHARM_HOSTED") == "1" or any(
+        "_jb_pytest_runner" in arg or "pycharm" in arg.lower() for arg in sys.argv
     )
 
     debug_enviro = (
-        conf_settings.DEBUG or os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true" or is_pycharm
+        conf_settings.DEBUG
+        or os.getenv("CI") == "true"
+        or os.getenv("GITHUB_ACTIONS") == "true"
+        or is_pycharm
+        or getattr(conf_settings, "DEBUG_UUID", False)
     )
     if not created or not hasattr(instance, "uuid") or not debug_enviro:
         return
@@ -384,3 +454,31 @@ def update_model_search_field(model_instance: Any) -> None:
     if hasattr(model_instance, "search"):
         model_instance.search = None
         model_instance.search = str(model_instance)
+
+
+class Config(BaseModel):
+    """Django app configuration for Config."""
+
+    name = models.CharField(max_length=150)
+
+    value = models.CharField(max_length=1000)
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        return self.name
+
+    class Meta:
+        indexes: ClassVar[list] = [
+            models.Index(fields=["name"]),
+        ]
+        constraints: ClassVar[list] = [
+            UniqueConstraint(
+                fields=["name", "deleted"],
+                name="unique_config_with_optional",
+            ),
+            UniqueConstraint(
+                fields=["name"],
+                condition=Q(deleted=None),
+                name="unique_config_without_optional",
+            ),
+        ]

@@ -22,6 +22,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
 from django import forms
+from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -33,10 +34,9 @@ from larpmanager.forms.utils import (
     AssociationMemberS2Widget,
     AssocRegS2Widget,
     DatePickerInput,
-    EventRegS2Widget,
     RunMemberS2Widget,
+    RunRegS2Widget,
     RunS2Widget,
-    get_run_choices,
 )
 from larpmanager.models.accounting import (
     AccountingItemDonation,
@@ -46,8 +46,10 @@ from larpmanager.models.accounting import (
     AccountingItemOutflow,
     AccountingItemPayment,
     Collection,
+    CollectionStatus,
     Discount,
     OtherChoices,
+    PaymentChoices,
     PaymentInvoice,
     RefundRequest,
 )
@@ -65,7 +67,7 @@ class OrgaPersonalExpenseForm(BaseModelFormRun):
     based on enabled features.
     """
 
-    page_info = _("Manage expense items for contributors")
+    page_info = _("Track your personal expense reimbursement requests submitted for this event")
 
     page_title = _("Expenses")
 
@@ -74,18 +76,12 @@ class OrgaPersonalExpenseForm(BaseModelFormRun):
         exclude = ("member", "is_approved", "inv", "hide")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize form and conditionally remove balance field based on feature flag.
-
-        Args:
-            *args: Variable length argument list passed to parent constructor.
-            **kwargs: Arbitrary keyword arguments passed to parent constructor.
-
-        """
+        """Initialize form and conditionally remove balance field based on feature flag."""
         # Initialize parent form with all provided arguments
         super().__init__(*args, **kwargs)
 
         # Remove balance field if Italian balance feature is not enabled
-        if "ita_balance" not in self.params["features"]:
+        if "ita_balance" not in self.params.get("features"):
             self.delete_field("balance")
 
 
@@ -98,7 +94,7 @@ class OrgaExpenseForm(BaseModelFormRun):
 
     page_title = _("Expenses collaborators")
 
-    page_info = _("Manage expenses for contributors")
+    page_info = _("Review and approve expense reimbursement requests submitted by collaborators for this event")
 
     class Meta:
         model = AccountingItemExpense
@@ -110,16 +106,15 @@ class OrgaExpenseForm(BaseModelFormRun):
         super().__init__(*args, **kwargs)
 
         # Configure member widget with run context
-        self.configure_field_run("member", self.params["run"])
+        self.configure_field_run("member", self.params.get("run"))
+        self.fields["member"].required = True
 
         # Remove balance field if Italian balance feature is disabled
-        if "ita_balance" not in self.params["features"]:
+        if "ita_balance" not in self.params.get("features"):
             self.delete_field("balance")
 
         # Remove approval field if organization has disabled expense approval
-        if get_association_config(
-            self.params["event"].association_id, "expense_disable_orga", default_value=False, context=self.params
-        ):
+        if get_association_config(self.params.get("event").association_id, "expense_disable_orga", context=self.params):
             self.delete_field("is_approved")
 
 
@@ -130,46 +125,64 @@ class OrgaTokenForm(BaseModelFormRun):
     within the event accounting system.
     """
 
+    page_info = _("Manage token assignments issued to participants for this event")
+
     class Meta:
         model = AccountingItemOther
-        exclude = ("inv", "hide", "registration", "cancellation", "ref_addit")
-        widgets: ClassVar[dict] = {"member": RunMemberS2Widget, "oth": forms.HiddenInput()}
+        exclude = ("inv", "hide", "registration", "cancellation", "ref_addit", "oth")
+        widgets: ClassVar[dict] = {"member": RunMemberS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize form with token-specific page information and field configuration."""
         super().__init__(*args, **kwargs)
 
         # Set page metadata with token name
-        self.page_info = _("Manage") + f" {self.params['tokens_name']} " + _("assignments")
-        self.page_title = self.params["tokens_name"]
+        self.page_info = _("Manage token assignments issued to participants for this event")
+        self.page_title = self.params.get("tokens_name")
 
-        # Configure initial form values and widget
-        self.initial["oth"] = OtherChoices.TOKEN
-        self.configure_field_run("member", self.params["run"])
+        # Configure field widget
+        self.configure_field_run("member", self.params.get("run"))
+        self.fields["member"].required = True
+
+    def save(self, commit: bool = True) -> AccountingItemOther:  # noqa: FBT001, FBT002
+        """Save form with TOKEN type."""
+        instance = super().save(commit=False)
+        instance.oth = OtherChoices.TOKEN
+        if commit:
+            instance.save()
+        return instance
 
 
 class OrgaCreditForm(BaseModelFormRun):
     """Form for OrgaCredit."""
 
-    page_info = _("Manage credit assignments")
+    page_info = _("Manage credit assignments issued to participants for this event")
 
     class Meta:
         model = AccountingItemOther
-        exclude = ("inv", "hide", "registration", "cancellation", "ref_addit")
-        widgets: ClassVar[dict] = {"member": RunMemberS2Widget, "oth": forms.HiddenInput()}
+        exclude = ("inv", "hide", "registration", "cancellation", "ref_addit", "oth")
+        widgets: ClassVar[dict] = {"member": RunMemberS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize credit form with page title and run-specific member field."""
         super().__init__(*args, **kwargs)
         # Set page title from credit name parameter
-        self.page_title = self.params["credits_name"]
+        self.page_title = self.params.get("credits_name")
 
-        # Configure form for credit transaction type
-        self.initial["oth"] = OtherChoices.CREDIT
-        self.configure_field_run("member", self.params["run"])
+        # Configure field widget
+        self.configure_field_run("member", self.params.get("run"))
+        self.fields["member"].required = True
+
+    def save(self, commit: bool = True) -> AccountingItemOther:  # noqa: FBT001, FBT002
+        """Save form with CREDIT type."""
+        instance = super().save(commit=False)
+        instance.oth = OtherChoices.CREDIT
+        if commit:
+            instance.save()
+        return instance
 
 
-class OrgaPaymentForm(BaseModelFormRun):
+class ExePaymentForm(BaseModelForm):
     """Form for managing payment accounting records.
 
     Handles payment processing, validation, and
@@ -178,19 +191,39 @@ class OrgaPaymentForm(BaseModelFormRun):
 
     page_title = _("Payments")
 
-    page_info = _("Manage payment items")
+    page_info = _("Track and review event payments, and confirm pending ones")
 
     class Meta:
         model = AccountingItemPayment
         exclude = ("inv", "hide", "member", "vat_ticket", "vat_options")
-        widgets: ClassVar[dict] = {"registration": EventRegS2Widget}
+        widgets: ClassVar[dict] = {"registration": AssocRegS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize form and configure registration field for the event."""
+        """Initialize form with field configuration."""
         super().__init__(*args, **kwargs)
 
-        # Configure registration widget with event context and make field required
-        self.configure_field_event("registration", self.params["event"])
+        self._configure_registration()
+
+        # Remove VAT field if feature is not enabled
+        if "vat" not in self.params.get("features"):
+            self.delete_field("vat_ticket")
+            self.delete_field("vat_options")
+
+        # Filter pay choices based on active features
+        features = self.params.get("features", [])
+        available = [PaymentChoices.MONEY]
+        if "tokens" in features:
+            available.append(PaymentChoices.TOKEN)
+        if "credits" in features:
+            available.append(PaymentChoices.CREDIT)
+        self.fields["pay"].choices = [(c.value, c.label) for c in PaymentChoices if c in available]
+        if len(available) == 1:
+            self.fields["pay"].widget = forms.HiddenInput()
+            self.initial["pay"] = PaymentChoices.MONEY
+
+    def _configure_registration(self) -> None:
+        """Configure registration field for association context."""
+        self.configure_field_association("registration", self.params.get("association_id"))
         self.fields["registration"].required = True
 
 
@@ -199,7 +232,7 @@ class ExeOutflowForm(BaseModelForm):
 
     page_title = _("Outflows")
 
-    page_info = _("Manage expense items incurred")
+    page_info = _("Manage outgoing payments linked to events")
 
     class Meta:
         model = AccountingItemOutflow
@@ -213,7 +246,7 @@ class ExeOutflowForm(BaseModelForm):
 
         # Configure run widget with association context if not auto-populated
         if not hasattr(self, "auto_run"):
-            self.configure_field_association("run", self.params["association_id"])
+            self.configure_field_association("run", self.params.get("association_id"))
 
         # Set default payment date to today if not already provided
         if "payment_date" not in self.initial or not self.initial["payment_date"]:
@@ -225,7 +258,7 @@ class ExeOutflowForm(BaseModelForm):
         self.fields["invoice"].required = True
 
         # Remove balance field if Italian balance feature is disabled
-        if "ita_balance" not in self.params["features"]:
+        if "ita_balance" not in self.params.get("features"):
             self.delete_field("balance")
 
 
@@ -243,7 +276,7 @@ class ExeInflowForm(BaseModelForm):
 
     page_title = _("Inflows")
 
-    page_info = _("Manage event revenue other than participants' registration fees")
+    page_info = _("Manage incoming revenue linked to events")
 
     class Meta:
         model = AccountingItemInflow
@@ -257,7 +290,7 @@ class ExeInflowForm(BaseModelForm):
 
         # Set association for run field if not auto-run mode
         if not hasattr(self, "auto_run"):
-            self.configure_field_association("run", self.params["association_id"])
+            self.configure_field_association("run", self.params.get("association_id"))
 
         # Set default payment date to today if not provided
         if "payment_date" not in self.initial or not self.initial["payment_date"]:
@@ -290,61 +323,47 @@ class ExeDonationForm(BaseModelForm):
         """Initialize form and set association for member field widget."""
         super().__init__(*args, **kwargs)
 
-        self.configure_field_association("member", self.params["association_id"])
+        self.configure_field_association("member", self.params.get("association_id"))
+        self.fields["member"].required = True
 
 
-class ExePaymentForm(BaseModelForm):
-    """Form for ExePayment."""
+class OrgaPaymentForm(ExePaymentForm):
+    """Form for managing payment accounting records in event context."""
 
-    page_title = _("Payments")
-
-    page_info = _("Manage payment items")
-
-    class Meta:
-        model = AccountingItemPayment
-        exclude = ("inv", "hide", "member", "vat_ticket", "vat_options")
-        widgets: ClassVar[dict] = {"registration": AssocRegS2Widget}
+    class Meta(ExePaymentForm.Meta):
+        widgets: ClassVar[dict] = {"registration": RunRegS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize form with association-specific field configuration."""
+        """Initialize form with run-specific field configuration."""
+        self.auto_run = True
         super().__init__(*args, **kwargs)
+        self.fields["registration"].required = True
 
-        # Configure registration field widget with association context
-        self.configure_field_association("registration", self.params["association_id"])
-
-        # Remove VAT field if feature is not enabled
-        if "vat" not in self.params["features"]:
-            self.delete_field("vat_ticket")
-            self.delete_field("vat_options")
+    def _configure_registration(self) -> None:
+        """Configure registration field filtered by current run."""
+        self.configure_field_run("registration", self.params.get("run"))
 
 
 class ExeInvoiceForm(BaseModelForm):
     """Form for ExeInvoice."""
 
-    page_title = _("Invoices")
+    page_title = _("Payments")
 
-    page_info = _("Manage invoices")
+    page_info = _("Browse all payment invoices and confirm submitted ones to update their status")
 
     class Meta:
         model = PaymentInvoice
-        exclude = ("hide", "registration", "key", "idx", "txn_id")
-        widgets: ClassVar[dict] = {"member": AssociationMemberS2Widget}
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize form and configure member widget with association."""
-        super().__init__(*args, **kwargs)
-
-        self.configure_field_association("member", self.params["association_id"])
+        fields = ("invoice",)
 
 
 class ExeCreditForm(BaseModelForm):
     """Form for ExeCredit."""
 
-    page_info = _("Manage credit assignments")
+    page_info = _("Manage all credit assignments issued to members across events")
 
     class Meta:
         model = AccountingItemOther
-        exclude = ("inv", "hide", "registration", "cancellation", "ref_addit")
+        exclude = ("inv", "hide", "registration", "cancellation", "ref_addit", "oth")
         widgets: ClassVar[dict] = {"member": AssociationMemberS2Widget, "run": RunS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -354,22 +373,28 @@ class ExeCreditForm(BaseModelForm):
         # Set page title with credit name
         self.page_title = _("Assignment") + f" {self.params['credits_name']}"
 
-        # Configure run choices and association widgets
-        get_run_choices(self)
-        self.configure_field_association("member", self.params["association_id"])
-        self.configure_field_association("run", self.params["association_id"])
+        # Configure run and member widgets with association context
+        self.configure_field_association("member", self.params.get("association_id"))
+        self.configure_field_association("run", self.params.get("association_id"))
+        self.fields["member"].required = True
 
-        # Set other field as hidden with credit value
-        self.fields["oth"].widget = forms.HiddenInput()
-        self.initial["oth"] = OtherChoices.CREDIT
+    def save(self, commit: bool = True) -> AccountingItemOther:  # noqa: FBT001, FBT002
+        """Save form with CREDIT type."""
+        instance = super().save(commit=False)
+        instance.oth = OtherChoices.CREDIT
+        if commit:
+            instance.save()
+        return instance
 
 
 class ExeTokenForm(BaseModelForm):
     """Form for ExeToken."""
 
+    page_info = _("Manage all token assignments issued to members across events")
+
     class Meta:
         model = AccountingItemOther
-        exclude = ("inv", "hide", "registration", "cancellation", "ref_addit")
+        exclude = ("inv", "hide", "registration", "cancellation", "ref_addit", "oth")
         widgets: ClassVar[dict] = {"member": AssociationMemberS2Widget, "run": RunS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -378,16 +403,19 @@ class ExeTokenForm(BaseModelForm):
 
         # Set page title and info with token name
         self.page_title = _("Assignment") + f" {self.params['tokens_name']}"
-        self.page_info = _("Manage") + f" {self.params['tokens_name']} " + _("assignments")
 
-        # Configure run choices and association filtering
-        get_run_choices(self)
-        self.configure_field_association("member", self.params["association_id"])
-        self.configure_field_association("run", self.params["association_id"])
+        # Configure run and member widgets with association context
+        self.configure_field_association("member", self.params.get("association_id"))
+        self.configure_field_association("run", self.params.get("association_id"))
+        self.fields["member"].required = True
 
-        # Hide 'oth' field and set default value
-        self.fields["oth"].widget = forms.HiddenInput()
-        self.initial["oth"] = OtherChoices.TOKEN
+    def save(self, commit: bool = True) -> AccountingItemOther:  # noqa: FBT001, FBT002
+        """Save form with TOKEN type."""
+        instance = super().save(commit=False)
+        instance.oth = OtherChoices.TOKEN
+        if commit:
+            instance.save()
+        return instance
 
 
 class ExeExpenseForm(BaseModelForm):
@@ -395,7 +423,7 @@ class ExeExpenseForm(BaseModelForm):
 
     page_title = _("Expenses")
 
-    page_info = _("Manage expense items for contributors")
+    page_info = _("Review and approve expense claims submitted by collaborators")
 
     class Meta:
         model = AccountingItemExpense
@@ -406,9 +434,8 @@ class ExeExpenseForm(BaseModelForm):
         """Initialize form with run choices and association-specific widget configuration."""
         super().__init__(*args, **kwargs)
 
-        # Configure run choices and set association context for widgets
-        get_run_choices(self)
-        self.configure_field_association("member", self.params["association_id"])
+        # Configure run and member widgets with association context
+        self.configure_field_association("member", self.params.get("association_id"))
         self.configure_field_association("run", self.params["association_id"])
 
         # Remove balance field if feature not enabled
@@ -420,7 +447,7 @@ class DonateForm(MembershipForm):
     """Form for Donate."""
 
     amount = forms.DecimalField(min_value=0.01, max_value=1000, decimal_places=2)
-    descr = forms.CharField(max_length=1000, widget=forms.Textarea(attrs={"rows": 2}))
+    descr = forms.CharField(max_length=1000, widget=forms.Textarea(attrs={"rows": 2}), label=_("Description"))
 
 
 class CollectionForm(BaseAccForm):
@@ -440,10 +467,12 @@ class PaymentForm(BaseAccForm):
         self.registration = kwargs.pop("registration")
         super().__init__(*args, **kwargs)
 
-        # Configure amount field with dynamic validation based on registration balance
+        # Configure amount field with dynamic validation based on registration balance.
+        # Optionally increase it with membership bundled fee.
+        membership_fee = self.context.get("membership_fee_bundled", 0) or 0
         self.fields["amount"] = forms.DecimalField(
             min_value=0.01,
-            max_value=self.registration.tot_iscr - self.registration.tot_payed,
+            max_value=self.registration.tot_iscr - self.registration.tot_payed + membership_fee,
             decimal_places=2,
             initial=self.context["quota"],
         )
@@ -455,7 +484,6 @@ class CollectionNewForm(BaseModelForm):
     class Meta:
         model = Collection
         fields = ("name",)
-        widgets: ClassVar[dict] = {"cod": forms.HiddenInput()}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize collection new form."""
@@ -479,11 +507,18 @@ class ExeCollectionForm(CollectionNewForm):
         # Set association for member widget filtering
         self.configure_field_association("member", self.params["association_id"])
 
+    def clean(self) -> dict:
+        """Validate that a member is selected when status is set to PAYED."""
+        cleaned_data = super().clean()
+        if cleaned_data.get("status") == CollectionStatus.PAYED and not cleaned_data.get("member"):
+            self.add_error("member", _("A member must be selected to mark the collection as paid"))
+        return cleaned_data
+
 
 class OrgaDiscountForm(BaseModelForm):
     """Form for OrgaDiscount."""
 
-    page_info = _("Manage discounts")
+    page_info = _("Configure event discounts, discount types, values, and promo codes.")
 
     page_title = _("Discount")
 
@@ -496,7 +531,7 @@ class OrgaDiscountForm(BaseModelForm):
         """Initialize form with dynamically generated run selection field.
 
         Creates a multiple choice field with checkboxes for all runs in the same event
-        as the provided run parameter. Pre-selects runs associated with the instance.
+        as the provided run parameter. Pre-selects the instance runs, or the current run when new.
         """
         super().__init__(*args, **kwargs)
 
@@ -509,18 +544,18 @@ class OrgaDiscountForm(BaseModelForm):
             choices=choices,
             widget=widget,
             required=False,
-            help_text=_("Indicates the sessions for which the discount is available"),
+            help_text=_("The sessions for which the discount is available"),
         )
 
-        # Pre-populate field with existing runs if editing an instance
+        # Pre-populate field with existing runs, or the current run for new discounts
         if self.instance and self.instance.pk:
             self.initial["runs"] = [r.id for r in self.instance.runs.all()]
+        else:
+            self.initial["runs"] = [self.params["run"].id]
 
 
 class InvoiceSubmitForm(BaseForm):
     """Form for InvoiceSubmit."""
-
-    cod = forms.CharField(widget=forms.HiddenInput())
 
     class Meta:
         abstract = True
@@ -593,19 +628,19 @@ class RefundRequestForm(BaseModelForm):
         fields = ("details", "value")
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize form with member-specific credit validation.
-
-        Args:
-            member: Member instance to extract credit limit from
-            *args: Variable length argument list passed to parent
-            **kwargs: Arbitrary keyword arguments passed to parent
-
-        """
+        """Initialize form with member-specific credit validation."""
         # Extract member from kwargs and initialize parent form
         super().__init__(*args, **kwargs)
 
-        # Set value field with max value constraint from member's credit
-        self.fields["value"] = forms.DecimalField(max_value=self.params["membership"].credit, decimal_places=2)
+        # Set value field with min/max constraints from member's credit
+        self.fields["value"] = forms.DecimalField(
+            min_value=Decimal("0.01"),
+            max_value=self.params["membership"].credit,
+            max_digits=10,
+            decimal_places=2,
+            initial=self.params["membership"].credit,
+            help_text=_("The amount of reimbursement desired (can't be higher than your current credits)"),
+        )
 
 
 class ExeRefundRequestForm(BaseModelForm):
@@ -630,7 +665,11 @@ class ExePaymentSettingsForm(BaseModelForm):
 
     page_title = _("Payment Methods")
 
-    page_info = _("Manage payment methods")
+    page_info = _(
+        "Enable or disable payment methods available at checkout, and configure credentials for each active payment gateway"
+    )
+
+    load_templates: ClassVar[list] = ["payment-details"]
 
     load_js: ClassVar[list] = ["payment-details"]
 
@@ -654,9 +693,14 @@ class ExePaymentSettingsForm(BaseModelForm):
 
         self.prevent_canc = True
 
-        self.fields["payment_methods"].queryset = self.fields["payment_methods"].queryset.order_by("id")
+        assoc_nationality = getattr(self.instance, "nationality", None) or ""
+        nationality_filter = (
+            models.Q(nationality__isnull=True) | models.Q(nationality="") | models.Q(nationality=assoc_nationality)
+        )
 
-        self.methods = PaymentMethod.objects.order_by("id")
+        self.fields["payment_methods"].queryset = PaymentMethod.objects.filter(nationality_filter).order_by("id")
+
+        self.methods = PaymentMethod.objects.filter(nationality_filter).order_by("id")
         self.section_descriptions = {}
         for el in self.methods:
             self.section_descriptions[el.name] = el.instructions
@@ -674,9 +718,9 @@ class ExePaymentSettingsForm(BaseModelForm):
                 label = el.replace(f"{method.slug}_", "")
 
                 help_dict = {
-                    "descr": _("Description of this payment method to be displayed to the user"),
+                    "descr": _("Description of this payment method shown to the user."),
                     "fee": _(
-                        "Percentage to be retained by the payment system - enter the value as a number, without the percentage symbol",
+                        "Percentage retained by the payment system. Enter the value as a number without the percentage symbol.",
                     ),
                 }
                 if label in help_dict:

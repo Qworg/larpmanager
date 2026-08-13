@@ -20,34 +20,39 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ObjectDoesNotExist
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import format_html, format_html_join
 from django.utils.translation import gettext_lazy as _
 
-from larpmanager.accounting.base import is_registration_provisional
+from larpmanager.accounting.base import _format_decimal, is_registration_provisional
+from larpmanager.accounting.member import get_membership_fee_for_reg
 from larpmanager.cache.accounting import clear_registration_accounting_cache
-from larpmanager.cache.config import get_event_config
+from larpmanager.cache.config import get_association_config, get_event_config
 from larpmanager.cache.feature import get_event_features
+from larpmanager.cache.question import get_cached_registration_questions, skip_registration_question
 from larpmanager.cache.registration import clear_registration_counts_cache, get_registration_counts
-from larpmanager.cache.widget import clear_widget_cache
-from larpmanager.models.accounting import PaymentInvoice, PaymentStatus, PaymentType
-from larpmanager.models.event import Event, PreRegistration, Run
+from larpmanager.models.accounting import AccountingItemMembership, PaymentInvoice, PaymentStatus, PaymentType
+from larpmanager.models.casting import Casting
+from larpmanager.models.event import Event, PreRegistration, RegistrationStatus, Run
 from larpmanager.models.form import (
     BaseQuestionType,
+    QuestionApplicable,
     RegistrationAnswer,
     RegistrationChoice,
     RegistrationOption,
-    RegistrationQuestion,
     WritingChoice,
+    WritingOption,
 )
-from larpmanager.models.member import Member, MembershipStatus, get_user_membership
+from larpmanager.models.member import Member, Membership, MembershipStatus, get_user_membership
 from larpmanager.models.registration import Registration, RegistrationCharacterRel, RegistrationTicket, TicketTier
 from larpmanager.models.writing import Character, CharacterConfig, CharacterStatus
-from larpmanager.utils.core.common import format_datetime, get_time_diff_today
-from larpmanager.utils.core.exceptions import RewokedMembershipError, SignupError, WaitingError
+from larpmanager.utils.core.common import feature_visible, format_datetime, get_time_diff_today
+from larpmanager.utils.core.exceptions import PendingApprovalError, RewokedMembershipError, SignupError, WaitingError
 
 if TYPE_CHECKING:
     from django.db.models import QuerySet
@@ -99,9 +104,7 @@ def registration_available(run: Run, features: dict, run_status: dict, context: 
             or remaining_primary_tickets * 1.0 / run.event.max_pg < percentage_threshold_for_urgency
         ):
             run_status["count"] = remaining_primary_tickets
-            run_status["additional"] = (
-                _(" Hurry: only %(num)d tickets available") % {"num": remaining_primary_tickets} + "."
-            )
+            run_status["additional"] = _(" Hurry: only %(num)d tickets available.") % {"num": remaining_primary_tickets}
         return
 
     # Check if filler tickets are available (fallback option)
@@ -144,9 +147,7 @@ def _available_waiting(run: Run, run_status: dict, registration_counts: dict) ->
         if remaining_waiting_spots > 0:
             run_status["waiting"] = True
             run_status["count"] = remaining_waiting_spots
-            run_status["additional"] = (
-                _(" Hurry: only %(num)d tickets available") % {"num": remaining_waiting_spots} + "."
-            )
+            run_status["additional"] = _(" Hurry: only %(num)d tickets available.") % {"num": remaining_waiting_spots}
             return True
 
     # No waiting list spots available
@@ -181,7 +182,7 @@ def _available_filler(run: Run, run_status: dict, registration_counts: Any) -> b
             run_status["filler"] = True
             run_status["count"] = remaining_filler
             # Add urgency message for limited availability
-            run_status["additional"] = _(" Hurry: only %(num)d tickets available") % {"num": remaining_filler} + "."
+            run_status["additional"] = _(" Hurry: only %(num)d tickets available.") % {"num": remaining_filler}
             return True
 
     # No filler tickets available
@@ -189,16 +190,7 @@ def _available_filler(run: Run, run_status: dict, registration_counts: Any) -> b
 
 
 def get_match_reg(r: Run, my_regs: list[Registration]) -> Registration | None:
-    """Find registration matching the given run ID.
-
-    Args:
-        r: Run object to match against
-        my_regs: List of registration objects to search
-
-    Returns:
-        Matching registration or None if not found
-
-    """
+    """Find registration matching the given run ID."""
     # Iterate through registrations to find matching run
     for m in my_regs:
         if m and m.run_id == r.id:
@@ -206,7 +198,62 @@ def get_match_reg(r: Run, my_regs: list[Registration]) -> Registration | None:
     return None
 
 
-def registration_status_signed(  # noqa: C901 - Complex registration status logic with feature checks
+def _status_membership_fee(
+    run: Run, member: Member, user_membership: Membership, run_status: dict, registration_text: str
+) -> bool:
+    """Check if we need to show text regarding membership payment."""
+    if user_membership.status != MembershipStatus.ACCEPTED:
+        return False
+
+    fee = int(get_association_config(run.event.association_id, "membership_fee"))
+    if not fee:
+        return False
+
+    current_year = timezone.now().year
+    # Check if event is in current year and if membership fee has been paid
+    if not run.start or run.start.year != current_year:
+        return False
+
+    # Check if membership fee exists for current year
+    membership_fee_exists = AccountingItemMembership.objects.filter(
+        member=member,
+        association_id=run.event.association_id,
+        year=current_year,
+    ).exists()
+
+    if membership_fee_exists:
+        return False
+
+    # Check if there's a pending membership payment
+    pending_membership_payment = PaymentInvoice.objects.filter(
+        member=member,
+        association_id=run.event.association_id,
+        status=PaymentStatus.SUBMITTED,
+        typ=PaymentType.MEMBERSHIP,
+    ).exists()
+
+    if pending_membership_payment:
+        return False
+
+    membership_url = reverse("accounting_membership")
+    run_status["text"] = registration_text
+    run_status["status_type"] = "action_needed"
+    run_status["action"] = {
+        "url": membership_url,
+        "label": _("Pay membership fee"),
+        "label_long": _(
+            "Pay the %(year)d annual membership fee of %(amount)s%(currency)s, required to attend this event"
+        )
+        % {
+            "year": current_year,
+            "amount": fee,
+            "currency": run.event.association.get_currency_symbol(),
+        },
+    }
+    return True
+
+
+def registration_status_signed(  # noqa: C901, PLR0911 - Complex registration status logic with feature checks
     run: Run,
     registration: Registration,
     member: Member,
@@ -236,6 +283,17 @@ def registration_status_signed(  # noqa: C901 - Complex registration status logi
     if context is None:
         context = {}
 
+    # Signup request still awaiting organizer approval: nothing else to check yet
+    if registration.pending:
+        run_status["text"] = _("Signup request pending")
+        run_status["status_type"] = "request_pending"
+        run_status["action"] = {
+            "label": _("Awaiting approval"),
+            "label_long": _("Your signup request is awaiting organizer approval"),
+        }
+        run_status["can_pay"] = False
+        return
+
     # Initialize character registration status for the run
     registration_status_characters(run, registration, run_status, features, context)
 
@@ -243,17 +301,18 @@ def registration_status_signed(  # noqa: C901 - Complex registration status logi
     user_membership = get_user_membership(member, run.event.association_id)
 
     # Build base registration message with ticket info if available
-    registration_message = _("Registration confirmed")
     is_provisional = is_registration_provisional(registration, features=features, event=run.event, context=context)
-
-    # Update message for provisional registrations
-    if is_provisional:
-        registration_message = _("Provisional registration")
+    registration_message, registration_message_long = _registration_messages(
+        run, registration, is_provisional=is_provisional
+    )
 
     # Append ticket name if ticket exists
     if registration.ticket:
         registration_message += f" ({registration.ticket.name})"
-    registration_text = f"<a href='{register_url}'>{registration_message}</a>"
+        registration_message_long += f" ({registration.ticket.name})"
+    registration_text = registration_message
+    run_status["text_long"] = registration_message_long
+    run_status["url"] = register_url
 
     # Handle membership feature requirements and status checks
     if "membership" in features:
@@ -264,44 +323,94 @@ def registration_status_signed(  # noqa: C901 - Complex registration status logi
         # Handle incomplete membership applications (empty, joined, uploaded)
         if user_membership.status in [MembershipStatus.EMPTY, MembershipStatus.JOINED, MembershipStatus.UPLOADED]:
             membership_url = reverse("membership")
-            completion_message = _("please upload your membership application to proceed") + "."
-            text_url = f", <a href='{membership_url}'>{completion_message}</a>"
-            run_status["text"] = registration_text + text_url
+            run_status["text"] = registration_text
+            run_status["status_type"] = "action_needed"
+            run_status["action"] = {
+                "url": membership_url,
+                "label": _("Upload membership application"),
+                "label_long": _(
+                    "Fill in and upload your membership application, needed before you can pay for your registration"
+                ),
+            }
+            run_status["can_pay"] = False
             return
 
         # Handle pending membership approval (submitted but not approved)
         if user_membership.status in [MembershipStatus.SUBMITTED]:
-            run_status["text"] = registration_text + ", " + _("awaiting member approval to proceed with payment")
+            run_status["text"] = registration_text
+            run_status["status_type"] = "pending"
+            run_status["action"] = {
+                "label": _("Pending approval"),
+                "label_long": _(
+                    "Your membership application is being reviewed by the organization. "
+                    "Payment will be available once it has been approved."
+                ),
+            }
+            run_status["can_pay"] = False
             return
 
-    # Handle payment feature processing and related status updates
-    # Process payment status and return if payment handling is complete
-    if "payment" in features and _status_payment(registration_text, registration, run_status, context):
+    # Set base text before payment check (may be overridden for submitted/wire cases)
+    run_status["text"] = registration_text
+
+    # Check payment status and return if payment handling is complete
+    if "payment" in features and _status_payment(register_url, registration, run_status, context):
+        return
+
+    # Check for missing membership fee if membership feature is enabled
+    if "membership" in features and _status_membership_fee(run, member, user_membership, run_status, registration_text):
         return
 
     # Check for incomplete user profile and prompt completion
     if not user_membership.compiled:
         profile_url = reverse("profile")
-        completion_message = _("please fill in your profile") + "."
-        text_url = f", <a href='{profile_url}'>{completion_message}</a>"
-        run_status["text"] = registration_text + text_url
+        run_status["text"] = registration_text
+        run_status["status_type"] = "action_needed"
+        run_status["action"] = {
+            "url": profile_url,
+            "label": _("Complete your profile"),
+            "label_long": _("Fill in the missing information in your profile to complete your registration"),
+        }
         return
 
-    # Handle provisional registration status (no further action needed)
+    # Handle provisional registration status
     if is_provisional:
+        payment_url = reverse("accounting_registration", args=[registration.uuid])
         run_status["text"] = registration_text
+        run_status["status_type"] = "provisional"
+        run_status["action"] = {
+            "url": payment_url,
+            "label": _("Proceed with payment"),
+            "label_long": _("Your registration is provisional: complete the payment to confirm your spot"),
+        }
         return
 
     # Set final confirmed registration status for completed registrations
     run_status["text"] = registration_text
 
-    # Add patron appreciation message for patron tier tickets
-    if registration.ticket and registration.ticket.tier == TicketTier.PATRON:
-        run_status["text"] += " " + _("Thanks for your support") + "!"
+
+def _registration_messages(run: Run, registration: Registration, *, is_provisional: bool) -> tuple[str, str]:
+    """Build the short and long registration status messages."""
+    if not is_provisional:
+        return _("Registration confirmed"), _("Your registration for this event has been confirmed")
+
+    registration_message = _("Provisional registration")
+    registration_message_long = _("Your registration is provisional, and will be confirmed once payment is made")
+    remaining_amount = (registration.tot_iscr or 0) - (registration.tot_payed or 0)
+    if remaining_amount > 0:
+        registration_message_long = _(
+            "Your registration is provisional, and will be confirmed once the payment of %(amount)s%(currency)s is made"
+        ) % {
+            "amount": _format_decimal(remaining_amount),
+            "currency": run.event.association.get_currency_symbol(),
+        }
+    return registration_message, registration_message_long
 
 
 def _status_payment(
-    register_text: str, registration: Registration, run_status: dict, context: dict | None = None
+    register_url: str,
+    registration: Registration,
+    run_status: dict,
+    context: dict | None = None,
 ) -> bool:
     """Check payment status and update registration status text accordingly.
 
@@ -309,7 +418,7 @@ def _status_payment(
     appropriate messaging and links to payment processing pages.
 
     Args:
-        register_text: Base registration status text to append to
+        register_url: URL for the registration page
         registration: The registration object with payment details
         run_status: Dictionary with run status
         context: Optional context dictionary containing cached data:
@@ -322,6 +431,13 @@ def _status_payment(
     # Extract values from context dictionary if provided
     if context is None:
         context = {}
+
+    ticket_suffix = f" ({registration.ticket.name})" if registration.ticket else ""
+
+    submitted_text = _("Payment submitted") + ticket_suffix
+    submitted_text_long = _("Your payment has been submitted, and is awaiting manual verification") + ticket_suffix
+
+    run_status["url"] = register_url
 
     payment_invoices_dict = context.get("payment_invoices_dict")
 
@@ -366,41 +482,108 @@ def _status_payment(
 
     # Handle pending payment status
     if pending_invoices:
-        run_status["text"] = register_text + ", " + _("payment pending confirmation")
+        run_status["text"] = submitted_text
+        run_status["text_long"] = submitted_text_long
+        run_status["status_type"] = "pending"
+        run_status["action"] = {
+            "label": _("Payment awaiting verification"),
+            "label_long": _(
+                "Your payment has been received and is being verified by the organizers; no further action is needed at the moment"
+            ),
+        }
+        context["pending_invoices"] = True
+        run_status["payment_pending"] = True
         return True
 
     # Process payment alerts for unpaid registrations
     if registration.alert:
-        # Handle wire transfer specific messaging
-        if wire_created_invoices:
-            payment_url = reverse("accounting_registration", args=[registration.uuid])
-            message = _("to confirm it proceed with payment") + "."
-            text_url = f", <a href='{payment_url}'>{message}</a>"
-            note = _("If you have made a transfer, please upload the receipt for it to be processed") + "!"
-            run_status["text"] = f"{register_text}{text_url} ({note})"
-            return True
-
-        # Handle general payment alert with deadline warning
         payment_url = reverse("accounting_registration", args=[registration.uuid])
-        message = _("to confirm it proceed with payment") + "."
-        text_url = f", <a href='{payment_url}'>{message}</a>"
 
-        # Add cancellation warning if deadline passed
+        label = ""
+        label_long = ""
         if registration.deadline < 0:
-            text_url += "<i> (" + _("If no payment is received, registration may be cancelled") + ")</i>"
+            label = _("Payment overdue: %(amount)s%(currency)s")
+            label_long = _(
+                "The payment deadline has passed: settle the outstanding %(amount)s%(currency)s as soon as possible to keep your registration"
+            )
+        elif registration.quota and registration.deadline > 0:
+            label = _("Payment due: %(amount)s%(currency)s within %(days)d days")
+            label_long = _(
+                "A payment of %(amount)s%(currency)s is due within %(days)d days to confirm your registration"
+            )
 
-        run_status["text"] = register_text + text_url
+        note = None
+        if wire_created_invoices:
+            note = _("If you have made a wire transfer, please upload its receipt for processing")
+
+        total_amount = registration.quota
+        if context.get("membership_fee") == "bundled" and context.get("membership_amount"):
+            membership_amount = Decimal(str(context["membership_amount"]))
+            total_amount = (total_amount or 0) + membership_amount
+            if note is None and registration.run.start:
+                note = (
+                    _("Includes membership fee")
+                    + f" {registration.run.start.year}: {_format_decimal(membership_amount)}{registration.run.event.association.get_currency_symbol()}"
+                )
+
+        label_params = {
+            "amount": _format_decimal(total_amount),
+            "currency": registration.run.event.association.get_currency_symbol(),
+            "days": registration.deadline,
+        }
+        run_status["status_type"] = "action_needed"
+        run_status["action"] = {
+            "url": payment_url,
+            "label": label % label_params,
+            "label_long": label_long % label_params,
+            "note": note,
+        }
+
         return True
 
     return False
 
 
-def registration_status(  # noqa: C901
-    run: Run,
-    member: Member,
-    context: dict,
-    registration: Registration | None = None,
-) -> dict:
+def _set_membership_context(context: dict, run: Run, member: Member, registration: Any) -> None:
+    """Set membership data in context for template rendering."""
+    if not run.start or "membership" not in context.get("features", {}):
+        return
+    association_id = run.event.association_id
+    event_year = run.start.year
+    context["membership_amount"] = get_association_config(association_id, "membership_fee")
+    currency_symbol = run.event.association.get_currency_symbol()
+    context["membership_amount_display"] = ""
+    if context["membership_amount"]:
+        amount = Decimal(str(context["membership_amount"]))
+        context["membership_amount_display"] = f"({_format_decimal(amount)}{currency_symbol})"
+
+    paid_item = AccountingItemMembership.objects.filter(
+        year=event_year,
+        member=member,
+        association_id=association_id,
+        deleted__isnull=True,
+    ).first()
+    if paid_item:
+        context["membership_fee"] = "done"
+        context["membership_amount_paid"] = paid_item.value
+        context["membership_amount_paid_display"] = ""
+        if paid_item.value:
+            context["membership_amount_paid_display"] = f"({_format_decimal(paid_item.value)}{currency_symbol})"
+        return
+
+    membership_fee_separated = get_association_config(association_id, "membership_fee_separated")
+    if membership_fee_separated:
+        if timezone.now().year != event_year:
+            context["membership_fee"] = "future"
+        else:
+            context["membership_fee"] = "todo"
+        return
+
+    if get_membership_fee_for_reg(association_id, member.id, run, registration):
+        context["membership_fee"] = "bundled"
+
+
+def registration_status(context: dict, run: Run, member: Member) -> dict:
     """Determine registration status and availability for users.
 
     Checks registration constraints, deadlines, and feature requirements
@@ -416,7 +599,6 @@ def registration_status(  # noqa: C901
             - character_rels_dict: Dictionary mapping registration IDs to lists of RegistrationCharacterRel objects
             - payment_invoices_dict: Dictionary mapping registration IDs to lists of PaymentInvoice objects
             - pre_registrations_dict: Dictionary mapping event IDs to PreRegistration objects
-        registration: Optional provided registration
 
     Returns:
         Dict with run status informations
@@ -426,12 +608,28 @@ def registration_status(  # noqa: C901
     if context is None:
         context = {}
 
-    run_status = {"open": True, "details": "", "text": "", "additional": ""}
+    run_status = {
+        "open": True,
+        "details": "",
+        "text": "",
+        "text_long": "",
+        "additional": "",
+        "can_pay": True,
+        "registration": None,
+    }
 
     # Find user's registration if not already provided
-    if registration is None:
-        registration = registration_find(run, member, context)
+    cached_registrations = context.get("my_regs")
+    if cached_registrations is not None:
+        registration = cached_registrations.get(run.id) or (registration_find(run, member) if member else None)
         context["registration"] = registration
+    elif "registration" in context:
+        registration = context["registration"]
+    else:
+        registration = registration_find(run, member)
+        context["registration"] = registration
+
+    run_status["registration"] = registration
 
     features = _get_features_map(run, context)
 
@@ -444,69 +642,121 @@ def registration_status(  # noqa: C901
             return run_status
 
         if registration:
+            _set_membership_context(context, run, member, registration)
             registration_status_signed(run, registration, member, features, register_url, run_status, context)
             return run_status
 
     if run.end and get_time_diff_today(run.end) < 0:
         return run_status
 
-    # check pre-register
-    if get_event_config(run.event_id, "pre_register_active", default_value=False, context=context):
-        _status_preregister(run, member, run_status, context)
+    return _check_run_status(context, run, member, run_status, register_url)
 
-    current_datetime = timezone.now()
-    # check registration open
-    if "registration_open" in features:
+
+def _check_run_status(context: dict, run: Run, member: Member, run_status: dict, register_url: str) -> dict:
+    """Fill run status dict based on run registrations status field."""
+    # Check registration status field
+    status = run.registration_status
+
+    # Handle closed status
+    if status == RegistrationStatus.CLOSED:
+        run_status["open"] = False
+        run_status["text"] = _("Registration closed")
+        run_status["text_long"] = _("Registrations for this event are currently closed")
+        return run_status
+
+    # Handle external registration - redirect is handled in view layer
+    if status == RegistrationStatus.EXTERNAL:
+        run_status["open"] = True
+        run_status["text"] = _("Registration is open!")
+        run_status["text_long"] = _("Registrations are open: sign up now to secure your spot!")
+        run_status["url"] = register_url
+        return run_status
+
+    # Handle pre-registration status
+    if status == RegistrationStatus.PRE:
+        return _status_preregister(run, member, run_status, context)
+
+    # Handle future registration opening, or normal open
+    return _status_future_open(run, register_url, run_status)
+
+
+def _status_future_open(run: Run, register_url: str, run_status: dict) -> dict:
+    """Update run status based on availability."""
+    if run.registration_status == RegistrationStatus.FUTURE:
+        current_datetime = timezone.now()
+
+        run_status["open"] = False
+        run_status["text"] = run_status.get("text") or _("Registrations not open!")
+        run_status["text_long"] = run_status.get("text_long") or _("Registrations for this event have not opened yet")
+
         if not run.registration_open:
-            run_status["open"] = False
-            run_status["text"] = run_status.get("text") or _("Registrations not open") + "!"
             return run_status
+
         if run.registration_open > current_datetime:
-            run_status["open"] = False
-            run_status["text"] = run_status.get("text") or _("Registrations not open") + "!"
-            run_status["details"] = _("Opening at: %(date)s") % {
+            run_status["details"] = _("Registration opens on: %(date)s") % {
                 "date": run.registration_open.strftime(format_datetime),
             }
+            return run_status
+
+    if run.registration_status == RegistrationStatus.CLOSING:
+        current_datetime = timezone.now()
+
+        if run.registration_open and run.registration_open < current_datetime:
+            run_status["open"] = False
+            run_status["text"] = run_status.get("text") or _("Registrations closed")
+            run_status["text_long"] = run_status.get("text_long") or _(
+                "Registrations for this event are currently closed"
+            )
             return run_status
 
     # signup open, not already signed in
     messages = {
         "primary": _("Registration is open!"),
-        "filler": _("Sign up as a filler!"),
+        "filler": _("Sign up as a reserve!"),
         "waiting": _("Join the waiting list!"),
+    }
+    messages_long = {
+        "primary": _("Registrations are open: sign up now to secure your spot!"),
+        "filler": _("Primary spots are sold out, but you can still sign up as a reserve!"),
+        "waiting": _("The event is sold out, but you can join the waiting list to be notified if a spot frees up!"),
     }
 
     # pick the first matching message (or None)
-    selected_message = next((msg for key, msg in messages.items() if key in run_status), None)
+    selected_key = next((key for key in messages if key in run_status), None)
+    selected_message = messages.get(selected_key)
+    selected_message_long = messages_long.get(selected_key)
 
     # if it's a primary/filler, copy over the additional details
     if selected_message and any(key in run_status for key in ("primary", "filler")):
         run_status["details"] = run_status["additional"]
 
     # wrap in a link if we have a message, otherwise show closed
-    run_status["text"] = (
-        f"<a href='{register_url}'>{selected_message}</a>" if selected_message else _("Registration closed") + "."
-    )
+    if selected_message:
+        run_status["text"] = selected_message
+        run_status["text_long"] = selected_message_long
+        run_status["url"] = register_url
+        if run.registration_status == RegistrationStatus.CLOSING and run.registration_open:
+            closing_details = _("Registration closes on: %(date)s") % {
+                "date": run.registration_open.strftime(format_datetime),
+            }
+            if run_status.get("details"):
+                run_status["details"] += " - " + closing_details
+            else:
+                run_status["details"] = closing_details
+    else:
+        run_status["text"] = _("Registration closed")
+        run_status["text_long"] = _("Registrations for this event are currently closed")
 
     return run_status
 
 
-def _status_preregister(run: Run, member: Member, run_status: dict, context: dict | None = None) -> None:
-    """Update run status based on user's pre-registration state.
-
-    Sets the run status text to either confirm existing pre-registration
-    or provide a link to pre-register for the event.
-
-    Args:
-        run: Event run object to update status for
-        member: Member object to check pre-registration status
-        run_status: Dictionary with run status
-        context: Optional context dictionary containing cached pre-registration data
-
-    """
+def _status_preregister(run: Run, member: Member, run_status: dict, context: dict | None = None) -> dict:
+    """Update run status based on user's pre-registration state."""
     # Extract values from context dictionary if provided
     if context is None:
         context = {}
+
+    run_status["open"] = False
 
     # Get cached pre-registrations dictionary from context
     pre_registrations_dict = context.get("pre_registrations_dict")
@@ -528,26 +778,26 @@ def _status_preregister(run: Run, member: Member, run_status: dict, context: dic
 
     # Set status message based on pre-registration state
     if has_pre_registration:
-        status_message = _("Pre-registration confirmed") + "!"
+        status_message = _("Pre-registration confirmed!")
         run_status["text"] = status_message
+        run_status["text_long"] = _(
+            "Your pre-registration has been confirmed: you will be notified when registrations open"
+        )
+
     else:
         # Create pre-registration link for unauthenticated or non-pre-registered users
-        status_message = _("Pre-register to the event") + "!"
+        status_message = _("Pre-register to the event!")
+        status_message_long = _("Pre-registrations are open: pre-register to be notified when registrations open!")
         preregister_url = reverse("pre_register", args=[run.event.slug])
-        run_status["text"] = f"<a href='{preregister_url}'>{status_message}</a>"
+        run_status["text"] = status_message
+        run_status["text_long"] = status_message_long
+        run_status["url"] = preregister_url
+
+    return run_status
 
 
 def _get_features_map(run: Run, context: dict) -> Any:
-    """Get features map from context or create it if not available.
-
-    Args:
-        run: Run object to get features for
-        context: Context dictionary that may contain 'features_map'
-
-    Returns:
-        dict: Features dictionary for the run's event
-
-    """
+    """Get features map from context or create it if not available."""
     if context is None:
         context = {}
 
@@ -559,7 +809,7 @@ def _get_features_map(run: Run, context: dict) -> Any:
     return features_map[run.event_id]
 
 
-def registration_find(run: Run, member: Member, context: dict | None = None) -> Registration | None:
+def registration_find(run: Run, member: Member) -> Registration | None:
     """Find registration for a user to a run.
 
     Searches for an active registration (non-cancelled, non-redeemed) for the given
@@ -568,8 +818,6 @@ def registration_find(run: Run, member: Member, context: dict | None = None) -> 
     Args:
         run: The Run object to find registration for
         member: The Member object to search registration for
-        context: Optional context dictionary containing cached data:
-            - my_regs: Pre-fetched registrations queryset for performance optimization
 
     Returns:
         Registration | None: The found registration or None if not found
@@ -578,13 +826,6 @@ def registration_find(run: Run, member: Member, context: dict | None = None) -> 
     # Early return if user is not authenticated
     if not member:
         return None
-
-    # Use pre-fetched registrations if provided
-    if context is None:
-        context = {}
-    cached_registrations = context.get("my_regs")
-    if cached_registrations is not None:
-        return cached_registrations.get(run.id)
 
     # Query database for active registration (non-cancelled, non-redeemed)
     try:
@@ -625,10 +866,35 @@ def check_character_maximum(event: Any, member: Any) -> tuple[bool, int]:
     current_character_count = characters.exclude(id__in=inactive_character_ids).count()
 
     # Get the maximum allowed characters from event configuration
-    maximum_characters_allowed = int(get_event_config(event.id, "user_character_max", default_value=0))
+    maximum_characters_allowed = int(get_event_config(event.id, "user_character_max"))
 
     # Return whether limit is reached and the maximum allowed
     return current_character_count >= maximum_characters_allowed, maximum_characters_allowed
+
+
+def get_character_play_max(event_id: int, context: dict | None = None) -> int:
+    """Return how many characters a player can play at the same time in an event."""
+    return max(1, int(get_event_config(event_id, "character_play_max", context=context)))
+
+
+def get_player_characters_ids(member: Member, event: Event, context: dict | None = None) -> set[int]:
+    """Get ids of the player's characters for an event, from the batched cache when available.
+
+    Args:
+        member: Player owning the characters
+        event: Event the characters belong to
+        context: Optional context dictionary, optionally containing cached data:
+            - player_characters_dict: Dictionary mapping event IDs to lists of character IDs
+
+    Returns:
+        Set of character IDs owned by the player in the event
+
+    """
+    player_characters_dict = (context or {}).get("player_characters_dict")
+    if player_characters_dict is not None:
+        return set(player_characters_dict.get(event.get_class_parent(Character).id, []))
+
+    return set(get_player_characters(member, event).values_list("id", flat=True))
 
 
 def registration_status_characters(
@@ -661,53 +927,210 @@ def registration_status_characters(
         query = RegistrationCharacterRel.objects.filter(registration_id=registration.id)
         registration_character_rels = query.order_by("character__number").select_related("character")
 
-    # Check if character approval is required for this event
-    approval_required = get_event_config(run.event_id, "user_character_approval", default_value=False, context=context)
-
     # Build list of character links with names and approval status
-    character_links = []
-    for character_rel in registration_character_rels:
-        character_url = reverse("character", args=[run.get_slug(), character_rel.character.uuid])
-        character_name = character_rel.character.name
-
-        # Use custom name if provided
-        if character_rel.custom_name:
-            character_name = character_rel.custom_name
-
-        # Add approval status if character approval is enabled and not approved
-        if approval_required and character_rel.character.status != CharacterStatus.APPROVED:
-            character_name += f" ({_(character_rel.character.get_status_display())})"
-
-        # Create clickable link for character
-        character_url = f"<a href='{character_url}'>{character_name}</a>"
-        character_links.append(character_url)
+    character_links_data = [
+        _get_character_links(run, context, features, character_rel) for character_rel in registration_character_rels
+    ]
+    run_status["character_links"] = character_links_data
+    character_links = [_character_links_html(character_entry) for character_entry in character_links_data]
 
     # Add character information to status details based on number of characters
     if len(character_links) == 1:
-        run_status["details"] += _("Your character is") + " " + character_links[0]
+        run_status["details_characters"] = format_html("{}: {}", _("Your character is"), character_links[0])
     elif len(character_links) > 1:
-        run_status["details"] += _("Your characters are") + ": " + ", ".join(character_links)
+        run_status["details_characters"] = format_html(
+            "{}: {}",
+            _("Your characters are"),
+            format_html_join(" - ", "{}", ((link,) for link in character_links)),
+        )
 
-    is_assigned = len(character_links) > 0
+    assigned_count = len(character_links)
+    is_assigned = assigned_count > 0
 
-    _status_approval(run, registration, run_status, features, is_character_assigned=is_assigned)
+    # Count the player's own characters still available to be chosen
+    selectable_count = 0
+    owned_count = 0
+    can_switch = False
+    play_max = get_character_play_max(run.event_id, context)
+    if "user_character" in features:
+        owned_ids = get_player_characters_ids(registration.member, run.event, context)
+        assigned_ids = {character_rel.character_id for character_rel in registration_character_rels}
+        selectable_count = len(owned_ids - assigned_ids)
+        owned_count = len(owned_ids)
+
+        # With no free slot, the played character can still be swapped, if the player created it
+        can_switch = play_max == 1 and bool(assigned_ids) and assigned_ids <= owned_ids
+
+    _status_approval(
+        run,
+        registration,
+        run_status,
+        features,
+        {
+            "assigned": assigned_count,
+            "selectable": selectable_count,
+            "owned": owned_count,
+            "play_max": play_max,
+        },
+        can_switch=can_switch,
+    )
+    _status_casting(run, registration, run_status, features, context, is_character_assigned=is_assigned)
+
+
+def _get_character_links(run: Run, context: dict, features: dict, character_rel: RegistrationCharacterRel) -> dict:
+    """Builds structured data with links for the character quick access bar."""
+    character_url = reverse("character", args=[run.get_slug(), character_rel.character.uuid])
+    character_name = character_rel.character.name
+    character_uuid = character_rel.character.uuid
+
+    # Use custom name if provided
+    if character_rel.custom_name:
+        character_name = character_rel.custom_name
+
+    # Add approval status if character approval is enabled and not approved
+    approval_required = get_event_config(run.event_id, "user_character_approval", context=context)
+    if approval_required and character_rel.character.status != CharacterStatus.APPROVED:
+        character_name += f" ({_(character_rel.character.get_status_display())})"
+
+    # Create clickable link for character
+    character_links = [
+        {
+            "url": character_url,
+            "label": character_name,
+            "tooltip": _("Access your character sheet"),
+            "icon": "fa-solid fa-person",
+        }
+    ]
+
+    allowed_sidebar = context.get("demo_allowed_sidebar")
+
+    if feature_visible("user_character", features, allowed_sidebar):
+        character_links.append(
+            {
+                "url": reverse("character_edit", args=[run.get_slug(), character_uuid]),
+                "label": _("Edit"),
+                "tooltip": _("Edit your character's details"),
+                "icon": "fa-solid fa-pen-to-square",
+            }
+        )
+
+    if feature_visible("experience", features, allowed_sidebar) and get_event_config(
+        run.event_id, "exp_user", context=context
+    ):
+        character_links.append(
+            {
+                "url": reverse("character_abilities", args=[run.get_slug(), character_uuid]),
+                "label": _("Abilities"),
+                "tooltip": _("Buy abilities for your character"),
+                "icon": "fa-solid fa-bolt",
+            }
+        )
+
+    if feature_visible("custom_character", features, allowed_sidebar):
+        character_links.append(
+            {
+                "url": reverse("character_customize", args=[run.get_slug(), character_uuid]),
+                "label": _("Customize"),
+                "tooltip": _("Modify the character details to make it yours"),
+                "icon": "fa-solid fa-palette",
+            }
+        )
+
+    if feature_visible("player_relationships", features, allowed_sidebar):
+        character_links.append(
+            {
+                "url": reverse("character_relationships", args=[run.get_slug(), character_uuid]),
+                "label": _("Relationships"),
+                "tooltip": _("Fill in your character's relationships"),
+                "icon": "fa-solid fa-people-arrows",
+            }
+        )
+
+    if feature_visible("help", features, allowed_sidebar):
+        character_links.append(
+            {
+                "url": reverse("help", args=[run.get_slug()]),
+                "label": _("Questions"),
+                "tooltip": _("Write your questions about the character directly to the authors here."),
+                "icon": "fa-solid fa-circle-question",
+            }
+        )
+
+    return {"name": character_name, "links": character_links}
+
+
+def _character_links_html(character_entry: dict) -> str:
+    """Render the character quick access links as an HTML snippet."""
+    character_link_snippets = [
+        format_html(
+            '<span class="lm_tooltip"><a href="{}">{}</a><span class="lm_tooltiptext">{}!</span></span>',
+            link["url"],
+            link["label"],
+            link["tooltip"],
+        )
+        for link in character_entry["links"]
+    ]
+
+    return format_html_join(" | ", "{}", ((snippet,) for snippet in character_link_snippets))
+
+
+def _get_character_options_availability(run: Run) -> list[dict[str, Any]]:
+    """Return occupancy info for limited character options that don't depend on other options.
+
+    Only options with a max_available limit and no prerequisites (requirements) are
+    included, since those are the only ones whose availability can be shown upfront,
+    before the player has started answering the character form.
+
+    Args:
+        run: The run to compute option occupancy for.
+
+    Returns:
+        List of dicts with name, question name, max_available and used count.
+
+    """
+    counts = get_registration_counts(run)
+
+    options = WritingOption.objects.filter(
+        event_id=run.event_id,
+        question__applicable=QuestionApplicable.CHARACTER,
+        max_available__gt=0,
+        requirements__isnull=True,
+    ).select_related("question")
+
+    return [
+        {
+            "question": option.question.name,
+            "name": option.name,
+            "available": option.max_available - counts.get(f"option_char_{option.id}", 0),
+        }
+        for option in options
+    ]
 
 
 def _status_approval(
-    run: Run, registration: Registration, run_status: dict, features: dict, *, is_character_assigned: bool
+    run: Run,
+    registration: Registration,
+    run_status: dict,
+    features: dict,
+    character_counts: dict,
+    *,
+    can_switch: bool,
 ) -> None:
-    """Add character creation/selection links to run status based on feature availability.
+    """Add character creation/selection actions to run status based on feature availability.
 
     This function checks if the user_character feature is enabled and the registration
-    is not on a waiting list, then adds appropriate character creation or selection
-    links to the run status details.
+    is not on a waiting list, then fills run_status["character_actions"] with the available
+    actions (create a new character, choose an existing one), and run_status["character_change"]
+    / run_status["character_create"] with the links to swap the played character or to create
+    another one, shown only on the event page.
 
     Args:
         run: Run object containing event information
         registration: The registration object
         features: Dictionary of enabled features for the event
         run_status: Dictionary with run status
-        is_character_assigned: Boolean indicating if character is already assigned
+        character_counts: Counts of assigned, selectable and owned characters, plus the play maximum
+        can_switch: Whether the played character can be swapped for another one of the player
 
     """
     # Check if user_character feature is enabled
@@ -719,23 +1142,116 @@ def _status_approval(
         return
 
     # Get character creation limits for this user and event
-    can_create_character, maximum_characters = check_character_maximum(run.event, registration.member)
+    reached_maximum, maximum_characters = check_character_maximum(run.event, registration.member)
 
-    # Show character creation link if user can create more characters
-    if not can_create_character:
-        url = reverse("character_create", args=[run.get_slug()])
-        if run_status["details"]:
-            run_status["details"] += " - "
-        message = _("Create your character") + "!"
-        run_status["details"] += f"<a href='{url}'>{message}</a>"
+    assigned_count = character_counts["assigned"]
+    selectable_count = character_counts["selectable"]
+    owned_count = character_counts["owned"]
+    play_max = character_counts["play_max"]
 
-    # Show character selection link if no characters assigned but max chars available
-    elif not is_character_assigned and maximum_characters:
-        url = reverse("character_list", args=[run.get_slug()])
-        if run_status["details"]:
-            run_status["details"] += " - "
-        message = _("Select your character!")
-        run_status["details"] += f"<a href='{url}'>{message}</a>"
+    character_actions = []
+
+    # With more characters allowed, the player already created one is only offered to create another
+    if not reached_maximum and owned_count and maximum_characters > 1:
+        run_status["character_create"] = {
+            "url": reverse("character_create", args=[run.get_slug()]),
+            "label": _("Create another character"),
+            "tooltip": _("Create another character!"),
+            "icon": "fa-solid fa-wand-magic-sparkles",
+        }
+    # Show character creation action if user can create more characters
+    elif not reached_maximum:
+        character_actions.append(
+            {
+                "url": reverse("character_create", args=[run.get_slug()]),
+                "label": _("Create your character"),
+                "label_long": _("Create the character you will play in this event!"),
+                "tooltip": _("Create your character!"),
+                "icon": "fa-solid fa-wand-magic-sparkles",
+                "status_type": "todo",
+                "status_icon": "fa-solid fa-list-check",
+                "options_availability": _get_character_options_availability(run),
+            }
+        )
+
+    # Show character selection action if the player has free slots and characters to choose from
+    if selectable_count and assigned_count < play_max:
+        character_actions.append(
+            {
+                "url": reverse("character_list", args=[run.get_slug()]),
+                "label": _("Choose your character"),
+                "label_long": _("Choose the character you will play in this event!"),
+                "tooltip": _("Choose your character!"),
+                "icon": "fa-solid fa-users-viewfinder",
+                "status_type": "todo",
+                "status_icon": "fa-solid fa-list-check",
+            }
+        )
+
+    # Offer the change link when all slots are taken, but the player can swap the played character
+    elif selectable_count and can_switch:
+        run_status["character_change"] = {
+            "url": reverse("character_list", args=[run.get_slug()]),
+            "label": _("Change your character"),
+            "tooltip": _("Change your character!"),
+            "icon": "fa-solid fa-right-left",
+        }
+
+    if character_actions:
+        run_status["character_actions"] = character_actions
+
+
+def casting_preferences_pending(
+    run: Run,
+    registration: Registration,
+    features: dict,
+    context: dict | None = None,
+    *,
+    is_character_assigned: bool = False,
+) -> bool:
+    """Return True if casting is active and the member still needs to submit preferences.
+
+    Skipped once the character is assigned (casting already happened), once the
+    member has already submitted preferences for this run, if the ticket is on
+    the waiting list, or if characters aren't visible to players yet.
+    """
+    if "casting" not in features:
+        return False
+
+    if registration.ticket and registration.ticket.tier == TicketTier.WAITING:
+        return False
+
+    if is_character_assigned:
+        return False
+
+    field_visibility = get_event_config(run.event_id, "writing_field_visibility", context=context)
+    if field_visibility and not (context or {}).get("show_character"):
+        return False
+
+    return not Casting.objects.filter(run=run, member=registration.member, typ=0).exists()
+
+
+def _status_casting(
+    run: Run,
+    registration: Registration,
+    run_status: dict,
+    features: dict,
+    context: dict | None = None,
+    *,
+    is_character_assigned: bool,
+) -> None:
+    """Add a reminder link to submit casting preferences, if not already done."""
+    if not casting_preferences_pending(
+        run, registration, features, context, is_character_assigned=is_character_assigned
+    ):
+        return
+
+    run_status["casting_action"] = {
+        "url": reverse("casting", args=[run.get_slug()]),
+        "label": _("Select your preferences"),
+        "label_long": _("Select your casting preferences!"),
+        "icon": "fa-solid fa-people-arrows",
+    }
 
 
 def get_registration_options(instance: object) -> list[tuple[str, str]]:
@@ -764,11 +1280,11 @@ def get_registration_options(instance: object) -> list[tuple[str, str]]:
 
     # Get event features and filter applicable questions
     event_features = get_event_features(instance.run.event_id)
-    for question in RegistrationQuestion.get_instance_questions(instance.run.event, event_features):
-        if question.skip(instance, event_features):
+    for question in get_cached_registration_questions(instance.run.event):
+        if skip_registration_question(question, instance, event_features):
             continue
         applicable_questions.append(question)
-        question_ids_cache.append(question.id)
+        question_ids_cache.append(question["id"])
 
     # Fetch text answers for all relevant questions
     text_answers_by_question = {}
@@ -796,13 +1312,13 @@ def get_registration_options(instance: object) -> list[tuple[str, str]]:
     if len(applicable_questions) > 0:
         for question in applicable_questions:
             # Handle multiple choice questions
-            if question.id in choice_options_by_question:
-                formatted_choices = ",".join([option.name for option in choice_options_by_question[question.id]])
-                formatted_results.append((question.name, formatted_choices))
+            if question["id"] in choice_options_by_question:
+                formatted_choices = ",".join([option.name for option in choice_options_by_question[question["id"]]])
+                formatted_results.append((question["name"], formatted_choices))
 
             # Handle text answer questions
-            if question.id in text_answers_by_question:
-                formatted_results.append((question.name, text_answers_by_question[question.id]))
+            if question["id"] in text_answers_by_question:
+                formatted_results.append((question["name"], text_answers_by_question[question["id"]]))
 
     return formatted_results
 
@@ -832,20 +1348,19 @@ def get_player_signup(context: dict) -> Registration | None:
 
 
 def check_signup(context: dict) -> None:
-    """Check if player signup is valid and not in waiting status.
+    """Check if player signup is valid and not in waiting status."""
+    # Skip signup check for event staff (admins/organizers)
+    if context.get("staff"):
+        return
 
-    Args:
-        context: Context dictionary containing run information
-
-    Raises:
-        SignupError: If no valid signup found
-        WaitingError: If signup ticket is in waiting tier
-
-    """
     # Get registration
     registration = get_player_signup(context)
     if not registration:
         raise SignupError(context["run"].get_slug())
+
+    # Signup request still awaiting organizer approval
+    if registration.pending:
+        raise PendingApprovalError(context["run"].get_slug())
 
     # Check if registration is in waiting list
     if registration.ticket and registration.ticket.tier == TicketTier.WAITING:
@@ -853,10 +1368,13 @@ def check_signup(context: dict) -> None:
 
 
 def check_assign_character(context: dict) -> None:
-    """Check and assign a character to player signup if conditions are met.
+    """Check and assign characters to player signup.
 
-    Automatically assigns the first available character to a player's signup
-    if they have exactly one character and no existing character assignments.
+    Automatically assigns available characters to a player's signup up to the number of
+    characters playable at the same time (character_play_max), skipping characters that
+    are inactive or already assigned to this registration. When the player owns more
+    assignable characters than free slots, nothing is assigned: the choice is left to
+    the player on the character list page.
 
     Args:
         context: Context dictionary containing event data
@@ -870,8 +1388,15 @@ def check_assign_character(context: dict) -> None:
     if not registration:
         return
 
-    # Skip if player already has character assignments
-    if registration.rcrs.exists():
+    # Get the number of characters the player can play at the same time
+    character_play_max = get_character_play_max(context["event"].id, context)
+
+    # Get currently assigned character IDs for this registration
+    assigned_character_ids = set(registration.rcrs.values_list("character_id", flat=True))
+
+    # Skip if player already plays the maximum number of characters
+    free_slots = character_play_max - len(assigned_character_ids)
+    if free_slots <= 0:
         return
 
     # Get all characters belonging to this player for the event
@@ -888,13 +1413,20 @@ def check_assign_character(context: dict) -> None:
         ),
     )
 
-    # Filter out inactive characters
-    active_characters = [char for char in characters if char.id not in inactive_character_ids]
-    if not active_characters:
+    # Filter to get assignable characters (active and not already assigned)
+    assignable_characters = [
+        char for char in characters if char.id not in inactive_character_ids and char.id not in assigned_character_ids
+    ]
+    if not assignable_characters:
         return
 
-    # Auto-assign the first active character to the registration
-    RegistrationCharacterRel.objects.create(character_id=active_characters[0].id, registration=registration)
+    # Leave the choice to the player when there are more candidates than free slots
+    if len(assignable_characters) > free_slots:
+        return
+
+    # Auto-assign the remaining characters
+    for character in assignable_characters:
+        RegistrationCharacterRel.objects.create(character_id=character.id, registration=registration)
 
 
 def get_reduced_available_count(run: Any) -> int:
@@ -908,7 +1440,7 @@ def get_reduced_available_count(run: Any) -> int:
 
     """
     # Get the ratio for reduced tickets per patron registrations
-    reduced_tickets_per_patron_ratio = int(get_event_config(run.event_id, "reduced_ratio", default_value=10))
+    reduced_tickets_per_patron_ratio = int(get_event_config(run.event_id, "reduced_ratio"))
 
     # Count current reduced and patron registrations (excluding cancelled)
     reduced_registrations_count = Registration.objects.filter(
@@ -920,6 +1452,7 @@ def get_reduced_available_count(run: Any) -> int:
         run=run,
         ticket__tier=TicketTier.PATRON,
         cancellation_date__isnull=True,
+        tot_payed__gt=0,
     ).count()
 
     # Calculate available reduced slots: floor(patron_count * ratio / 10) - used_reduced
@@ -970,6 +1503,8 @@ def process_registration_event_change(registration: Registration) -> None:
     except ObjectDoesNotExist:
         registration.ticket = None
 
+    cached_questions = get_cached_registration_questions(registration.run.event)
+
     # Process all registration choices (question/option pairs)
     # Try to find matching questions and options in the new event
     for registration_choice in RegistrationChoice.objects.filter(
@@ -980,15 +1515,14 @@ def process_registration_event_change(registration: Registration) -> None:
 
         try:
             # Find matching question and option in the new event
-            registration_choice.question = registration.run.event.get_elements(RegistrationQuestion).get(
-                name__iexact=question_name,
-            )
+            matched_question = next(q for q in cached_questions if q["name"].lower() == question_name.lower())
+            registration_choice.question_id = matched_question["id"]
             registration_choice.option = registration.run.event.get_elements(RegistrationOption).get(
-                question=registration_choice.question,
+                question_id=matched_question["id"],
                 name__iexact=option_name,
             )
             registration_choice.save()
-        except ObjectDoesNotExist:
+        except (StopIteration, ObjectDoesNotExist):
             # Clear the choice if no matching question/option found
             registration_choice.question = None
             registration_choice.option = None
@@ -1003,11 +1537,10 @@ def process_registration_event_change(registration: Registration) -> None:
 
         try:
             # Find matching question in the new event to preserve the answer
-            registration_answer.question = registration.run.event.get_elements(RegistrationQuestion).get(
-                name__iexact=question_name,
-            )
+            matched_question = next(q for q in cached_questions if q["name"].lower() == question_name.lower())
+            registration_answer.question_id = matched_question["id"]
             registration_answer.save()
-        except ObjectDoesNotExist:
+        except StopIteration:
             # Clear the answer if no matching question found
             registration_answer.question = None
 
@@ -1081,5 +1614,4 @@ def reset_registration_ticket(instance: RegistrationTicket) -> None:
     """Clear accounting cache for all runs in the ticket's event."""
     for run in instance.event.runs.all():
         clear_registration_accounting_cache(run.id)
-        clear_widget_cache(run.id)
         clear_registration_counts_cache(run.id)

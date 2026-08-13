@@ -24,32 +24,24 @@ from typing import Any
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ObjectDoesNotExist
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.db.models import Sum
+from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_POST
 
 from larpmanager.cache.config import save_single_config
-from larpmanager.cache.warehouse import get_association_warehouse_cache
+from larpmanager.cache.warehouse import get_association_warehouse_cache, get_event_warehouse_assignments_cache
 from larpmanager.forms.miscellanea import (
-    OneTimeAccessTokenForm,
-    OneTimeContentForm,
-    OrgaAlbumForm,
-    OrgaProblemForm,
     UploadAlbumsForm,
-    UtilForm,
-    WorkshopModuleForm,
-    WorkshopOptionForm,
-    WorkshopQuestionForm,
 )
-from larpmanager.forms.warehouse import (
-    OrgaWarehouseAreaForm,
-    OrgaWarehouseItemAssignmentForm,
-)
-from larpmanager.models.member import Log
+from larpmanager.forms.warehouse import OrgaWarehouseItemCommitRemainingForm
 from larpmanager.models.miscellanea import (
     Album,
+    Log,
+    Milestone,
+    MilestoneStatus,
     OneTimeAccessToken,
     OneTimeContent,
     Problem,
@@ -64,8 +56,12 @@ from larpmanager.models.miscellanea import (
 )
 from larpmanager.models.registration import Registration
 from larpmanager.utils.core.base import check_event_context
-from larpmanager.utils.core.common import get_album_cod, get_element
-from larpmanager.utils.services.edit import orga_edit
+from larpmanager.utils.core.common import get_album_cod, get_element, get_object_uuid
+from larpmanager.utils.core.paginate import orga_paginate
+from larpmanager.utils.edit.backend import backend_edit
+from larpmanager.utils.edit.base import render_frame_or_fallback
+from larpmanager.utils.edit.orga import OrgaAction, orga_delete, orga_edit, orga_new
+from larpmanager.utils.services.bulk import handle_bulk_orga_items
 from larpmanager.utils.services.miscellanea import get_warehouse_optionals, upload_albums
 from larpmanager.utils.services.writing import writing_post
 
@@ -79,9 +75,21 @@ def orga_albums(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_albums_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new album for an event."""
+    return orga_new(request, event_slug, OrgaAction.ALBUMS)
+
+
+@login_required
 def orga_albums_edit(request: HttpRequest, event_slug: str, album_uuid: str) -> HttpResponse:
     """Edit album for an event."""
-    return orga_edit(request, event_slug, "orga_albums", OrgaAlbumForm, album_uuid)
+    return orga_edit(request, event_slug, OrgaAction.ALBUMS, album_uuid)
+
+
+@login_required
+def orga_albums_delete(request: HttpRequest, event_slug: str, album_uuid: str) -> HttpResponse:
+    """Delete album for event."""
+    return orga_delete(request, event_slug, OrgaAction.ALBUMS, album_uuid)
 
 
 @login_required
@@ -117,7 +125,7 @@ def orga_albums_upload(request: HttpRequest, event_slug: str, album_slug: str) -
             upload_albums(context["album"], request.FILES["elem"])
 
             # Show success message and redirect to same page
-            messages.success(request, event_slug, _("Photos and videos successfully uploaded") + "!")
+            messages.success(request, event_slug, _("Photos and videos successfully uploaded!"))
             return redirect(request, event_slug.path_info)
     else:
         # Create empty form for GET request
@@ -137,9 +145,21 @@ def orga_utils(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_utils_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new utility item for event."""
+    return orga_new(request, event_slug, OrgaAction.UTILS)
+
+
+@login_required
 def orga_utils_edit(request: HttpRequest, event_slug: str, util_uuid: str) -> HttpResponse:
     """Edit utility item for event."""
-    return orga_edit(request, event_slug, "orga_utils", UtilForm, util_uuid)
+    return orga_edit(request, event_slug, OrgaAction.UTILS, util_uuid)
+
+
+@login_required
+def orga_utils_delete(request: HttpRequest, event_slug: str, util_uuid: str) -> HttpResponse:
+    """Delete util for event."""
+    return orga_delete(request, event_slug, OrgaAction.UTILS, util_uuid)
 
 
 @login_required
@@ -172,8 +192,10 @@ def orga_workshops(request: HttpRequest, event_slug: str) -> HttpResponse:
     context["pinocchio"] = []  # Members who haven't completed all workshops
     context["list"] = []  # All registered members with completion counts
 
-    # Pre-fetch all workshop completions
-    registrations = list(Registration.objects.filter(run=context["run"], cancellation_date__isnull=True))
+    # Pre-fetch all workshop completions with related data
+    registrations = list(
+        Registration.objects.filter(run=context["run"], cancellation_date__isnull=True).select_related("member")
+    )
     member_ids = [registration.member_id for registration in registrations]
     workshop_ids = [w.id for w in workshops]
 
@@ -201,33 +223,36 @@ def orga_workshops(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 @login_required
 def orga_workshop_modules(request: HttpRequest, event_slug: str) -> HttpResponse:
-    """Display workshop modules for event organizers.
-
-    Args:
-        request: HTTP request object
-        event_slug: Event slug identifier
-
-    Returns:
-        Rendered workshop modules page
-
-    """
+    """Display workshop modules for event organizers."""
     # Check permissions and get event context
     context = check_event_context(request, event_slug, "orga_workshop_modules")
 
     # Retrieve and order workshop modules
-    context["list"] = WorkshopModule.objects.filter(event=context["event"]).order_by("number")
+    context["list"] = WorkshopModule.objects.filter(event=context["event"]).order_by("order")
 
     return render(request, "larpmanager/orga/workshop/modules.html", context)
 
 
 @login_required
-def orga_workshop_modules_edit(request: HttpRequest, event_slug: str, module_uuid: str) -> HttpResponse:
-    """Edit a workshop module for an event."""
-    return orga_edit(request, event_slug, "orga_workshop_modules", WorkshopModuleForm, module_uuid)
+def orga_workshop_modules_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new workshop module for an event."""
+    return orga_new(request, event_slug, OrgaAction.WORKSHOP_MODULES)
 
 
 @login_required
-def orga_workshop_questions(request: HttpRequest, event_slug: str) -> HttpResponse | None:
+def orga_workshop_modules_edit(request: HttpRequest, event_slug: str, module_uuid: str) -> HttpResponse:
+    """Edit a workshop module for an event."""
+    return orga_edit(request, event_slug, OrgaAction.WORKSHOP_MODULES, module_uuid)
+
+
+@login_required
+def orga_workshop_modules_delete(request: HttpRequest, event_slug: str, module_uuid: str) -> HttpResponse:
+    """Delete module for event."""
+    return orga_delete(request, event_slug, OrgaAction.WORKSHOP_MODULES, module_uuid)
+
+
+@login_required
+def orga_workshop_questions(request: HttpRequest, event_slug: str) -> HttpResponse:
     """Handle workshop questions management for organizers."""
     # Check user permissions for workshop questions management
     context = check_event_context(request, event_slug, "orga_workshop_questions")
@@ -238,17 +263,29 @@ def orga_workshop_questions(request: HttpRequest, event_slug: str) -> HttpRespon
 
     # Retrieve and order workshop questions by module and question number
     context["list"] = WorkshopQuestion.objects.filter(module__event=context["event"]).order_by(
-        "module__number",
-        "number",
+        "module__order",
+        "order",
     )
 
     return render(request, "larpmanager/orga/workshop/questions.html", context)
 
 
 @login_required
+def orga_workshop_questions_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new workshop question."""
+    return orga_new(request, event_slug, OrgaAction.WORKSHOP_QUESTIONS)
+
+
+@login_required
 def orga_workshop_questions_edit(request: HttpRequest, event_slug: str, question_uuid: str) -> HttpResponse:
     """Edit workshop question."""
-    return orga_edit(request, event_slug, "orga_workshop_questions", WorkshopQuestionForm, question_uuid)
+    return orga_edit(request, event_slug, OrgaAction.WORKSHOP_QUESTIONS, question_uuid)
+
+
+@login_required
+def orga_workshop_questions_delete(request: HttpRequest, event_slug: str, question_uuid: str) -> HttpResponse:
+    """Delete question for event."""
+    return orga_delete(request, event_slug, OrgaAction.WORKSHOP_QUESTIONS, question_uuid)
 
 
 @login_required
@@ -272,8 +309,8 @@ def orga_workshop_options(request: HttpRequest, event_slug: str) -> HttpResponse
 
     # Fetch and order workshop options for the event
     context["list"] = WorkshopOption.objects.filter(question__module__event=context["event"]).order_by(
-        "question__module__number",
-        "question__number",
+        "question__module__order",
+        "question__order",
         "is_correct",
     )
 
@@ -282,9 +319,21 @@ def orga_workshop_options(request: HttpRequest, event_slug: str) -> HttpResponse
 
 
 @login_required
+def orga_workshop_options_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new workshop option for an event."""
+    return orga_new(request, event_slug, OrgaAction.WORKSHOP_OPTIONS)
+
+
+@login_required
 def orga_workshop_options_edit(request: HttpRequest, event_slug: str, option_uuid: str) -> HttpResponse:
     """Edit workshop option for an event."""
-    return orga_edit(request, event_slug, "orga_workshop_options", WorkshopOptionForm, option_uuid)
+    return orga_edit(request, event_slug, OrgaAction.WORKSHOP_OPTIONS, option_uuid)
+
+
+@login_required
+def orga_workshop_options_delete(request: HttpRequest, event_slug: str, option_uuid: str) -> HttpResponse:
+    """Delete option for event."""
+    return orga_delete(request, event_slug, OrgaAction.WORKSHOP_OPTIONS, option_uuid)
 
 
 @login_required
@@ -300,9 +349,21 @@ def orga_problems(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_problems_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new problem."""
+    return orga_new(request, event_slug, OrgaAction.PROBLEMS)
+
+
+@login_required
 def orga_problems_edit(request: HttpRequest, event_slug: str, problem_uuid: str) -> HttpResponse:
     """Delegate to generic edit view for problem editing."""
-    return orga_edit(request, event_slug, "orga_problems", OrgaProblemForm, problem_uuid)
+    return orga_edit(request, event_slug, OrgaAction.PROBLEMS, problem_uuid)
+
+
+@login_required
+def orga_problems_delete(request: HttpRequest, event_slug: str, problem_uuid: str) -> HttpResponse:
+    """Delete problem for event."""
+    return orga_delete(request, event_slug, OrgaAction.PROBLEMS, problem_uuid)
 
 
 @login_required
@@ -318,9 +379,90 @@ def orga_warehouse_area(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_warehouse_area_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new warehouse area for an event."""
+    return orga_new(request, event_slug, OrgaAction.WAREHOUSE_AREA)
+
+
+@login_required
 def orga_warehouse_area_edit(request: HttpRequest, event_slug: str, area_uuid: str) -> HttpResponse:
     """Edit a warehouse area for an event."""
-    return orga_edit(request, event_slug, "orga_warehouse_area", OrgaWarehouseAreaForm, area_uuid)
+    return orga_edit(request, event_slug, OrgaAction.WAREHOUSE_AREA, area_uuid)
+
+
+@login_required
+def orga_warehouse_area_delete(request: HttpRequest, event_slug: str, area_uuid: str) -> HttpResponse:
+    """Delete area for event."""
+    return orga_delete(request, event_slug, OrgaAction.WAREHOUSE_AREA, area_uuid)
+
+
+@login_required
+def orga_warehouse_items(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """List all warehouse items of the association, for assignment to this event.
+
+    Each row shows the same columns as the executive warehouse items list,
+    plus, via the cached per-event assignment summary, which areas the item
+    is sent to and in what quantity (e.g. "Kitchen (3)").
+    """
+    context = check_event_context(request, event_slug, "orga_warehouse_items")
+
+    handle_bulk_orga_items(request, context)
+
+    warehouse_cache = get_association_warehouse_cache(context["association_id"])
+    assignments_cache = get_event_warehouse_assignments_cache(context["event"])
+
+    context["list"] = []
+    items = WarehouseItem.objects.filter(association_id=context["association_id"])
+    items = items.select_related("container").prefetch_related("tags")
+    assigned_quantities = {
+        row["item_id"]: row["total"] or 0
+        for row in WarehouseItemAssignment.objects.filter(item__association_id=context["association_id"])
+        .values("item_id")
+        .annotate(total=Sum("quantity"))
+    }
+    for item in items:
+        item.tags_cached = warehouse_cache.get(item.id, {}).get("tags", [])
+        item.areas_cached = assignments_cache.get(item.id, {}).get("list", [])
+        item.available_quantity = (
+            max(item.quantity - assigned_quantities.get(item.id, 0), 0) if item.quantity is not None else None
+        )
+        context["list"].append(item)
+
+    get_warehouse_optionals(context, [5])
+
+    return render(request, "larpmanager/orga/warehouse/items.html", context)
+
+
+@login_required
+def orga_warehouse_items_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Assign a not-yet-assigned warehouse item to areas of this event."""
+    return orga_new(request, event_slug, OrgaAction.WAREHOUSE_ITEM_AREAS)
+
+
+@login_required
+def orga_warehouse_items_edit(request: HttpRequest, event_slug: str, item_uuid: str) -> HttpResponse:
+    """Edit a warehouse item's area assignments for this event."""
+    return orga_edit(request, event_slug, OrgaAction.WAREHOUSE_ITEM_AREAS, item_uuid)
+
+
+@login_required
+def orga_warehouse_items_commit_remaining(request: HttpRequest, event_slug: str, item_uuid: str) -> HttpResponse:
+    """Commit an item's entire remaining finite stock to one area of this event."""
+    context = check_event_context(request, event_slug, "orga_warehouse_items")
+    item = get_object_uuid(WarehouseItem, item_uuid)
+    if item.association_id != context["association_id"]:
+        msg = "not your association"
+        raise Http404(msg)
+
+    context["commit_item"] = item
+    context["add_another"] = False
+    result = backend_edit(request, context, OrgaWarehouseItemCommitRemainingForm)
+    is_frame = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+    if result:
+        if is_frame:
+            return render(request, "elements/dashboard/form_success.html", context)
+        return redirect("orga_warehouse_items", context["run"].get_slug())
+    return render_frame_or_fallback(request, context, is_frame, "larpmanager/orga/edit.html")
 
 
 @login_required
@@ -483,7 +625,7 @@ def orga_warehouse_manifest(request: HttpRequest, event_slug: str) -> HttpRespon
 
     # Check if warehouse quantities have been committed for this event
     # This flag controls UI elements for the commit functionality
-    context["warehouse_committed"] = context["event"].get_config("warehouse_committed", default_value=False)
+    context["warehouse_committed"] = context["event"].get_config("warehouse_committed")
 
     # Iterate through all warehouse item assignments for this event
     # Group items by their assigned areas for organized manifest display
@@ -504,9 +646,21 @@ def orga_warehouse_manifest(request: HttpRequest, event_slug: str) -> HttpRespon
 
 
 @login_required
+def orga_warehouse_assignment_item_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new warehouse item assignment."""
+    return orga_new(request, event_slug, OrgaAction.WAREHOUSE_MANIFEST)
+
+
+@login_required
 def orga_warehouse_assignment_item_edit(request: HttpRequest, event_slug: str, assignment_uuid: str) -> HttpResponse:
     """Edit warehouse item assignment."""
-    return orga_edit(request, event_slug, "orga_warehouse_manifest", OrgaWarehouseItemAssignmentForm, assignment_uuid)
+    return orga_edit(request, event_slug, OrgaAction.WAREHOUSE_MANIFEST, assignment_uuid)
+
+
+@login_required
+def orga_warehouse_assignment_item_delete(request: HttpRequest, event_slug: str, assignment_uuid: str) -> HttpResponse:
+    """Delete assignment for event."""
+    return orga_delete(request, event_slug, OrgaAction.WAREHOUSE_ASSIGNMENT_ITEM, assignment_uuid)
 
 
 @require_POST
@@ -543,7 +697,7 @@ def orga_warehouse_assignment_manifest(request: HttpRequest, event_slug: str) ->
 
     # Retrieve the warehouse item assignment
     try:
-        assign = WarehouseItemAssignment.objects.get(pk=idx)
+        assign = WarehouseItemAssignment.objects.get(uuid=idx)
     except ObjectDoesNotExist:
         return JsonResponse({"error": "not found"}, status=400)
 
@@ -617,23 +771,26 @@ def orga_onetimes(request: HttpRequest, event_slug: str) -> Any:
 
 
 @login_required
+def orga_onetimes_new(request: HttpRequest, event_slug: str) -> Any:
+    """Create a new one-time content."""
+    return orga_new(request, event_slug, OrgaAction.ONETIMES)
+
+
+@login_required
 def orga_onetimes_edit(request: HttpRequest, event_slug: str, onetime_uuid: str) -> Any:
     """Edit or create a one-time content."""
-    return orga_edit(request, event_slug, "orga_onetimes", OneTimeContentForm, onetime_uuid)
+    return orga_edit(request, event_slug, OrgaAction.ONETIMES, onetime_uuid)
+
+
+@login_required
+def orga_onetimes_delete(request: HttpRequest, event_slug: str, onetime_uuid: str) -> HttpResponse:
+    """Delete onetime for event."""
+    return orga_delete(request, event_slug, OrgaAction.ONETIMES, onetime_uuid)
 
 
 @login_required
 def orga_onetimes_tokens(request: HttpRequest, event_slug: str) -> HttpResponse:
-    """Display one-time access tokens for an event.
-
-    Args:
-        request: HTTP request object
-        event_slug: Event slug identifier
-
-    Returns:
-        Rendered template with token list
-
-    """
+    """Display one-time access tokens for an event."""
     # Check user has permission to view one-time tokens for this event
     context = check_event_context(request, event_slug, "orga_onetimes")
 
@@ -644,9 +801,21 @@ def orga_onetimes_tokens(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_onetimes_tokens_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new one-time access token."""
+    return orga_new(request, event_slug, OrgaAction.ONETIMES_TOKENS)
+
+
+@login_required
 def orga_onetimes_tokens_edit(request: HttpRequest, event_slug: str, token_uuid: str) -> HttpResponse:
     """Edit one-time access token."""
-    return orga_edit(request, event_slug, "orga_onetimes_tokens", OneTimeAccessTokenForm, token_uuid)
+    return orga_edit(request, event_slug, OrgaAction.ONETIMES_TOKENS, token_uuid)
+
+
+@login_required
+def orga_onetimes_tokens_delete(request: HttpRequest, event_slug: str, token_uuid: str) -> HttpResponse:
+    """Delete onetime token for event."""
+    return orga_delete(request, event_slug, OrgaAction.ONETIMES_TOKENS, token_uuid)
 
 
 @login_required
@@ -684,7 +853,7 @@ def orga_warehouse_commit_preview(request: HttpRequest, event_slug: str) -> Http
     context = check_event_context(request, event_slug, "orga_warehouse_manifest")
 
     # Prevent re-committing quantities - this is a one-time operation per event
-    if context["event"].get_config("warehouse_committed", default_value=False):
+    if context["event"].get_config("warehouse_committed"):
         messages.warning(request, _("Warehouse quantities already committed for this event"))
         return redirect("orga_warehouse_manifest", event_slug=event_slug)
 
@@ -771,7 +940,7 @@ def orga_warehouse_commit_quantities(request: HttpRequest, event_slug: str) -> H
     context = check_event_context(request, event_slug, "orga_warehouse_manifest")
 
     # Prevent re-committing quantities - this is a one-time destructive operation
-    if context["event"].get_config("warehouse_committed", default_value=False):
+    if context["event"].get_config("warehouse_committed"):
         messages.warning(request, _("Warehouse quantities already committed for this event"))
         return redirect("orga_warehouse_manifest", event_slug=event_slug)
 
@@ -811,7 +980,7 @@ def orga_warehouse_commit_quantities(request: HttpRequest, event_slug: str) -> H
             else:
                 # Reduce item quantity by the assigned amount
                 items_modified.append(
-                    f"UPDATED: {item.name} ({current_quantity} → {final_quantity}, assigned {assigned_quantity})",
+                    f"UPDATED: {item.name} ({current_quantity} -> {final_quantity}, assigned {assigned_quantity})",
                 )
                 item.quantity = final_quantity
                 item.save()
@@ -833,11 +1002,72 @@ def orga_warehouse_commit_quantities(request: HttpRequest, event_slug: str) -> H
     # Display success message with statistics to user
     messages.success(
         request,
-        _("Warehouse quantities committed successfully")
-        + f": {items_updated} "
-        + _("items updated")
-        + f", {items_deleted} "
-        + _("items deleted"),
+        _("Warehouse quantities committed successfully: %(updated)s items updated, %(deleted)s items deleted")
+        % {"updated": items_updated, "deleted": items_deleted},
     )
 
     return redirect("orga_warehouse_manifest", event_slug=event_slug)
+
+
+@login_required
+def orga_log(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Display paginated list of logs for event."""
+    context = check_event_context(request, event_slug, "orga_log")
+
+    context.update(
+        {
+            "selrel": ("member",),
+            "fields": [
+                ("member", _("Member")),
+                ("operation_type", _("Operation")),
+                ("element_name", _("Element")),
+                ("info", _("Info")),
+                ("created", _("Date")),
+            ],
+            "callbacks": {
+                "operation_type": lambda el: el.get_operation_type_display(),
+            },
+        }
+    )
+
+    return orga_paginate(
+        request,
+        context,
+        Log,
+        "larpmanager/orga/logs.html",
+        None,  # No edit view for logs (read-only)
+    )
+
+
+@login_required
+def orga_milestones(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Display milestones for an event run in the organizer dashboard."""
+    context = check_event_context(request, event_slug, "orga_milestones")
+    today = timezone.now().date()
+    milestones = Milestone.objects.filter(event=context["event"]).select_related("assigned").order_by("deadline")
+    for m in milestones:
+        if m.deadline:
+            m.days_remaining = (m.deadline - today).days
+        else:
+            m.days_remaining = None
+    context["list"] = milestones
+    context["completed_status"] = MilestoneStatus.COMPLETED
+    return render(request, "larpmanager/orga/milestones.html", context)
+
+
+@login_required
+def orga_milestones_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a new milestone for an event."""
+    return orga_new(request, event_slug, OrgaAction.MILESTONES)
+
+
+@login_required
+def orga_milestones_edit(request: HttpRequest, event_slug: str, milestone_uuid: str) -> HttpResponse:
+    """Edit a milestone for an event."""
+    return orga_edit(request, event_slug, OrgaAction.MILESTONES, milestone_uuid)
+
+
+@login_required
+def orga_milestones_delete(request: HttpRequest, event_slug: str, milestone_uuid: str) -> HttpResponse:
+    """Delete a milestone for an event."""
+    return orga_delete(request, event_slug, OrgaAction.MILESTONES, milestone_uuid)

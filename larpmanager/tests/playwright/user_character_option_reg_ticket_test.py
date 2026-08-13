@@ -30,7 +30,9 @@ from typing import Any
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, fill_tinymce, go_to, login_orga, logout, expect_normalized, submit_confirm
+from larpmanager.tests.utils import fill_tinymce, go_to, login_orga, logout, expect_normalized, submit_register, \
+    submit_confirm, new_option, submit_option, sidebar, get_modal_iframe, save_modal, _wait_select2_results, \
+    expand_options
 
 pytestmark = pytest.mark.e2e
 
@@ -40,7 +42,7 @@ def test_user_character_option_reg_ticket(pw_page: Any) -> None:
 
     login_orga(page, live_server)
 
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
 
     prepare(page)
 
@@ -55,61 +57,73 @@ def test_user_character_option_reg_ticket(pw_page: Any) -> None:
 
 def prepare(page: Any) -> None:
     # configure event
-    page.get_by_role("link", name="Features").first.click()
-    page.get_by_role("checkbox", name="Player editor").check()
+    sidebar(page, "Features")
+    page.get_by_role("checkbox", name="Character creation").check()
     page.get_by_role("checkbox", name="Characters").check()
     submit_confirm(page)
 
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Player editor ").click()
+    page.get_by_role("link", name=re.compile(r"^Character creation ")).click()
     page.locator("#id_user_character_max").click()
     page.locator("#id_user_character_max").fill("1")
-    page.get_by_role("link", name="Character form ").click()
+    page.get_by_role("link", name=re.compile(r"^Character Sheet")).click()
     page.locator("#id_character_form_wri_que_tickets").check()
     submit_confirm(page)
 
     # create ticket
     page.get_by_role("link", name="Tickets").first.click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("bambi")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("bambi")
+    save_modal(page, edit_iframe)
 
     # set option based on ticket
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("choose")
-    page.locator("#id_status").select_option("m")
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("st")
-    page.get_by_role("list").click()
-    page.get_by_role("searchbox").fill("st")
-    page.locator(".select2-results__option").first.click()
-    page.get_by_role("checkbox", name="After confirmation, add").check()
-    submit_confirm(page)
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("bmb")
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("bam")
-    page.locator(".select2-results__option").first.click()
-    page.locator("#main_form").click()
-    submit_confirm(page)
-    expect_normalized(page, page.locator("#options"), "st Standard bmb bambi")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("choose")
+    edit_iframe.locator("#id_status").select_option("m")
+
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("st")
+    option_row.get_by_role("searchbox").click()
+    option_row.get_by_role("searchbox").fill("st")
+    _wait_select2_results(edit_iframe)
+    option_row.locator(".select2-results__option").first.click()
+    submit_option(edit_iframe, option_row)
+
+    option_row = new_option(edit_iframe)
+
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("bmb")
+    option_row.get_by_role("searchbox").click()
+    option_row.get_by_role("searchbox").fill("bam")
+    _wait_select2_results(edit_iframe)
+    option_row.locator(".select2-results__option").first.click()
+    submit_option(edit_iframe, option_row)
+
+    expect_normalized(page, edit_iframe.locator("#options"), "bmb test larp (standard) bambi")
+    save_modal(page, edit_iframe)
 
 
 def create_character(page: Any) -> None:
     # signup first ticket
     page.get_by_role("link", name="Register").click()
-    page.get_by_label("Ticket").select_option("u1")
-    page.get_by_role("button", name="Continue").click()
+    page.locator('label[for="id_ticket_0"]').click()
+    submit_register(page)
+
+    # confirm profile
+    page.get_by_role("checkbox", name="Authorisation").check()
     submit_confirm(page)
-    page.get_by_role("link", name="Create your character!").click()
+
+    page.get_by_role("link", name="Create your character").click()
 
     # check only one option
-    expect(page.locator("#id_que_u4")).to_match_aria_snapshot('- combobox:\n  - option "st" [selected]')
+    expect(page.locator("#id_que_u4")).to_match_aria_snapshot('- radio "st"\n- text: st')
+    page.locator('label[for="id_que_u4_0"]').click()  # select "st"
 
     # create player
     page.locator("#id_name").click()
@@ -120,33 +134,37 @@ def create_character(page: Any) -> None:
 
     # check status, resubmit reg
     expect_normalized(page, page.locator("#one"), "Player: Admin Test choose: st Presentation sdsa")
-    page.get_by_role("link", name="Registration", exact=True).click()
+    sidebar(page, "Your registration")
     page.get_by_role("button", name="Continue").click()
-    page.locator("a").filter(has_text=re.compile(r"^myyyy$")).click()
+    sidebar(page, "myyyy")
     expect_normalized(page, page.locator("#one"), "Player: Admin Test choose: st Presentation sdsa")
 
     # change ticket
-    page.get_by_role("link", name="Registration", exact=True).click()
-    page.get_by_label("Ticket").select_option("u2")
+    sidebar(page, "Your registration")
+    # the registration already exists: the other tickets start collapsed
+    expand_options(page)
+    page.locator('label[for="id_ticket_1"]').click()
     page.get_by_role("button", name="Continue").click()
-    page.locator("a").filter(has_text=re.compile(r"^myyyy$")).click()
+    sidebar(page, "myyyy")
 
     # check previous option is not selected anymore
-    expect_normalized(page, page.locator("#one"), "The character have missing values in mandatory fields: choose")
+    expect_normalized(page, page.locator("#one"), "The character has missing values in required fields: choose")
     expect_normalized(page, page.locator("#one"), "Player: Admin Test Presentation sdsa Text asadas")
-    page.get_by_role("link", name="myyyy").click()
-    page.get_by_role("link", name="Change").click()
+    sidebar(page, "Edit")
 
     # check only one option available
-    expect(page.locator("#id_que_u4")).to_match_aria_snapshot('- combobox:\n  - option "bmb" [selected]')
+    # the character is already saved: the option starts collapsed
+    expand_options(page)
+    expect(page.locator("#id_que_u4")).to_match_aria_snapshot('- radio "bmb"\n- text: bmb')
+    page.locator('label[for="id_que_u4_0"]').click()  # select "bmb" (only option)
     submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "Player: Admin Test choose: bmb Presentation sdsa")
 
     # check with registration resubmit
-    page.get_by_role("link", name="Registration", exact=True).click()
+    sidebar(page, "Your registration")
     page.get_by_role("button", name="Continue").click()
-    page.locator("a").filter(has_text=re.compile(r"^myyyy$")).click()
-    page.get_by_role("link", name="Change").click()
-    expect(page.locator("#id_que_u4")).to_match_aria_snapshot('- combobox:\n  - option "bmb" [selected]')
+
+    sidebar(page, "Edit")
+    expect(page.locator("#id_que_u4")).to_match_aria_snapshot('- radio "bmb"')
     submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "Player: Admin Test choose: bmb Presentation sdsa")

@@ -1,0 +1,687 @@
+{% extends "base.html" %}
+{% load tz show_tags static i18n %}
+{% block title %}
+    {% trans "Ensemble" %} - {{ run }}
+{% endblock title %}
+{% block info %}
+    {% trans "Get to know all the characters before the event" %}
+{% endblock info %}
+{% block content %}
+    <div class="ensemble-toolbar">
+        <div class="ensemble-modes">
+            <button class="ensemble-btn {% if ensemble_default_mode == 'book' %}active{% endif %}"
+                    data-mode="book"
+                    title="{% trans "Book" %}">
+                <i class="fa-solid fa-book-open"></i>
+                <span>{% trans "Book" %}</span>
+            </button>
+            <button class="ensemble-btn {% if ensemble_default_mode == 'cards' %}active{% endif %}"
+                    data-mode="cards"
+                    title="{% trans "Cards" %}">
+                <i class="fa-solid fa-address-card"></i>
+                <span>{% trans "Cards" %}</span>
+            </button>
+            <button class="ensemble-btn {% if ensemble_default_mode == 'compact' %}active{% endif %}"
+                    data-mode="compact"
+                    title="{% trans "Compact list" %}">
+                <i class="fa-solid fa-list"></i>
+                <span>{% trans "Compact list" %}</span>
+            </button>
+        </div>
+        <div class="ensemble-search-wrap">
+            <input type="text"
+                   id="ensemble-search"
+                   placeholder="{% trans "Search" %}..."
+                   autocomplete="off">
+        </div>
+        <button id="ensemble-print"
+                class="ensemble-btn"
+                title="{% trans "Print current view" %}">
+            <i class="fa-solid fa-print"></i>
+            <span>{% trans "Print" %}</span>
+        </button>
+    </div>
+    {% if char_list %}
+        {# BOOK MODE #}
+        <div class="ensemble-view" id="ensemble-book">
+            {% for ch in char_list %}
+                <div class="ens-book-entry"
+                     data-search="{{ ch.name|lower }} {{ ch.title|lower }} {{ ch.teaser|lower|striptags }}">
+                    <div class="ens-book-cover">
+                        {% get_char_profile ch as profile_url %}
+                        <img src="{{ profile_url }}" alt="{{ ch.name }}" loading="lazy">
+                    </div>
+                    <div class="ens-book-body">
+                        <p class="ens-name">
+                            <b>{% trans "Character:" %}</b>
+                            {{ ch.name }}
+                            {% if ch.title %}<span class="ens-title">- {{ ch.title }}</span>{% endif %}
+                        </p>
+                        {% if ensemble_show_player and ch.player_name %}
+                            <p class="ens-player">
+                                <b>{% trans "Player:" %}</b> {{ ch.player_name }}
+                            </p>
+                        {% endif %}
+                        {% if ch.factions %}
+                            <p class="ens-factions">
+                                <b>{% trans "Factions:" %}</b>
+                                {% for f in ch.factions %}
+                                    {% if f.name %}
+                                        <span class="ens-faction-tag"
+                                              {% if f.color %}style="background-color:{{ f.color }}; color: white"{% endif %}>{{ f.name }}</span>
+                                    {% endif %}
+                                {% endfor %}
+                            </p>
+                        {% endif %}
+                        {% if ch.guilds %}
+                            <p class="ens-guilds">
+                                <b>{% trans "Guilds:" %}</b>
+                                {% for g in ch.guilds %}
+                                    {% if g.name %}
+                                        <span class="ens-guild-tag"
+                                              {% if g.color %}style="background-color:{{ g.color }}; color: white"{% endif %}>{{ g.name }}</span>
+                                    {% endif %}
+                                {% endfor %}
+                            </p>
+                        {% endif %}
+                        {% if ch.teaser %}<div class="ens-teaser">{{ ch.teaser|sanitize_html }}</div>{% endif %}
+                        {% for field in ch.display_fields %}
+                            <div class="ens-field">
+                                <span class="ens-field-name">{{ field.name }}:</span>
+                                <span class="ens-field-value">{{ field.value }}</span>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+        {# CARDS MODE #}
+        <div class="ensemble-view" id="ensemble-cards">
+            {% for ch in char_list %}
+                <div class="ens-card"
+                     data-search="{{ ch.name|lower }} {{ ch.title|lower }} {{ ch.teaser|lower|striptags }}">
+                    {% if ch.faction_colors %}
+                        <div class="ens-faction-bar">
+                            {% for f in ch.faction_colors %}<div style="flex:1;background-color:{{ f.color }};"></div>{% endfor %}
+                        </div>
+                        <div class="ens-card-factions-print">
+                            {% for f in ch.factions %}
+                                {% if f.name %}<span class="ens-faction-tag-print">{{ f.name }}</span>{% endif %}
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                    {% if ch.guild_colors %}
+                        <div class="ens-guild-bar">
+                            {% for g in ch.guild_colors %}<div style="flex:1;background-color:{{ g.color }};"></div>{% endfor %}
+                        </div>
+                        <div class="ens-card-guilds-print">
+                            {% for g in ch.guilds %}
+                                {% if g.name %}<span class="ens-guild-tag-print">{{ g.name }}</span>{% endif %}
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                    <div class="ens-card-portrait">
+                        {% get_char_profile ch as profile_url %}
+                        <img src="{{ profile_url }}" alt="{{ ch.name }}">
+                    </div>
+                    <div class="ens-card-mini-portrait">
+                        {% get_char_profile ch as profile_url %}
+                        <img src="{{ profile_url }}" alt="{{ ch.name }}">
+                    </div>
+                    <div class="ens-card-content">
+                        <div class="ens-card-name">
+                            {{ ch.name }}
+                            {% if ch.title %}<span class="ens-title">- {{ ch.title }}</span>{% endif %}
+                        </div>
+                        {% if ch.factions %}
+                            <div class="ens-card-factions-screen">
+                                {% for f in ch.factions %}
+                                    {% if f.name %}<span class="ens-faction-tag" style="background-color:{{ f.color }};">{{ f.name }}</span>{% endif %}
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                        {% if ch.guilds %}
+                            <div class="ens-card-guilds-screen">
+                                {% for g in ch.guilds %}
+                                    {% if g.name %}<span class="ens-guild-tag" style="background-color:{{ g.color }};">{{ g.name }}</span>{% endif %}
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                        {% if ensemble_show_player and ch.player_name %}<div class="ens-card-player">{{ ch.player_name }}</div>{% endif %}
+                        {% for field in ch.display_fields %}
+                            <div class="ens-field-inline">
+                                <b>{{ field.name }}:</b> {{ field.value }}
+                            </div>
+                        {% endfor %}
+                        {% if ch.teaser %}
+                            <hr class="ens-card-divider-screen">
+                            <div class="ens-card-teaser">{{ ch.teaser|sanitize_html|truncatechars_html:300 }}</div>
+                        {% endif %}
+                    </div>
+                    {% if ch.teaser %}
+                        <div class="ens-card-teaser-print">
+                            <hr class="ens-card-divider-print">
+                            <div class="ens-card-teaser">{{ ch.teaser|sanitize_html|truncatechars_html:300 }}</div>
+                        </div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        </div>
+        {# COMPACT MODE #}
+        <div class="ensemble-view" id="ensemble-compact">
+            <table class="ens-table">
+                <thead>
+                    <tr>
+                        <th class="sortable" data-col="0">#</th>
+                        <th class="sortable" data-col="1">{% trans "Character" %}</th>
+                        {% if char_list.0.factions %}
+                            <th>{% trans "Factions" %}</th>
+                        {% endif %}
+                        {% if char_list.0.guilds %}
+                            <th>{% trans "Guilds" %}</th>
+                        {% endif %}
+                        {% if ensemble_show_player %}
+                            <th class="sortable" data-col="3">{% trans "Player" %}</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ch in char_list %}
+                        <tr data-search="{{ ch.name|lower }} {% if ensemble_show_player %}{{ ch.player_name|lower }}{% endif %}">
+                            <td>{{ ch.number }}</td>
+                            <td>
+                                <a href="{% url 'character' run.get_slug ch.uuid %}">{{ ch.name }}
+                                    {% if ch.title %}- {{ ch.title }}{% endif %}
+                                </a>
+                            </td>
+                            {% if ch.factions %}
+                                <td>
+                                    {% for f in ch.factions %}
+                                        {{ f.name }}
+                                        {% if f.color %}<span class="ens-compact-color" style="background-color:{{ f.color }};"></span>{% endif %}
+                                        {% if not forloop.last %}|{% endif %}
+                                    {% endfor %}
+                                </td>
+                            {% elif char_list.0.factions %}
+                                <td></td>
+                            {% endif %}
+                            {% if ch.guilds %}
+                                <td>
+                                    {% for g in ch.guilds %}
+                                        {{ g.name }}
+                                        {% if g.color %}<span class="ens-compact-color" style="background-color:{{ g.color }};"></span>{% endif %}
+                                        {% if not forloop.last %}|{% endif %}
+                                    {% endfor %}
+                                </td>
+                            {% elif char_list.0.guilds %}
+                                <td></td>
+                            {% endif %}
+                            {% if ensemble_show_player %}<td>{{ ch.player_name|default:"" }}</td>{% endif %}
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <p class="ens-empty">{% trans "No characters available." %}</p>
+    {% endif %}
+{% endblock content %}
+{% block css %}
+    <style>
+        /* Toolbar */
+        .ensemble-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.75rem 0;
+            margin-bottom: 1.25rem;
+            flex-wrap: wrap;
+        }
+        .ensemble-modes {
+            display: flex;
+            gap: 0.4rem;
+        }
+        .ensemble-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.4rem 0.9rem;
+            border-radius: 4px;
+            box-shadow: none;
+            border: 1px solid black;
+            background: rgba(var(--sec-rgb), 0.7) !important;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .ensemble-btn:hover { background: rgba(var(--sec-rgb), 0.3) !important; }
+        .ensemble-btn.active { rgba(var(--pri-rgb), 0.9) !important; color: rgba(var(--ter-rgb), 0.9) !important; border-color: #333; }
+        .ensemble-search-wrap { flex: 1; min-width: 200px; }
+        #ensemble-search {
+            width: 100%;
+            padding: 0.4rem 0.75rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 0.95rem;
+        }
+        /* Views toggle */
+        .ensemble-view { display: none; }
+        .ensemble-view.active { display: block; }
+        #ensemble-book.active { max-width: 1000px; margin: auto; }
+        #ensemble-cards.active { display: flex; flex-wrap: wrap; gap: 1rem; }
+        /* Override .active a from global CSS */
+        #ensemble-cards a, #ensemble-book a, #ensemble-compact a {
+            background-color: transparent !important;
+            pointer-events: auto !important;
+        }
+        /* Faction color bar */
+        .ens-faction-bar {
+            display: flex;
+            width: 100%;
+            height: 5px;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        /* Guild color bar */
+        .ens-guild-bar {
+            display: flex;
+            width: 100%;
+            height: 5px;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        /* Book mode */
+        .ens-book-entry {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0 1.25rem;
+            padding: 1.25rem 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .ens-book-cover {
+            flex-shrink: 0;
+            width: 100px;
+        }
+        .ens-book-cover img {
+            width: 100px;
+            height: 133px;
+            object-fit: cover;
+            border-radius: 4px;
+        }
+        .ens-book-body { flex: 1; text-align: left; }
+        .ens-book-name { font-size: 1.2rem; margin: 0 0 0.3rem; }
+        .ens-card-name { color: #666; font-weight: normal; }
+        .ens-player { color: #888; font-size: 0.85rem; margin: 0 0 0.3rem; }
+        .ens-faction-tag {
+            display: inline-block;
+            background: #eee;
+            border-radius: 3px;
+            padding: 0.1rem 0.45rem;
+            font-size: 0.8rem;
+            margin-right: 0.3rem;
+        }
+        .ens-guild-tag {
+            display: inline-block;
+            background: #eee;
+            border-radius: 3px;
+            padding: 0.1rem 0.45rem;
+            font-size: 0.8rem;
+            margin-right: 0.3rem;
+        }
+        .ens-teaser { font-size: 0.95rem; margin-bottom: 0.5rem; }
+        .ens-field { font-size: 0.88rem; margin-bottom: 0.2rem; }
+        .ens-field-name { font-weight: 600; margin-right: 0.3rem; }
+        /* Cards mode */
+        .ens-card {
+            width: 19%;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #fff;
+            box-shadow: 0 1px 4px rgba(0,0,0,.08);
+            page-break-inside: avoid;
+        }
+        @media screen and (max-width: 1200px) {
+            .ens-card {
+                width: 24%;
+            }
+        }
+        .ens-card-portrait img {
+            width: 100%;
+            height: 180px;
+            object-fit: cover;
+            display: block;
+        }
+        .ens-card-content { padding: 0.75rem; }
+        .ens-card-name { font-weight: 700; font-size: 1rem; margin-bottom: 0.25rem; }
+        .ens-card-player { color: #888; font-size: 0.8rem; margin-bottom: 0.25rem; }
+        .ens-card-factions { margin-bottom: 0.4rem; }
+        .ens-card-teaser { font-size: 0.85rem; color: #444; margin-bottom: 0.4rem; }
+        .ens-field-inline { font-size: 0.8rem; margin-bottom: 0.15rem; }
+        .ens-card-mini-portrait { display: none; }
+        .ens-card-factions-print { display: none; }
+        .ens-card-factions-screen { margin: 0.25rem 0 0.4rem; }
+        .ens-card-guilds-print { display: none; }
+        .ens-card-guilds-screen { margin: 0.25rem 0 0.4rem; }
+        .ens-card-teaser-print { display: none; }
+        .ens-card-divider-screen { border: none; border-top: 1px solid #e0e0e0; margin: 0.5rem 0; }
+        /* Compact mode */
+        .ens-table { width: 100%; border-collapse: collapse; }
+        .ens-table th, .ens-table td {
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid #e0e0e0;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+        .ens-table th { background: rgba(var(--sec-rgb), 0.7) !important; font-weight: 600; }
+        .ens-table th.sortable { cursor: pointer; user-select: none; }
+        .ens-table th.sortable::after { content: " ↕"; color: #aaa; font-size: 0.75rem; }
+        .ens-table th.asc::after { content: " ↑"; color: #333; }
+        .ens-table th.desc::after { content: " ↓"; color: #333; }
+        .ens-table tr:hover td { background: rgba(var(--sec-rgb), 0.3) !important; }
+        .ens-empty { color: #888; padding: 2rem 0; text-align: center; }
+        .ens-card-factions-screen .ens-faction-tag { color: white; }
+        .ens-card-guilds-screen .ens-guild-tag { color: white; }
+        .ens-compact-color {
+            display: inline-block;
+            width: 30px;
+            height: 10px;
+            border-radius: 2px;
+            margin-right: 4px;
+            vertical-align: middle;
+        }
+        /* Responsive */
+        @media (max-width: 600px) {
+            .ens-book-cover { width: 70px; }
+            .ens-book-cover img { width: 70px; height: 93px; }
+            .ens-card { width: 100%; }
+        }
+        /* Print - shared reset */
+        @media print {
+            hr, #staging, #banner, #header, #topbar, .main_nav, .reg_status,
+            .ensemble-toolbar, #footer { display: none !important; }
+            html, body {
+                margin: 0 !important;
+                padding: 0 !important;
+                overflow: visible !important;
+                width: auto !important;
+                height: auto !important;
+            }
+            /* Unblock all ancestor wrappers */
+            body > *, #content, #main, .container, [id*="wrap"], [class*="wrap"],
+            [id*="content"], [class*="content"], [id*="main"], [class*="main"] {
+                overflow: visible !important;
+                height: auto !important;
+                max-height: none !important;
+                padding: 0 !important;
+                margin: 0 !important;
+            }
+            /* Hide inactive views */
+            .ensemble-view { display: none !important; }
+
+            /* CARDS MODE (A4 landscape, 2 per row) */
+            #ensemble-cards.active {
+                display: flex !important;
+                flex-wrap: wrap !important;
+                gap: 0 !important;
+                width: auto !important;
+                overflow: visible !important;
+                height: auto !important;
+            }
+            /* Card: portrait on right (64mm), content on left */
+            #ensemble-cards.active .ens-card {
+                position: relative !important;
+                width: 128mm !important;
+                height: 89mm !important;
+                min-height: 89mm !important;
+                border: 1px solid #999 !important;
+                box-shadow: none !important;
+                page-break-inside: avoid !important;
+                overflow: hidden !important;
+                box-sizing: border-box !important;
+                display: block !important;
+            }
+            #ensemble-cards.active .ens-card-portrait {
+                position: absolute !important;
+                right: 0 !important;
+                top: 0 !important;
+                width: 64mm !important;
+                height: 89mm !important;
+                overflow: hidden !important;
+                border-left: 1px dashed #bbb !important;
+            }
+            #ensemble-cards.active .ens-card-portrait img {
+                width: 100% !important;
+                height: 89mm !important;
+                max-height: 89mm !important;
+                object-fit: cover !important;
+                display: block !important;
+            }
+            #ensemble-cards.active .ens-card-mini-portrait {
+                display: block !important;
+                position: absolute !important;
+                left: 0 !important;
+                top: 0 !important;
+                width: 18mm !important;
+                height: 24mm !important;
+                overflow: hidden !important;
+                border-radius: 0 !important;
+                z-index: 2 !important;
+            }
+            #ensemble-cards.active .ens-card-mini-portrait img {
+                width: 100% !important;
+                height: 100% !important;
+                object-fit: cover !important;
+                display: block !important;
+            }
+            #ensemble-cards.active .ens-faction-bar {
+                display: flex !important;
+                position: absolute !important;
+                left: 18mm !important;
+                top: 0 !important;
+                width: 46mm !important;
+                height: 3mm !important;
+                flex-direction: row !important;
+                border-radius: 0 !important;
+                margin-bottom: 0 !important;
+                z-index: 2 !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+            #ensemble-cards.active .ens-faction-bar > div {
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+            #ensemble-cards.active .ens-card-factions-print {
+                display: flex !important;
+                position: absolute !important;
+                left: 18mm !important;
+                top: 3mm !important;
+                width: 46mm !important;
+                font-size: 7pt !important;
+                z-index: 2 !important;
+            }
+            #ensemble-cards.active .ens-card-factions-print .ens-faction-tag-print {
+                font-size: 9pt !important;
+                flex: 1;
+            }
+            #ensemble-cards.active .ens-card-factions-screen { display: none !important; }
+            #ensemble-cards.active .ens-guild-bar { display: none !important; }
+            #ensemble-cards.active .ens-card-guilds-print { display: none !important; }
+            #ensemble-cards.active .ens-card-guilds-screen { display: none !important; }
+            #ensemble-cards.active .ens-card-divider-screen { display: none !important; }
+            #ensemble-cards.active .ens-card-content {
+                position: absolute !important;
+                left: 18mm !important;
+                top: 9mm !important;
+                width: 44mm !important;
+                height: 15mm !important;
+                overflow: hidden !important;
+                padding: 0 1mm !important;
+                box-sizing: border-box !important;
+            }
+            #ensemble-cards.active .ens-card-content .ens-card-teaser { display: none !important; }
+            #ensemble-cards.active .ens-card-teaser-print {
+                display: block !important;
+                position: absolute !important;
+                left: 0 !important;
+                top: 25mm !important;
+                width: 62mm !important;
+                height: 62mm !important;
+                overflow: hidden !important;
+                padding: 0 2mm !important;
+                box-sizing: border-box !important;
+            }
+            #ensemble-cards.active .ens-card-divider-print {
+                display: block !important;
+                border: none !important;
+                border-top: 1pt solid #333 !important;
+                margin: 0 0 1mm !important;
+                height: 0 !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+            #ensemble-cards.active .ens-card-teaser-print .ens-card-teaser {
+                display: block !important;
+                font-size: 10pt !important;
+                color: #333 !important;
+                line-height: 1.3 !important;
+            }
+            #ensemble-cards.active .ens-card-name { font-size: 12pt !important; font-weight: 700 !important; margin-top: 0 !important; margin-bottom: 0.5mm !important; }
+            #ensemble-cards.active .ens-card-player { display: none !important; }
+            #ensemble-cards.active .ens-card-teaser { font-size: 7pt !important; color: #333 !important; line-height: 1.3 !important; }
+            #ensemble-cards.active .ens-field-inline { font-size: 6.5pt !important; margin-bottom: 0.5mm !important; }
+            #ensemble-cards.active .ens-faction-tag { background: none !important; padding: 0 !important; font-size: 7pt !important; }
+            #ensemble-cards.active .ens-faction-tag::after { content: ", "; }
+            #ensemble-cards.active .ens-faction-tag:last-child::after { content: ""; }
+            #ensemble-cards.active a { background: none !important; background-color: transparent !important; }
+
+            /* BOOK MODE (A4 portrait) */
+            #ensemble-book.active {
+                display: block !important;
+            }
+            #ensemble-book.active .ens-book-entry {
+                display: flex !important;
+                flex-wrap: nowrap !important;
+                gap: 0 6mm !important;
+                padding: 5mm 0 !important;
+                border-bottom: 0.5pt solid #ccc !important;
+                page-break-inside: avoid !important;
+            }
+            #ensemble-book.active .ens-book-cover {
+                flex-shrink: 0 !important;
+                width: 28mm !important;
+            }
+            #ensemble-book.active .ens-book-cover img {
+                width: 28mm !important;
+                height: 37mm !important;
+                object-fit: cover !important;
+                border-radius: 2px !important;
+                display: block !important;
+            }
+            #ensemble-book.active .ens-book-body { flex: 1 !important; }
+            #ensemble-book.active .ens-book-name { font-size: 12pt !important; margin: 0 0 1mm !important; }
+            #ensemble-book.active .ens-player { font-size: 8pt !important; color: #555 !important; margin: 0 0 1mm !important; }
+            #ensemble-book.active .ens-faction-tag {
+                padding: 0.3mm 1.5mm !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+            #ensemble-book.active .ens-guild-tag {
+                padding: 0.3mm 1.5mm !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+            #ensemble-book.active .ens-teaser { font-size: 12pt !important; line-height: 1.35 !important; }
+            #ensemble-book.active .ens-field { font-size: 14pt !important; margin-bottom: 0.5mm !important; }
+            #ensemble-book.active a { background: none !important; background-color: transparent !important; }
+
+            /* COMPACT MODE (A4 portrait) */
+            #ensemble-compact.active {
+                display: block !important;
+            }
+            #ensemble-compact.active .ens-table { width: 100% !important; border-collapse: collapse !important; }
+            #ensemble-compact.active .ens-table th,
+            #ensemble-compact.active .ens-table td {
+                padding: 2mm 3mm !important;
+                border-bottom: 0.5pt solid #ccc !important;
+                font-size: 9pt !important;
+            }
+            #ensemble-compact.active .ens-table th { background: #f0f0f0 !important; font-weight: 600 !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+            #ensemble-compact.active .ens-table th::after { content: "" !important; }
+            #ensemble-compact.active .ens-compact-color {
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+            #ensemble-compact.active a { background: none !important; background-color: transparent !important; }
+        }
+    </style>
+{% endblock css %}
+{% block js %}
+    <script>
+    (function () {
+        const STORAGE_KEY = 'ensemble_mode_{{ run.event.slug }}';
+        const defaultMode = '{{ ensemble_default_mode }}';
+
+        // Mode switching
+        function showMode(mode) {
+            document.querySelectorAll('.ensemble-view').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.ensemble-btn').forEach(el => el.classList.remove('active'));
+            const view = document.getElementById('ensemble-' + mode);
+            const btn = document.querySelector('.ensemble-btn[data-mode="' + mode + '"]');
+            if (view) view.classList.add('active');
+            if (btn) btn.classList.add('active');
+            try { sessionStorage.setItem(STORAGE_KEY, mode); } catch(e) {}
+        }
+
+        let savedMode = defaultMode;
+        try { savedMode = sessionStorage.getItem(STORAGE_KEY) || defaultMode; } catch(e) {}
+        showMode(savedMode);
+
+        document.querySelectorAll('.ensemble-btn[data-mode]').forEach(btn => {
+            btn.addEventListener('click', function () { showMode(this.dataset.mode); });
+        });
+
+        // Print: inject @page orientation based on current mode, then print
+        const _printStyle = document.createElement('style');
+        document.head.appendChild(_printStyle);
+        document.getElementById('ensemble-print').addEventListener('click', function () {
+            const current = sessionStorage.getItem(STORAGE_KEY) || defaultMode;
+            const isLandscape = current === 'cards';
+            _printStyle.textContent = isLandscape
+                ? '@media print { @page { size: A4 landscape; margin: 8mm; } }'
+                : '@media print { @page { size: A4 portrait; margin: 10mm; } }';
+            window.print();
+        });
+
+        // Search
+        document.getElementById('ensemble-search').addEventListener('input', function () {
+            const q = this.value.toLowerCase().trim();
+            document.querySelectorAll('[data-search]').forEach(el => {
+                const match = !q || el.dataset.search.includes(q);
+                el.style.display = match ? '' : 'none';
+            });
+        });
+
+        // Compact table sort
+        document.querySelectorAll('.ens-table th.sortable').forEach(th => {
+            th.addEventListener('click', function () {
+                const col = parseInt(this.dataset.col);
+                const tbody = this.closest('table').querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                const asc = !this.classList.contains('asc');
+                document.querySelectorAll('.ens-table th').forEach(h => h.classList.remove('asc', 'desc'));
+                this.classList.add(asc ? 'asc' : 'desc');
+                rows.sort((a, b) => {
+                    const av = (a.cells[col] || {textContent: ''}).textContent.trim();
+                    const bv = (b.cells[col] || {textContent: ''}).textContent.trim();
+                    const an = parseFloat(av), bn = parseFloat(bv);
+                    if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+                    return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+                });
+                rows.forEach(r => tbody.appendChild(r));
+            });
+        });
+    })();
+    </script>
+{% endblock js %}

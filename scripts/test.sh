@@ -3,6 +3,29 @@
 # Unified test script for LarpManager
 set -euo pipefail
 
+# Activate virtual environment if not already active
+if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+  _venv_dir=""
+  for _candidate in .venv venv; do
+    if [[ -f "$_candidate/bin/activate" ]]; then
+      _venv_dir="$_candidate"
+      break
+    fi
+  done
+  if [[ -z "$_venv_dir" ]]; then
+    _venv_dir=$(find . -maxdepth 2 -type d -name "*venv*" 2>/dev/null | while read -r d; do
+      [[ -f "$d/bin/activate" ]] && echo "$d" && break
+    done | head -1)
+  fi
+  if [[ -n "$_venv_dir" ]]; then
+    echo "==> Activating virtual environment: $_venv_dir"
+    source "$_venv_dir/bin/activate"
+  else
+    echo "WARNING: No virtual environment found (searched *venv* dirs)" >&2
+  fi
+  unset _venv_dir _candidate
+fi
+
 check_branch() {
   # Skip check if running in CI environment
   if [[ "${CI:-false}" == "true" ]] || [[ "${GITHUB_ACTIONS:-false}" == "true" ]]; then
@@ -35,14 +58,14 @@ check_schema_version() {
   latest_migration=$(ls -1 larpmanager/migrations/[0-9]*.py 2>/dev/null | sort -V | tail -1 | xargs basename -s .py 2>/dev/null || echo "")
 
   if [[ -z "$dump_version" ]]; then
-    echo "WARNING: Could not find schema version in $sql_file" >&2
+    echo "ERROR: Could not find schema version in $sql_file" >&2
     echo "The dump may be outdated. Run 'python manage.py dump_test' to update it." >&2
-    return 1
+    exit 1
   fi
 
   if [[ -z "$latest_migration" ]]; then
-    echo "WARNING: Could not find migration files" >&2
-    return 1
+    echo "ERROR: Could not find migration files" >&2
+    exit 1
   fi
 
   if [[ "$dump_version" != "$latest_migration" ]]; then
@@ -60,7 +83,10 @@ check_schema_version() {
 cleanup_test_environment() {
   echo "==> Cleaning up test environment..."
 
-  # Kill any running pytest and playwright processes
+  # Kill any running pytest and playwright processes (graceful first, then force)
+  pkill -15 -f "pytest" 2>/dev/null || true
+  pkill -15 -f "playwright" 2>/dev/null || true
+  sleep 3
   pkill -9 -f "pytest" 2>/dev/null || true
   pkill -9 -f "playwright" 2>/dev/null || true
   sleep 1
@@ -134,5 +160,5 @@ bash "${SCRIPT_DIR}/test_playwright.sh"
 echo ""
 
 echo "========================================"
-echo "All tests passed! ✓"
+echo "All tests passed!"
 echo "========================================"

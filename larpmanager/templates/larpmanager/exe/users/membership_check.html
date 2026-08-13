@@ -4,11 +4,11 @@
     {% trans "Member Data Checks" %}
 {% endblock title %}
 {% block info %}
-    {% trans "This page performs checks on members' data" %}
+    {% trans "Review data inconsistencies across member records, including fiscal code validation errors" %}
 {% endblock info %}
 {% block content %}
+    <h2>{% trans "Tax code check" %}</h2>
     {% if cf %}
-        <h2>{% trans "Tax code check" %}</h2>
         <table id="tax_code_check" class="go_datatable">
             <thead>
                 <tr>
@@ -23,7 +23,7 @@
             {% for el in cf %}
                 <tr>
                     <td>
-                        <a href="{% url 'exe_member' el.member.uuid %}">{{ el.member }}</a>
+                        <a href="{% url 'exe_member' el.member_uuid %}">{{ el.member }}</a>
                     </td>
                     <td>{{ el.membership.card_number }}</td>
                     <td>{{ el.email }}</td>
@@ -33,5 +33,7 @@
                 </tr>
             {% endfor %}
         </table>
+    {% else %}
+        <p class="no-elements-available">{% trans "No fiscal code errors found. All member records are consistent." %}</p>
     {% endif %}
 {% endblock content %}

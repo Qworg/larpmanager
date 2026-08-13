@@ -97,7 +97,7 @@ def _organization_sitemap(association_id: Any) -> list[str]:
     # Get organization and check if it's a demo instance
     organization = Association.objects.get(pk=association_id)
     organization_cache = get_cache_association(organization.slug)
-    if organization_cache.get("demo", False):
+    if organization_cache.get("lite_mode", False) or organization_cache.get("demo", False):
         return []
 
     # Build base organization URL
@@ -110,6 +110,7 @@ def _organization_sitemap(association_id: Any) -> list[str]:
     # Query active runs for future events
     runs = (
         Run.objects.exclude(development__in=[DevelopStatus.START, DevelopStatus.CANC])
+        .exclude(event__visible=False)
         .filter(event__association_id=association_id)
         .filter(end__gte=timezone.now())
         .select_related("event", "event__association")
@@ -138,8 +139,11 @@ def larpmanager_sitemap() -> list[str]:
         List of complete URLs for static pages, guides, and blog posts.
 
     """
+    # LLM context files
+    urls = ["https://larpmanager.com/llms.txt", "https://larpmanager.com/llms-full.txt"]
+
     # Static pages
-    urls = [f"https://larpmanager.com/{page_path}/" for page_path in ["", "usage", "about-us"]]
+    urls.extend([f"https://larpmanager.com/{page_path}/" for page_path in ["", "usage", "about-us"]])
 
     # Guide posts
     urls.extend(

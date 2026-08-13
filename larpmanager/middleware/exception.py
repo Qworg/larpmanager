@@ -38,6 +38,7 @@ from larpmanager.utils.core.exceptions import (
     MainPageError,
     MembershipError,
     NotFoundError,
+    PendingApprovalError,
     RedirectError,
     ReturnNowError,
     RewokedMembershipError,
@@ -106,7 +107,7 @@ class ExceptionHandlingMiddleware:
                 SignupError,
                 lambda ex: self._redirect_with_message(
                     request,
-                    _("To access this feature, you must first register") + "!",
+                    _("To access this feature, you must first register!"),
                     "register",
                     [ex.slug],
                 ),
@@ -115,7 +116,16 @@ class ExceptionHandlingMiddleware:
                 WaitingError,
                 lambda ex: self._redirect_with_message(
                     request,
-                    _("This feature is available for non-waiting tickets") + "!",
+                    _("This feature is available for non-waiting tickets!"),
+                    "register",
+                    [ex.slug],
+                ),
+            ),
+            (
+                PendingApprovalError,
+                lambda ex: self._redirect_with_message(
+                    request,
+                    _("Your signup request is awaiting organizer approval!"),
                     "register",
                     [ex.slug],
                 ),
@@ -125,13 +135,13 @@ class ExceptionHandlingMiddleware:
                 HiddenError,
                 lambda ex: self._redirect_with_message(
                     request,
-                    ex.name + " " + _("not visible at this time"),
+                    _("%(name)s not visible at this time") % {"name": ex.name},
                     "gallery",
                     [ex.slug],
                 ),
             ),
             # Flow control exceptions - handle redirects and early returns
-            (RedirectError, lambda ex: redirect(ex.view)),
+            (RedirectError, lambda ex: self._handle_redirect(request, ex)),
             (ReturnNowError, lambda ex: ex.value),
             # Domain and membership management errors
             (
@@ -140,7 +150,7 @@ class ExceptionHandlingMiddleware:
             ),
             (
                 RewokedMembershipError,
-                lambda _ex: self._redirect_with_message(request, _("You're not allowed to sign up") + "!", "home", []),
+                lambda _ex: self._redirect_with_message(request, _("You're not allowed to sign up!"), "home", []),
             ),
         ]
 
@@ -151,6 +161,16 @@ class ExceptionHandlingMiddleware:
 
         # Return None for unhandled exceptions to use Django's default handling
         return None
+
+    @staticmethod
+    def _handle_redirect(request: HttpRequest, exception: RedirectError) -> HttpResponse:
+        """Redirect to the target view, breaking out of an iframe modal when in frame mode."""
+        target = reverse(exception.view, args=exception.args, kwargs=exception.kwargs)
+        is_frame = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+        if is_frame:
+            # If inside an iframe modal, get out
+            return render(request, "elements/dashboard/frame_redirect.html", {"redirect_url": target})
+        return HttpResponseRedirect(target)
 
     @staticmethod
     def _redirect_with_message(

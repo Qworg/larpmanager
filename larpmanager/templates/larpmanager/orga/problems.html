@@ -1,13 +1,10 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Problems" %} - {{ run }}
+    {% trans "Problems" %} - {{ run.search | truncatechars:50 }}
 {% endblock title %}
-{% block info %}
-    {% trans "This page shows problems reported by contributors, for direct management during the event" %}
-{% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
+    {% include "elements/table/header.html" %}
     <p>
         <a href="#" class="my_toggle" tog='closed'>{% trans "Show closed" %}</a>
     </p>
@@ -15,19 +12,22 @@
         <thead>
             <tr>
                 <th></th>
+                <th></th>
                 <th>{% trans "Severity" %}</th>
                 <th>{% trans "Status" %}</th>
                 <th>{% trans "Where" %}</th>
                 <th>{% trans "When" %}</th>
                 <th>{% trans "What" %}</th>
                 <th>{% trans "Who" %}</th>
-                <th>{% trans "Rensponsable" %}</th>
+                <th>{% trans "Responsible" %}</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
             {% for el in list %}
                 <tr id="{{ el.uuid }}"
                     {% if el.status == 'c' %}class="closed hide"{% endif %}>
+                    <td></td>
                     <td>
                         <a href="{% url 'orga_problems_edit' run.get_slug el.uuid %}"
                            qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
@@ -39,8 +39,19 @@
                     <td>{{ el.what_l }}</td>
                     <td>{{ el.who_l }}</td>
                     <td>{{ el.assigned }}</td>
+                    <td>
+                        <a href="{% url 'orga_problems_delete' run.get_slug el.uuid %}"
+                           qtip="{% trans "Delete" %}"
+                           class="only_new_v18"><i class="fas fa-trash"></i></a>
+                    </td>
                 </tr>
             {% endfor %}
         </tbody>
     </table>
+    {% if not list %}
+        <p class="no-elements-available">
+            {% trans "No problems have been reported for this event yet. Use the button above to add a new problem." %}
+        </p>
+    {% endif %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}

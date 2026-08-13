@@ -18,19 +18,16 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 
+
 from django.contrib.auth.decorators import login_required
 from django.http import HttpRequest, HttpResponse
-from django.shortcuts import render
+from django.shortcuts import redirect, render
+from django.utils.translation import gettext_lazy as _
 
 from larpmanager.cache.warehouse import get_association_warehouse_cache
-from larpmanager.forms.miscellanea import ExeUrlShortnerForm
-from larpmanager.forms.warehouse import (
-    ExeWarehouseContainerForm,
-    ExeWarehouseItemForm,
-    ExeWarehouseMovementForm,
-    ExeWarehouseTagForm,
-)
+from larpmanager.models.member import LogOperationType
 from larpmanager.models.miscellanea import (
+    Log,
     UrlShortner,
     WarehouseContainer,
     WarehouseItem,
@@ -38,8 +35,10 @@ from larpmanager.models.miscellanea import (
     WarehouseTag,
 )
 from larpmanager.utils.core.base import check_association_context
-from larpmanager.utils.services.bulk import handle_bulk_items
-from larpmanager.utils.services.edit import exe_edit
+from larpmanager.utils.core.paginate import exe_paginate
+from larpmanager.utils.edit.backend import save_log
+from larpmanager.utils.edit.exe import ExeAction, exe_delete, exe_edit, exe_new
+from larpmanager.utils.services.bulk import RECOVERABLE_MODELS, handle_bulk_items, restore_object
 from larpmanager.utils.services.miscellanea import get_warehouse_optionals
 
 
@@ -56,9 +55,21 @@ def exe_urlshortner(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_urlshortner_new(request: HttpRequest) -> HttpResponse:
+    """Create a new URL shortener entry."""
+    return exe_new(request, ExeAction.URLSHORTNER)
+
+
+@login_required
 def exe_urlshortner_edit(request: HttpRequest, url_uuid: str) -> HttpResponse:
     """Edit an existing URL shortener entry."""
-    return exe_edit(request, ExeUrlShortnerForm, url_uuid, "exe_urlshortner")
+    return exe_edit(request, ExeAction.URLSHORTNER, url_uuid)
+
+
+@login_required
+def exe_urlshortner_delete(request: HttpRequest, url_uuid: str) -> HttpResponse:
+    """Delete url."""
+    return exe_delete(request, ExeAction.URLSHORTNER, url_uuid)
 
 
 @login_required
@@ -74,9 +85,21 @@ def exe_warehouse_containers(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_warehouse_containers_new(request: HttpRequest) -> HttpResponse:
+    """Create a new warehouse container."""
+    return exe_new(request, ExeAction.WAREHOUSE_CONTAINERS)
+
+
+@login_required
 def exe_warehouse_containers_edit(request: HttpRequest, container_uuid: str) -> HttpResponse:
     """Edit warehouse container using generic edit handler."""
-    return exe_edit(request, ExeWarehouseContainerForm, container_uuid, "exe_warehouse_containers")
+    return exe_edit(request, ExeAction.WAREHOUSE_CONTAINERS, container_uuid)
+
+
+@login_required
+def exe_warehouse_containers_delete(request: HttpRequest, container_uuid: str) -> HttpResponse:
+    """Delete container."""
+    return exe_delete(request, ExeAction.WAREHOUSE_CONTAINERS, container_uuid)
 
 
 @login_required
@@ -92,9 +115,21 @@ def exe_warehouse_tags(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_warehouse_tags_new(request: HttpRequest) -> HttpResponse:
+    """Create a new warehouse tag."""
+    return exe_new(request, ExeAction.WAREHOUSE_TAGS)
+
+
+@login_required
 def exe_warehouse_tags_edit(request: HttpRequest, tag_uuid: str) -> HttpResponse:
     """Edit warehouse tag via generic edit view."""
-    return exe_edit(request, ExeWarehouseTagForm, tag_uuid, "exe_warehouse_tags")
+    return exe_edit(request, ExeAction.WAREHOUSE_TAGS, tag_uuid)
+
+
+@login_required
+def exe_warehouse_tags_delete(request: HttpRequest, tag_uuid: str) -> HttpResponse:
+    """Delete tag."""
+    return exe_delete(request, ExeAction.WAREHOUSE_TAGS, tag_uuid)
 
 
 @login_required
@@ -129,9 +164,21 @@ def exe_warehouse_items(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_warehouse_items_new(request: HttpRequest) -> HttpResponse:
+    """Create a new warehouse item."""
+    return exe_new(request, ExeAction.WAREHOUSE_ITEMS)
+
+
+@login_required
 def exe_warehouse_items_edit(request: HttpRequest, item_uuid: str) -> HttpResponse:
     """Delegate to exe_edit for warehouse item form handling."""
-    return exe_edit(request, ExeWarehouseItemForm, item_uuid, "exe_warehouse_items")
+    return exe_edit(request, ExeAction.WAREHOUSE_ITEMS, item_uuid)
+
+
+@login_required
+def exe_warehouse_items_delete(request: HttpRequest, item_uuid: str) -> HttpResponse:
+    """Delete item."""
+    return exe_delete(request, ExeAction.WAREHOUSE_ITEMS, item_uuid)
 
 
 @login_required
@@ -150,6 +197,90 @@ def exe_warehouse_movements(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_warehouse_movements_new(request: HttpRequest) -> HttpResponse:
+    """Create a new warehouse movement."""
+    return exe_new(request, ExeAction.WAREHOUSE_MOVEMENTS)
+
+
+@login_required
 def exe_warehouse_movements_edit(request: HttpRequest, movement_uuid: str) -> HttpResponse:
     """Edit a specific warehouse movement by delegating to the generic exe_edit view."""
-    return exe_edit(request, ExeWarehouseMovementForm, movement_uuid, "exe_warehouse_movements")
+    return exe_edit(request, ExeAction.WAREHOUSE_MOVEMENTS, movement_uuid)
+
+
+@login_required
+def exe_warehouse_movements_delete(request: HttpRequest, movement_uuid: str) -> HttpResponse:
+    """Delete movement."""
+    return exe_delete(request, ExeAction.WAREHOUSE_MOVEMENTS, movement_uuid)
+
+
+@login_required
+def exe_log(request: HttpRequest) -> HttpResponse:
+    """Display paginated list of logs for organization."""
+    context = check_association_context(request, "exe_log")
+
+    context.update(
+        {
+            "selrel": ("member", "run__event"),
+            "fields": [
+                ("member", _("Member")),
+                ("operation_type", _("Operation")),
+                ("element_name", _("Element")),
+                ("info", _("Info")),
+                ("created", _("Date")),
+            ],
+            "callbacks": {
+                "operation_type": lambda el: el.get_operation_type_display(),
+            },
+        }
+    )
+
+    return exe_paginate(
+        request,
+        context,
+        Log,
+        "larpmanager/exe/logs.html",
+        None,
+    )
+
+
+@login_required
+def exe_trash(request: HttpRequest) -> HttpResponse:
+    """Display soft-deleted objects and allow restoring them."""
+    context = check_association_context(request, "exe_trash")
+
+    if request.method == "POST":
+        model_type = request.POST.get("model_type", "")
+        uuid = request.POST.get("uuid", "")
+        if model_type in RECOVERABLE_MODELS and uuid:
+            model_class = RECOVERABLE_MODELS[model_type]
+            # Scope the restore to the current association
+            has_event = any(f.name == "event" for f in model_class._meta.get_fields())  # noqa: SLF001
+            if has_event:
+                scope = {"event__association_id": context["association_id"]}
+            else:
+                scope = {"association_id": context["association_id"]}
+            if model_class.all_objects.filter(uuid=uuid, deleted__isnull=False, **scope).exists():
+                restore_object(model_class, uuid)
+                obj = model_class.objects.get(uuid=uuid)
+                save_log(context, model_class, obj, operation_type=LogOperationType.RESTORE)
+        return redirect(request.path)
+
+    association_id = context["association_id"]
+    deleted_items = {}
+    for model_name, model_class in RECOVERABLE_MODELS.items():
+        has_event = any(f.name == "event" for f in model_class._meta.get_fields())  # noqa: SLF001
+        if has_event:
+            qs = model_class.all_objects.filter(event__association_id=association_id, deleted__isnull=False)
+        else:
+            qs = model_class.all_objects.filter(association_id=association_id, deleted__isnull=False)
+        qs = qs.order_by("-deleted")
+        if qs.exists():
+            deleted_items[model_name] = {
+                "label": model_class._meta.verbose_name_plural,  # noqa: SLF001
+                "has_event": has_event,
+                "objects": list(qs),
+            }
+
+    context["deleted_items"] = deleted_items
+    return render(request, "larpmanager/exe/trash.html", context)

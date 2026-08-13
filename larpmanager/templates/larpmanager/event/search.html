@@ -3,14 +3,17 @@
 {% block title %}
     {% trans "Search" %} - {{ run.search }}
 {% endblock title %}
+{% block info %}
+    {% trans "Search and filter the characters of the event" %}
+{% endblock info %}
 {% block content %}
     {% if hide_login %}
         <p>
-            <i>{% trans "Characters are only visible to logged in users" %}: <a href="{% url 'login' %}">{% trans "Login" %}</a></i>
+            <i>{% trans "Characters are only visible to logged in users:" %} <a href="{% url 'login' %}">{% trans "Login" %}</a></i>
         </p>
     {% elif hide_signup %}
         <p>
-            <i>{% trans "Characters are only visible to participants" %}: <a href="{% url 'register' run.get_slug %}">{% trans "Register" %}</a></i>
+            <i>{% trans "Characters are only visible to participants:" %} <a href="{% url 'register' run.get_slug %}">{% trans "Register" %}</a></i>
         </p>
     {% elif not show_character %}
         <p>
@@ -20,7 +23,7 @@
         {% if features.questbuilder and show_quest %}
             <h2>Quest</h2>
             <p>
-                {% trans "Go to the quests of type" %}:
+                {% trans "Go to the quests of type:" %}
                 {% for id, qt in quest_types.items %}
                     {% include "elements/comma.html" %}
                     <a href="{% url 'quests' run.get_slug qt.uuid %}">{{ qt.name }}</a>
@@ -31,7 +34,7 @@
         <div class="c nav">
             <a href="#" class="my_toggle" tog='istr'>{% trans "Instructions" %}</a>
             <a href="#" class="my_toggle" tog='text_search'>{% trans "Search" %}</a>
-            <a href="#" class="my_toggle" tog='spec'>{% trans "Features" %}</a>
+            <a href="#" class="my_toggle" tog='spec'>{% trans "Status" %}</a>
             {% if factions and factions|length > 1 %}
                 <a href="#" class="my_toggle" tog='factions'>{% trans "Factions" %}</a>
             {% endif %}
@@ -43,84 +46,92 @@
             <a href="#" class="my_toggle" tog='link_list'>{% trans "Characters link" %}</a>
         </div>
         <div class="c nav hide istr">
-            <hr />
-            <p>{% trans "On this page you can filter characters and directly view their information" %}.</p>
-            <p>
-                {% trans "In the text search, you can enter any text; the search will be done on the number, name, teaser, player, groups to which the character belong" %}.
-            </p>
-            <p>
-                {% trans "Where you find a button like this, you can press it to perform filtering further" %}.<a href="#" onclick="false;">{% trans "Example" %}</a>
-            </p>
-            <p>
-                {% trans "If you press once, it will be *included* in the search. If a character belongs to at least one inclusion category, it will be shown in the search" %}.<a href="#" class="sel" onclick="false;">{% trans "Included" %}</a>
-            </p>
-            <p>
-                {% trans "If you press a second time, it will be *excluded* in the search. If a character belongs to even one exclusion category, it will not be shown in the search" %}.<a href="#" class="nsel" onclick="false;">{% trans "Excluded" %}</a>
-            </p>
+            <div class="user_resize">
+                <p>{% trans "On this page you can filter characters and directly view their information." %}</p>
+                <p>
+                    {% trans "In the text search, you can enter any text; the search will be done on the number, name, teaser, player, groups to which the character belong." %}
+                </p>
+                <p>
+                    {% trans "Where you find a button like this, you can press it to perform filtering further." %}<a href="#" onclick="false;">{% trans "Example" %}</a>
+                </p>
+                <p>
+                    {% trans "If you press once, it will be *included* in the search. If a character belongs to at least one inclusion category, it will be shown in the search." %}<a href="#" class="sel" onclick="false;">{% trans "Included" %}</a>
+                </p>
+                <p>
+                    {% trans "If you press a second time, it will be *excluded* in the search. If a character belongs to even one exclusion category, it will not be shown in the search." %}<a href="#" class="nsel" onclick="false;">{% trans "Excluded" %}</a>
+                </p>
+            </div>
         </div>
         <div class="hide text_search">
-            <hr />
-            <input type="text" id="search" placeholder="{% trans "Insert" %}" />
+            <div class="user_resize">
+                <input type="text" id="search" placeholder="{% trans "Insert" %}" />
+            </div>
         </div>
         {% if factions and factions|length > 1 %}
             <div id="factions" class="c nav hide factions">
-                <hr />
-                {% for fnum in factions_typ.s %}
-                    {% with factions|get:fnum as f %}
-                        {% if f.name %}<a typ="faction" tog="{{ f.number }}" href="#">{{ f.name }}</a>{% endif %}
-                    {% endwith %}
-                {% endfor %}
-                {% if factions_typ.t %}
-                    <br />
-                    <br />
-                    {% for fnum in factions_typ.t %}
+                <div class="user_resize">
+                    {% for fnum in factions_typ.s %}
                         {% with factions|get:fnum as f %}
                             {% if f.name %}<a typ="faction" tog="{{ f.number }}" href="#">{{ f.name }}</a>{% endif %}
                         {% endwith %}
                     {% endfor %}
-                {% endif %}
+                    {% if factions_typ.t %}
+                        <br />
+                        <br />
+                        {% for fnum in factions_typ.t %}
+                            {% with factions|get:fnum as f %}
+                                {% if f.name %}<a typ="faction" tog="{{ f.number }}" href="#">{{ f.name }}</a>{% endif %}
+                            {% endwith %}
+                        {% endfor %}
+                    {% endif %}
+                </div>
             </div>
         {% endif %}
         {% for idq, options_id in searchable.items %}
             <div class="c nav hide custom_field_{{ idq }}">
-                <hr />
-                {% for ido in options_id %}
-                    {% with options|get:ido as option %}
-                        <a typ="field_{{ idq }}" href="#" tog="{{ ido }}">{{ option.name }}</a>
-                    {% endwith %}
-                {% endfor %}
+                <div class="user_resize">
+                    {% for ido in options_id %}
+                        {% with options|get:ido as option %}
+                            <a typ="field_{{ idq }}" href="#" tog="{{ ido }}">{{ option.name }}</a>
+                        {% endwith %}
+                    {% endfor %}
+                </div>
             </div>
         {% endfor %}
         <div id="spec" class="c nav hide spec">
-            <hr />
-            {% trans "Player" %}:
-            <a typ="spec" href="#" tog="pl">{% trans "Assigned" %}</a>
+            <div class="user_resize">
+                {% trans "Player:" %}
+                <a typ="spec" href="#" tog="pl">{% trans "Assigned" %}</a>
+            </div>
         </div>
         <div class="hide link_list">
-            <hr />
-            <div id="top"></div>
-            <span class="helptext">{% trans "Click on a name to go and view it directly" %}.</span>
+            <div class="user_resize">
+                <div id="top"></div>
+                <span class="helptext">{% trans "Click on a name to go and view it directly." %}</span>
+            </div>
         </div>
-        <br />
         <div id="search-results">
-            <h3>
-                {% trans "Characters list" %} (<span class="num"></span>)
-            </h3>
-            <table>
-                <tr>
-                    <th>{% trans "You are including (at least one of these filters)" %}</th>
-                    <th>{% trans "You are excluding (none of these filters)" %}</th>
-                </tr>
-                <tr>
-                    <td>
-                        <span class="incl"></span>
-                    </td>
-                    <td>
-                        <span class="escl"></span>
-                    </td>
-                </tr>
-            </table>
-            <div id="characters"></div>
+            <div class="user_resize">
+                <h3>
+                    {% trans "Characters list" %} (<span class="num"></span>)
+                </h3>
+                <table>
+                    <tr>
+                        <th>{% trans "You are including (at least one of these filters)" %}</th>
+                        <th>{% trans "You are excluding (none of these filters)" %}</th>
+                    </tr>
+                    <tr>
+                        <td>
+                            <span class="incl"></span>
+                        </td>
+                        <td>
+                            <span class="escl"></span>
+                        </td>
+                    </tr>
+                </table>
+                <div id="characters"></div>
+                <div class="clearer"></div>
+            </div>
         </div>
         <div id="teasers" class="hide">
             {% for chnum, el in chars.items %}
@@ -158,7 +169,7 @@ window['texts'] = {
     'pl': '{% filter escapejs %}{% trans "Player" %}{% endfilter %}',
     'cfields': '{% filter escapejs %}{% trans "Additional fields" %}{% endfilter %}',
     'factions': '{% filter escapejs %}{% trans "Factions" %}{% endfilter %}',
-    'specs': '{% filter escapejs %}{% trans "Features" %}{% endfilter %}',
+    'specs': '{% filter escapejs %}{% trans "Status" %}{% endfilter %}',
     'none': '{% filter escapejs %}{% trans "None" %}{% endfilter %}',
     'all': '{% filter escapejs %}{% trans "All" %}{% endfilter %}',
 }

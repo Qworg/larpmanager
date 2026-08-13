@@ -1,20 +1,18 @@
 {% extends "utils.html" %}
 {% load show_tags i18n %}
 {% block title %}
-    {% trans "Email list" %} - {{ run }}
+    {% trans "Email list" %} - {{ run.search }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows the email lists of subscribers" %}
+    {% trans "Export the email list of active registrants for use in newsletters and communications" %}
 {% endblock info %}
 {% block content %}
-    <h2>{% trans "Simple list" %}</h2>
     <p>
         {% for el in list %}
             {% include "elements/comma.html" with separator="," %}
             {{ el.1 }}
         {% endfor %}
     </p>
-    <h2>{% trans "Table list" %}</h2>
     <table>
         <tr>
             <td>Email address</td>

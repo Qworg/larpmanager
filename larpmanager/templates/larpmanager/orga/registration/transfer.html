@@ -1,10 +1,10 @@
 {% extends "utils.html" %}
 {% load show_tags i18n %}
 {% block title %}
-    {% trans "Transfer registration" %} - {{ run }}
+    {% trans "Transfer registration" %} - {{ run.search }}
 {% endblock title %}
 {% block info %}
-    {% trans "Transfer a registration from this event to another" %}
+    {% trans "Select a participant and a target event to initiate a registration transfer" %}
 {% endblock info %}
 {% block content %}
     <form method="post"

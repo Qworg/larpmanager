@@ -1,0 +1,28 @@
+{% extends "utils.html" %}
+{% load i18n show_tags %}
+{% block body_class %}
+    {% if frame %}floating_iframe{% endif %}
+{% endblock body_class %}
+{% block title %}
+    {% if nonum is None %}
+        {% if num %}
+            {{ name }}
+        {% else %}
+            {% trans "New" %}
+        {% endif %}
+        -
+    {% endif %}
+    {{ form.page_title }}
+    - {{ run.search | truncatechars:50 }}
+{% endblock title %}
+{% block content %}
+    {% include "elements/form/main.html" %}
+    <div id="options" class="hide">{% include "elements/options/inline_list.html" %}</div>
+{% endblock content %}
+{% block js %}
+    {% include "elements/questions/edit.js.html" %}
+    {% include "elements/options/inline.js.html" %}
+{% endblock js %}
+{% block js2 %}
+    {% include "elements/helpers/iframe_resize.js" %}
+{% endblock js2 %}

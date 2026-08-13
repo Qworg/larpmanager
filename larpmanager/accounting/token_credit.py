@@ -36,7 +36,7 @@ from larpmanager.models.accounting import (
     PaymentChoices,
 )
 from larpmanager.models.event import DevelopStatus
-from larpmanager.models.member import get_user_membership
+from larpmanager.models.member import Membership, get_user_membership
 from larpmanager.models.registration import Registration
 from larpmanager.models.utils import get_sum
 
@@ -66,7 +66,7 @@ def _apply_tokens(
         Remaining balance after applying tokens
 
     """
-    disable_tokens = get_event_config(event_id, "tokens_disable", default_value=False)
+    disable_tokens = get_event_config(event_id, "tokens_disable")
     if membership.tokens <= 0 or disable_tokens:
         return remaining
 
@@ -76,12 +76,13 @@ def _apply_tokens(
     membership.save()
 
     # Create payment record for token usage
-    AccountingItemPayment.objects.create(
+    AccountingItemPayment.objects.get_or_create(
         pay=PaymentChoices.TOKEN,
         value=tokens_to_use,
         member_id=registration.member_id,
         registration=registration,
         association_id=association_id,
+        defaults={},
     )
     return remaining - tokens_to_use
 
@@ -106,7 +107,7 @@ def _apply_credits(
         Remaining balance after applying credits
 
     """
-    disable_credits = get_event_config(event_id, "credits_disable", default_value=False)
+    disable_credits = get_event_config(event_id, "credits_disable")
     if membership.credit <= 0 or disable_credits:
         return remaining
 
@@ -115,13 +116,14 @@ def _apply_credits(
     membership.credit -= credits_to_use
     membership.save()
 
-    # Create payment record for credit usage
-    AccountingItemPayment.objects.create(
+    # Create payment record for credit usage with get_or_create for idempotency
+    AccountingItemPayment.objects.get_or_create(
         pay=PaymentChoices.CREDIT,
         value=credits_to_use,
         member_id=registration.member_id,
         registration=registration,
         association_id=association_id,
+        defaults={},
     )
     return remaining - credits_to_use
 
@@ -164,8 +166,9 @@ def registration_tokens_credits_use(
         return
 
     with transaction.atomic():
-        # Get member and their membership for the association
+        # Prevent concurrent requests from double-spending the same balance
         membership = get_user_membership(registration.member, association_id)
+        membership = Membership.objects.select_for_update().get(pk=membership.pk)
         event_id = registration.run.event_id
 
         # Apply tokens first if feature is enabled
@@ -174,7 +177,7 @@ def registration_tokens_credits_use(
 
         # Apply credits to remaining balance if feature is enabled
         if credits_enabled and remaining > 0:
-            remaining = _apply_credits(registration, remaining, membership, event_id, association_id)
+            _remaining = _apply_credits(registration, remaining, membership, event_id, association_id)
 
         # Note: registration.tot_payed is updated in memory but NOT saved here
         # to prevent infinite recursion via post_save signal
@@ -267,27 +270,7 @@ def registration_tokens_credits_overpay(
 
 
 def get_regs_paying_incomplete(association: Association = None) -> QuerySet[Registration]:
-    """Get registrations with incomplete payments (excluding small differences).
-
-    This function identifies registrations where the total amount paid differs
-    from the total registration amount by more than 0.05 (either overpaid or underpaid).
-    Small differences within the 0.05 threshold are considered complete payments
-    to account for rounding errors or minor discrepancies.
-
-    Args:
-        association (Optional[Association]): Association to filter registrations by.
-            If None, returns registrations from all associations.
-
-    Returns:
-        QuerySet: Django QuerySet of Registration objects with payment
-            differences greater than 0.05 in absolute value. Each registration
-            includes an annotated 'diff' field showing the payment difference.
-
-    Examples:
-        >>> incomplete_regs = get_regs_paying_incomplete()
-        >>> association_incomplete = get_regs_paying_incomplete(my_association)
-
-    """
+    """Get registrations with incomplete payments (excluding small differences)."""
     # Get base registration queryset, optionally filtered by association
     registration_queryset = get_regs(association)
 
@@ -339,12 +322,6 @@ def update_token_credit_on_payment_save(instance: AccountingItemPayment, *, crea
         update_token_credit(instance, token=instance.pay == PaymentChoices.TOKEN)
 
 
-def update_token_credit_on_payment_delete(instance: AccountingItemPayment) -> None:
-    """Handle accounting item payment post-delete token/credit updates."""
-    if instance.registration:
-        update_token_credit(instance, token=instance.pay == PaymentChoices.TOKEN)
-
-
 def update_token_credit_on_other_save(accounting_item: AccountingItemOther) -> None:
     """Handle accounting item other save for token/credit updates."""
     if not accounting_item.member:
@@ -354,12 +331,7 @@ def update_token_credit_on_other_save(accounting_item: AccountingItemOther) -> N
 
 
 def update_credit_on_expense_save(expense_item: AccountingItemExpense) -> None:
-    """Handle accounting item expense save for credit updates.
-
-    Args:
-        expense_item: AccountingItemExpense instance that was saved
-
-    """
+    """Handle accounting item expense save for credit updates."""
     if not expense_item.member or not expense_item.is_approved:
         return
 
@@ -371,13 +343,7 @@ def update_token_credit(
     *,
     token: bool,
 ) -> None:
-    """Update member's token or credit balance based on accounting item.
-
-    Args:
-        accounting_item: Accounting item that triggered the update
-        token: True to update tokens, False to update credits
-
-    """
+    """Update member's token or credit balance based on accounting item."""
     if token:
         update_tokens(accounting_item)
     else:
@@ -419,14 +385,13 @@ def update_tokens(instance: AccountingItemOther | AccountingItemPayment | Accoun
 
 
 def _save_all_regs(instance: AccountingItemOther | AccountingItemPayment | AccountingItemExpense) -> None:
-    """Trigger accounting recalculation on member's incomplete registrations.
-
-    Args:
-        instance: Accounting item whose member's registrations to update
-
-    """
+    """Trigger accounting recalculation on member's incomplete registrations."""
     # Trigger accounting updates on registrations with incomplete payments
-    for registration in get_regs_paying_incomplete(instance.association).filter(member_id=instance.member_id):
+    for registration in (
+        get_regs_paying_incomplete(instance.association)
+        .filter(member_id=instance.member_id)
+        .select_related("run", "run__event", "ticket", "member")
+    ):
         registration.save()
 
 
@@ -486,15 +451,7 @@ def handle_tokes_credits(
     registration: Registration,
     remaining_balance: Decimal,
 ) -> None:
-    """Handle token credits for a registration based on remaining balance.
-
-    Args:
-        association_id: Association ID for token credit operations
-        features: Dict of enabled features
-        registration: Registration object to process
-        remaining_balance: Remaining balance (positive = use credits, negative = add credits)
-
-    """
+    """Handle token credits for a registration based on remaining balance."""
     # Handle positive balance by using available token and/or credits
     if remaining_balance > 0:
         registration_tokens_credits_use(registration, remaining_balance, association_id, features)

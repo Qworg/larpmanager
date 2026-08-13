@@ -22,23 +22,22 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from django.apps import apps
-from django.contrib.postgres.aggregates import ArrayAgg
+from django.core.validators import MinValueValidator
 from django.db import models
-from django.db.models import F, Q, QuerySet
+from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 from imagekit.models import ImageSpecField
 from pilkit.processors import ResizeToFit
 
-from larpmanager.models.base import BaseModel, UuidMixin
+from larpmanager.models.base import BaseModel, OrderMixin, UuidMixin
 from larpmanager.models.event import Event
 from larpmanager.models.member import Member
 from larpmanager.models.registration import (
     Registration,
-    RegistrationCharacterRel,
     RegistrationSection,
     RegistrationTicket,
 )
-from larpmanager.models.utils import UploadToPathAndRename, decimal_to_str
+from larpmanager.models.utils import UploadToPathAndRename
 from larpmanager.models.writing import CharacterStatus, Faction
 
 
@@ -53,32 +52,17 @@ class BaseQuestionType(models.TextChoices):
 
     @staticmethod
     def get_answer_types() -> Any:
-        """Get question types that use text answers.
-
-        Returns:
-            set: Question types requiring text input
-
-        """
+        """Get question types that use text answers."""
         return {BaseQuestionType.TEXT, BaseQuestionType.PARAGRAPH, BaseQuestionType.EDITOR}
 
     @staticmethod
     def get_choice_types() -> Any:
-        """Get question types that use choice options.
-
-        Returns:
-            set: Question types with predefined choices
-
-        """
+        """Get question types that use choice options."""
         return {BaseQuestionType.SINGLE, BaseQuestionType.MULTIPLE}
 
     @staticmethod
     def get_basic_types() -> Any:
-        """Get all basic question types.
-
-        Returns:
-            set: All basic question type values
-
-        """
+        """Get all basic question types."""
         return BaseQuestionType.get_answer_types() | BaseQuestionType.get_choice_types()
 
     @classmethod
@@ -94,17 +78,7 @@ class BaseQuestionType(models.TextChoices):
 
 
 def extend_textchoices(name: str, base: models.TextChoices, extra: list[tuple[str, str, str]]) -> Any:
-    """Extend Django TextChoices with additional options.
-
-    Args:
-        name: Name for the new TextChoices class
-        base: Base TextChoices to extend
-        extra: List of (name, value, label) tuples to add
-
-    Returns:
-        models.TextChoices: Extended choices class
-
-    """
+    """Extend Django TextChoices with additional options."""
     members = [(m.name, (m.value, m.label)) for m in base] + [(n, (v, lbl)) for (n, v, lbl) in extra]
     return models.TextChoices(name, members)
 
@@ -121,20 +95,16 @@ WritingQuestionType = extend_textchoices(
         ("TITLE", "title", _("Title")),
         ("MIRROR", "mirror", _("Mirror")),
         ("HIDE", "hide", _("Hide")),
+        ("LOCKED", "locked", _("Locked")),
         ("PROGRESS", "progress", _("Progress")),
-        ("ASSIGNED", "assigned", _("Assigned")),
+        ("ASSIGNED", "assigned", _("Assignment")),
         ("COMPUTED", "c", _("Computed")),
     ],
 )
 
 
 def get_def_writing_types() -> Any:
-    """Get default writing question types.
-
-    Returns:
-        set: Set of default WritingQuestionType values
-
-    """
+    """Get default writing question types."""
     return {WritingQuestionType.NAME, WritingQuestionType.TEASER, WritingQuestionType.SHEET, WritingQuestionType.TITLE}
 
 
@@ -163,8 +133,9 @@ RegistrationQuestionType = extend_textchoices(
         ("TICKET", "ticket", _("Ticket")),
         ("ADDITIONAL", "additional_tickets", _("Additional")),
         ("PWYW", "pay_what_you_want", _("Pay what you want")),
-        ("QUOTA", "reg_quotas", _("Rate")),
+        ("QUOTA", "reg_quotas", _("Payment Installments")),
         ("SURCHARGE", "reg_surcharges", _("Surcharge")),
+        ("FACTION_PREFERENCE", "faction_preference", _("Faction preference")),
     ],
 )
 
@@ -216,6 +187,7 @@ class QuestionApplicable(models.TextChoices):
     QUEST = "q", "quest"
     TRAIT = "t", "trait"
     PROLOGUE = "r", "prologue"
+    GUILD = "g", "guild"
 
     @classmethod
     def get_applicable(cls, model_name: str) -> str | None:
@@ -241,7 +213,36 @@ class QuestionApplicable(models.TextChoices):
         return dict(cls.choices)
 
 
-class WritingQuestion(UuidMixin, BaseModel):
+class RegistrationQuestionApplicable(models.TextChoices):
+    """Defines which form a registration question belongs to."""
+
+    REGISTRATION = "r", "registration"
+    MATCHMAKER = "m", "matchmaker"
+    REQUEST = "q", "request"
+
+
+def _get_registration_mapping() -> dict[str, str | None]:
+    """Return mapping of registration form types to their gating feature (None = always available).
+
+    A gate prefixed with "config:" refers to an EventConfig boolean rather than a Feature slug.
+    """
+    return {
+        "registration": None,
+        "matchmaker": "matchmaker",
+        "request": "config:registration_approval_process",
+    }
+
+
+REGISTRATION_TYPE_TO_APPLICABLE = {
+    "registration": RegistrationQuestionApplicable.REGISTRATION,
+    "matchmaker": RegistrationQuestionApplicable.MATCHMAKER,
+    "request": RegistrationQuestionApplicable.REQUEST,
+}
+
+REGISTRATION_APPLICABLE_TO_TYPE = {value: key for key, value in REGISTRATION_TYPE_TO_APPLICABLE.items()}
+
+
+class WritingQuestion(UuidMixin, OrderMixin, BaseModel):
     """Form questions for character writing and story elements."""
 
     typ = models.CharField(
@@ -266,8 +267,6 @@ class WritingQuestion(UuidMixin, BaseModel):
         help_text=_("Optional - Extended description (displayed in small gray text)"),
     )
 
-    order = models.IntegerField(default=0)
-
     status = models.CharField(
         max_length=1,
         choices=QuestionStatus.choices,
@@ -283,7 +282,7 @@ class WritingQuestion(UuidMixin, BaseModel):
     )
 
     editable = models.CharField(
-        default="",
+        default="c,s,r,a",
         max_length=20,
         null=True,
         blank=True,
@@ -305,7 +304,7 @@ class WritingQuestion(UuidMixin, BaseModel):
     printable = models.BooleanField(
         default=True,
         verbose_name=_("Printable"),
-        help_text=_("Indicate whether the field is printed in PDF generations"),
+        help_text=_("Enter whether the field is printed in PDF generations"),
     )
 
     applicable = models.CharField(
@@ -321,22 +320,12 @@ class WritingQuestion(UuidMixin, BaseModel):
         return f"{self.event} - {self.name[:30]}"
 
     def show(self) -> dict[str, Any]:
-        """Return JSON-serializable dictionary of object attributes.
-
-        Returns:
-            Dictionary containing description, name, and order fields.
-
-        """
+        """Return JSON-serializable dictionary of object attributes."""
         js = {}
         # Update JSON dict with description, name, and order attributes
         for s in ["description", "name", "order"]:
             self.upd_js_attr(js, s)
         return js
-
-    @staticmethod
-    def get_instance_questions(event_instance: Any, enabled_features: Any) -> Any:  # noqa: ARG004
-        """Get all writing questions for the event instance ordered by order field."""
-        return event_instance.get_elements(WritingQuestion).order_by("order")
 
     @staticmethod
     def skip(registration: Any, features: Any, params: Any = None, *, is_organizer: Any = False) -> bool:  # noqa: ARG004
@@ -355,6 +344,33 @@ class WritingQuestion(UuidMixin, BaseModel):
         """Return comma-separated display of editable character statuses."""
         return ", ".join([str(label) for value, label in CharacterStatus.choices if value in self.get_editable()])
 
+    def as_dict(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ARG002
+        """Serialize question to dictionary for caching with nested options."""
+        data = super().as_dict(many_to_many=False)
+
+        # Ensure fields with falsy defaults are always included
+        data["description"] = self.description
+        data["order"] = self.order
+        data["max_length"] = self.max_length
+        data["printable"] = self.printable
+
+        # Add display values for choice fields (for template rendering)
+        data["get_typ_display"] = self.get_typ_display()
+        data["get_status_display"] = self.get_status_display()
+        data["get_visibility_display"] = self.get_visibility_display()
+        data["get_editable_display"] = self.get_editable_display()
+
+        # Add editable as computed field
+        data["editable"] = self.get_editable()
+
+        # Add nested options
+        data["options"] = [opt.as_dict() for opt in self.options.all()]
+
+        # Add options_list for backward compatibility with templates
+        data["options_list"] = data["options"]
+
+        return data
+
     class Meta:
         indexes: ClassVar[list] = [
             models.Index(
@@ -366,7 +382,7 @@ class WritingQuestion(UuidMixin, BaseModel):
         ]
 
 
-class WritingOption(UuidMixin, BaseModel):
+class WritingOption(UuidMixin, OrderMixin, BaseModel):
     """Represents WritingOption model."""
 
     search = models.CharField(max_length=1000, editable=False)
@@ -391,10 +407,9 @@ class WritingOption(UuidMixin, BaseModel):
 
     max_available = models.IntegerField(
         default=0,
+        validators=[MinValueValidator(0)],
         help_text=_("Optional - Maximum number of times it can be selected across all characters (0 = unlimited)"),
     )
-
-    order = models.IntegerField(default=0)
 
     requirements = models.ManyToManyField(
         "self",
@@ -402,7 +417,7 @@ class WritingOption(UuidMixin, BaseModel):
         symmetrical=False,
         blank=True,
         verbose_name=_("Prerequisites"),
-        help_text=_("Indicates other options that must be selected for this option to be selectable"),
+        help_text=_("Enter other options that must be selected for this option to be selectable"),
     )
 
     tickets = models.ManyToManyField(
@@ -419,11 +434,6 @@ class WritingOption(UuidMixin, BaseModel):
         """Return string representation."""
         return f"{self.question} {self.name}"
 
-    def get_form_text(self, currency_symbol: str | None = None) -> str:  # noqa: ARG002
-        """Return the display name for this ticket tier."""
-        show_data = self.show()
-        return show_data["name"]
-
     def show(self) -> dict[str, Any]:
         """Return JSON representation with available fields and attributes."""
         # Initialize response with max available count
@@ -435,6 +445,25 @@ class WritingOption(UuidMixin, BaseModel):
 
         return js
 
+    def as_dict(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ARG002
+        """Serialize option to dictionary for caching.
+
+        Explicitly includes fields with falsy defaults (description="", order=0, max_available=0).
+        """
+        data = super().as_dict(many_to_many=False)
+
+        # Ensure fields with falsy defaults are always included
+        data["description"] = self.description
+        data["order"] = self.order
+        data["max_available"] = self.max_available
+
+        # Preserve tickets_map annotation if it exists (added by cache queries)
+        if hasattr(self, "tickets_map"):
+            value = self.tickets_map or []
+            data["tickets_map"] = [item for item in value if item is not None]
+
+        return data
+
 
 class WritingChoice(BaseModel):
     """Choices for WritingChoice."""
@@ -443,7 +472,7 @@ class WritingChoice(BaseModel):
 
     option = models.ForeignKey(WritingOption, on_delete=models.CASCADE, related_name="choices")
 
-    element_id = models.IntegerField(blank=True, null=True)
+    element_id = models.IntegerField()
 
     def __str__(self) -> str:
         """Return string representation."""
@@ -456,6 +485,13 @@ class WritingChoice(BaseModel):
             models.Index(fields=["element_id", "question"], condition=Q(deleted__isnull=True), name="wch_elem_q_act"),
             models.Index(fields=["element_id"], condition=Q(deleted__isnull=True), name="wch_elem_act"),
         ]
+        constraints: ClassVar[list] = [
+            models.UniqueConstraint(
+                fields=["element_id", "option"],
+                condition=Q(deleted__isnull=True),
+                name="unique_writing_choice",
+            ),
+        ]
 
 
 class WritingAnswer(BaseModel):
@@ -465,7 +501,7 @@ class WritingAnswer(BaseModel):
 
     text = models.TextField(max_length=100000)
 
-    element_id = models.IntegerField(blank=True, null=True)
+    element_id = models.IntegerField()
 
     def __str__(self) -> str:
         """Return string representation with element ID, question name, and text preview."""
@@ -477,9 +513,16 @@ class WritingAnswer(BaseModel):
             models.Index(fields=["element_id", "question"], condition=Q(deleted__isnull=True), name="wan_elem_q_act"),
             models.Index(fields=["element_id"], condition=Q(deleted__isnull=True), name="wan_elem_act"),
         ]
+        constraints: ClassVar[list] = [
+            models.UniqueConstraint(
+                fields=["element_id", "question"],
+                condition=Q(deleted__isnull=True),
+                name="unique_writing_answer",
+            ),
+        ]
 
 
-class RegistrationQuestion(UuidMixin, BaseModel):
+class RegistrationQuestion(UuidMixin, OrderMixin, BaseModel):
     """Represents RegistrationQuestion model."""
 
     typ = models.CharField(
@@ -503,8 +546,6 @@ class RegistrationQuestion(UuidMixin, BaseModel):
         verbose_name=_("Description"),
         help_text=_("Optional - Extended description (displayed in small gray text)"),
     )
-
-    order = models.IntegerField(default=0)
 
     status = models.CharField(
         max_length=1,
@@ -585,7 +626,15 @@ class RegistrationQuestion(UuidMixin, BaseModel):
     giftable = models.BooleanField(
         default=False,
         verbose_name=_("Giftable"),
-        help_text=_("Indicates whether the option can be included in the gifted signups"),
+        help_text=_("Enter whether the option can be included in the gifted signups"),
+    )
+
+    applicable = models.CharField(
+        max_length=1,
+        choices=RegistrationQuestionApplicable.choices,
+        default=RegistrationQuestionApplicable.REGISTRATION,
+        verbose_name=_("Applicable"),
+        help_text=_("Select which form this question belongs to"),
     )
 
     def __str__(self) -> str:
@@ -599,83 +648,46 @@ class RegistrationQuestion(UuidMixin, BaseModel):
             self.upd_js_attr(js, s)
         return js
 
-    @staticmethod
-    def get_instance_questions(event: Event, features: list[str]) -> QuerySet:
-        """Get registration questions for an event with optional feature-specific annotations.
+    def as_dict(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ARG002
+        """Serialize question to dictionary for caching with nested options and computed fields."""
+        data = super().as_dict(many_to_many=False)
 
-        Args:
-            event: Event instance to filter questions for
-            features: List of feature flag strings to determine which annotations to add
+        # Add display values for choice fields (for template rendering)
+        data["get_typ_display"] = self.get_typ_display()
+        data["get_status_display"] = self.get_status_display()
 
-        Returns:
-            QuerySet of RegistrationQuestion objects ordered by section and question order
+        # Add section-related computed fields
+        data["section_order"] = self.section.order if self.section else None
+        data["section_name"] = self.section.name if self.section else None
+        data["section_description"] = self.section.description if self.section else None
 
-        """
-        # Get all questions for the event, ordered by section first, then by question order
-        questions = RegistrationQuestion.objects.filter(event=event).order_by(
-            F("section__order").asc(nulls_first=True),
-            "order",
-        )
+        # Add image URLs if available
+        data["profile_url"] = self.profile.url if self.profile else None
+        data["profile_thumb_url"] = self.profile_thumb.url if self.profile_thumb else None
 
-        # Conditionally add annotations based on enabled features
-        if "reg_que_tickets" in features:
-            questions = questions.annotate(tickets_map=ArrayAgg("tickets__uuid"))
-        if "reg_que_faction" in features:
-            questions = questions.annotate(factions_map=ArrayAgg("factions__id"))
-        if "reg_que_allowed" in features:
-            questions = questions.annotate(allowed_map=ArrayAgg("allowed__id"))
+        # Add nested options
+        data["options"] = [opt.as_dict() for opt in self.options.all()]
 
-        return questions
+        # Add options_list for backward compatibility with templates
+        data["options_list"] = data["options"]
 
-    def skip(self, registration: Any, features: Any, params: Any = None, *, is_organizer: Any = False) -> bool:  # noqa: C901 - Complex question skip logic with feature checks
-        """Determine if a question should be skipped based on context and features.
+        # Preserve annotations if they exist (added by cache queries)
+        for annotation in ["tickets_map", "factions_map", "allowed_map"]:
+            if hasattr(self, annotation):
+                value = getattr(self, annotation) or []
+                data[annotation] = [item for item in value if item is not None]
 
-        Evaluates question visibility rules including hidden status, ticket restrictions,
-        faction filtering, and organizer permissions to decide if question should be shown.
-        """
-        if self.status == QuestionStatus.HIDDEN and not is_organizer:
-            return True
-
-        if "reg_que_tickets" in features and registration and registration.pk:
-            # noinspection PyUnresolvedReferences
-            allowed_ticket_uuids = [ticket_uuid for ticket_uuid in self.tickets_map if ticket_uuid is not None]
-            if len(allowed_ticket_uuids) > 0:
-                if not registration or not registration.ticket:
-                    return True
-
-                if registration.ticket.uuid not in allowed_ticket_uuids:
-                    return True
-
-        if "reg_que_faction" in features:
-            # noinspection PyUnresolvedReferences
-            allowed_faction_ids = [faction_id for faction_id in self.factions_map if faction_id is not None]
-            if len(allowed_faction_ids) > 0:
-                registration_faction_ids = []
-                if registration and registration.pk:
-                    for character_relation in RegistrationCharacterRel.objects.filter(registration=registration):
-                        character_factions = character_relation.character.factions_list.values_list("id", flat=True)
-                        registration_faction_ids.extend(character_factions)
-
-                if len(set(allowed_faction_ids).intersection(set(registration_faction_ids))) == 0:
-                    return True
-
-        if "reg_que_allowed" in features and registration and registration.pk and is_organizer and params:
-            run_id = params["run"].id
-            is_run_organizer = run_id in params["all_runs"] and 1 in params["all_runs"][run_id]
-            # noinspection PyUnresolvedReferences
-            if not is_run_organizer and self.allowed_map[0] and params["member"].id not in self.allowed_map:
-                return True
-
-        return False
+        return data
 
     class Meta:
         indexes: ClassVar[list] = [
             models.Index(fields=["event"], condition=Q(deleted__isnull=True), name="rq_evt_act"),
             models.Index(fields=["event", "status"], condition=Q(deleted__isnull=True), name="rq_evt_stat_act"),
+            models.Index(fields=["event", "applicable"], condition=Q(deleted__isnull=True), name="rq_evt_app_act"),
         ]
 
 
-class RegistrationOption(UuidMixin, BaseModel):
+class RegistrationOption(UuidMixin, OrderMixin, BaseModel):
     """Represents RegistrationOption model."""
 
     search = models.CharField(max_length=1000, editable=False)
@@ -704,15 +716,15 @@ class RegistrationOption(UuidMixin, BaseModel):
         default=0,
         verbose_name=_("Price"),
         help_text=_("Optional - Amount added to the registration fee if selected (0 = no extra cost)"),
+        validators=[MinValueValidator(0)],
     )
 
     max_available = models.IntegerField(
         default=0,
+        validators=[MinValueValidator(0)],
         verbose_name=_("Maximum number"),
         help_text=_("Optional - Maximum number of times it can be selected across all registrations (0 = unlimited)"),
     )
-
-    order = models.IntegerField(default=0)
 
     def __str__(self) -> str:
         """Return string representation."""
@@ -721,21 +733,6 @@ class RegistrationOption(UuidMixin, BaseModel):
     def get_price(self) -> Any:
         """Return the option price."""
         return self.price
-
-    def get_form_text(self, currency_symbol: str | None = None) -> str:
-        """Return formatted text with name and optional price."""
-        # Get display data for the current instance
-        display_data = self.show()
-        formatted_text = display_data["name"]
-
-        # Append formatted price with currency symbol if applicable
-        if display_data["price"] and int(display_data["price"]) > 0:
-            if not currency_symbol:
-                # noinspection PyUnresolvedReferences
-                currency_symbol = self.event.association.get_currency_symbol()
-            formatted_text += f" ({decimal_to_str(display_data['price'])}{currency_symbol})"
-
-        return formatted_text
 
     def show(self) -> dict[str, Any]:
         """Return ticket tier display data as dictionary.
@@ -783,6 +780,13 @@ class RegistrationChoice(BaseModel):
             models.Index(fields=["registration", "question"], condition=Q(deleted__isnull=True), name="rc_reg_q_act"),
             models.Index(fields=["registration"], condition=Q(deleted__isnull=True), name="rc_reg_act"),
         ]
+        constraints: ClassVar[list] = [
+            models.UniqueConstraint(
+                fields=["registration", "option"],
+                condition=Q(deleted__isnull=True),
+                name="unique_registration_choice",
+            ),
+        ]
 
 
 class RegistrationAnswer(BaseModel):
@@ -804,12 +808,13 @@ class RegistrationAnswer(BaseModel):
             models.Index(fields=["registration", "question"], condition=Q(deleted__isnull=True), name="ra_reg_q_act"),
             models.Index(fields=["registration"], condition=Q(deleted__isnull=True), name="ra_reg_act"),
         ]
-
-
-def get_ordered_registration_questions(context: dict) -> QuerySet[RegistrationQuestion]:
-    """Get registration questions ordered by section and question order."""
-    questions = context["event"].get_elements(RegistrationQuestion)
-    return questions.order_by(F("section__order").asc(nulls_first=True), "order")
+        constraints: ClassVar[list] = [
+            models.UniqueConstraint(
+                fields=["registration", "question"],
+                condition=Q(deleted__isnull=True),
+                name="unique_registration_answer",
+            ),
+        ]
 
 
 def _get_writing_elements() -> list[tuple[str, str, QuestionApplicable]]:
@@ -818,6 +823,7 @@ def _get_writing_elements() -> list[tuple[str, str, QuestionApplicable]]:
     return [
         ("character", _("Characters"), QuestionApplicable.CHARACTER),
         ("faction", _("Factions"), QuestionApplicable.FACTION),
+        ("guild", _("Guilds"), QuestionApplicable.GUILD),
         ("plot", _("Plots"), QuestionApplicable.PLOT),
         ("quest", _("Quests"), QuestionApplicable.QUEST),
         ("trait", _("Traits"), QuestionApplicable.TRAIT),
@@ -836,6 +842,7 @@ def _get_writing_mapping() -> dict[str, str]:
     return {
         "character": "character",
         "faction": "faction",
+        "guild": "guild",
         "plot": "plot",
         "quest": "questbuilder",
         "trait": "questbuilder",

@@ -7,10 +7,12 @@
     overall: false
     placeholder: false
     order: 240
-    after_text: Now you can create prologues for the event
+    after_text: You can now create prologues for the event
     after_link: orga_prologues
     hidden: false
     module: writing
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Quests and Traits
@@ -20,10 +22,11 @@
     overall: false
     placeholder: false
     order: 120
-    after_text: Now you can create quests for the event
+    after_text: You can now create quests for the event
     after_link: orga_quest_types
     hidden: false
     module: writing
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Copy
@@ -32,10 +35,11 @@
     overall: false
     placeholder: false
     order: 10
-    after_text: Now you can copy elements from an other event
+    after_text: You can now copy elements from another event.
     after_link: orga_copy
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Pay what you want
@@ -45,10 +49,11 @@
     overall: false
     placeholder: false
     order: 50
-    after_text: Now you can configure the registration question
+    after_text: You can now configure the registration question
     after_link: orga_registration_form
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Discount
@@ -58,10 +63,11 @@
     overall: false
     placeholder: false
     order: 30
-    after_text: Now you can create discounts for the event
+    after_text: You can now create discounts for the event
     after_link: orga_discounts
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: LAOG
@@ -75,6 +81,7 @@
     after_link: ''
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Reminder
@@ -84,10 +91,11 @@
     overall: true
     placeholder: false
     order: 20
-    after_text: Now you can set the reminder options
+    after_text: You can now set the reminder options
     after_link: config/remind
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Bring a friend
@@ -97,10 +105,11 @@
     overall: false
     placeholder: false
     order: 9999
-    after_text: Now you can set the discount options
+    after_text: You can now set the discount options
     after_link: config/bring_friend
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: PDF generation
@@ -110,10 +119,12 @@
     overall: false
     placeholder: false
     order: 25
-    after_text: Now you can set the PDF generation options
+    after_text: You can now set the PDF generation options
     after_link: orga_characters_pdf
     hidden: false
     module: writing
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Workshop
@@ -123,10 +134,11 @@
     overall: false
     placeholder: false
     order: 20
-    after_text: Now you can start creating workshops, starting from modules
+    after_text: You can now start creating workshops, starting from modules
     after_link: orga_workshop_modules
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Speed Larp
@@ -136,10 +148,11 @@
     overall: false
     placeholder: false
     order: 60
-    after_text: Now you can start creating speed-larps
+    after_text: You can now start creating speed-larps
     after_link: orga_speedlarps
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Safety
@@ -148,10 +161,11 @@
     overall: false
     placeholder: false
     order: 20
-    after_text: Now you can review the safety information submitted by participants
+    after_text: You can now review the safety information submitted by participants
     after_link: orga_safety
     hidden: true
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Casting algorithm
@@ -161,10 +175,25 @@
     overall: false
     placeholder: false
     order: 10
-    after_text: Now you can set the casting options
+    after_text: You can now set the casting options
     after_link: config/casting
     hidden: false
     module: event
+    dependencies:
+    - character
+- model: larpmanager.feature
+  fields:
+    name: Matchmaker
+    descr: Lets organizers define custom questions on the characters participants would like to play, and assign them with a grid system
+    slug: matchmaker
+    overall: false
+    placeholder: false
+    order: 91
+    after_text: You can now set the matchmaker form
+    after_link: form/matchmaker/
+    hidden: false
+    module: event
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Help
@@ -174,10 +203,11 @@
     overall: true
     placeholder: false
     order: 10
-    after_text: Now you can review participants' questions
+    after_text: You can now review participants' questions
     after_link: exe_questions
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Collections
@@ -187,10 +217,12 @@
     overall: true
     placeholder: false
     order: 40
-    after_text: Now participants can submit collections, and you can review them
+    after_text: Participants can now submit collections, and you can review them
     after_link: exe_collections
     hidden: false
     module: accounting
+    dependencies:
+    - credits
 - model: larpmanager.feature
   fields:
     name: Pre-registration
@@ -199,10 +231,11 @@
     overall: true
     placeholder: false
     order: 30
-    after_text: Now participants can submit preregistrations, and you can review them
+    after_text: Participants can now submit preregistrations, and you can review them
     after_link: exe_pre_registrations
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Donation
@@ -212,10 +245,11 @@
     overall: true
     placeholder: false
     order: 20
-    after_text: Now participants can submit donation, and you can review them
+    after_text: Participants can now submit donations, and you can review them.
     after_link: exe_donations
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Newsletter
@@ -225,10 +259,11 @@
     overall: true
     placeholder: false
     order: 60
-    after_text: Now you can review users mailing list
+    after_text: You can now review mailing lists for newsletters.
     after_link: exe_newsletter
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Utility
@@ -238,10 +273,11 @@
     overall: false
     placeholder: false
     order: 30
-    after_text: Now you can host files in the platform
+    after_text: You can now host files on the platform.
     after_link: orga_utils
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Character customization
@@ -251,10 +287,12 @@
     overall: false
     placeholder: false
     order: 40
-    after_text: Now you can set customization options
+    after_text: You can now set customization options
     after_link: config/custom_character
     hidden: false
     module: event
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Membership
@@ -264,10 +302,11 @@
     overall: true
     placeholder: false
     order: 40
-    after_text: Now you can set membership options
+    after_text: You can now set membership options
     after_link: config/membership
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Shuttle
@@ -281,6 +320,7 @@
     after_link: ''
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: External mail server
@@ -290,10 +330,11 @@
     overall: true
     placeholder: false
     order: 40
-    after_text: Now you can set the external mail server settings
+    after_text: You can now set the external mail server settings
     after_link: config/custom_mail_server
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Lottery
@@ -303,23 +344,26 @@
     overall: false
     placeholder: false
     order: 90
-    after_text: Now you can create the lottery ticket
+    after_text: You can now create the lottery ticket
     after_link: orga_registration_tickets
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: Filler
-    descr: 'Enables ''Filler'' characters: simpler character sheets, assigned to participants
+    name: Reserve
+    descr: 'Enables ''Reserve'' characters: simpler character sheets, assigned to participants
       who are ready to replacing last-minute dropout of main characters.'
     slug: filler
     overall: false
     placeholder: false
     order: 70
-    after_text: Now you can create the filler ticket
+    after_text: You can now create the ticket for reserves
     after_link: orga_registration_tickets
     hidden: false
     module: registration
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Chat
@@ -333,6 +377,7 @@
     after_link: ''
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Waiting list
@@ -342,35 +387,11 @@
     overall: false
     placeholder: false
     order: 60
-    after_text: Now you can create the waiting ticket
+    after_text: You can now create the waiting ticket
     after_link: orga_registration_tickets
     hidden: false
     module: registration
-- model: larpmanager.feature
-  fields:
-    name: Participant cancellation
-    descr: Allows participants to cancel their own registrations at any time
-    slug: player_cancellation
-    overall: false
-    placeholder: false
-    order: 20
-    after_text: ''
-    after_link: ''
-    hidden: false
-    module: event
-- model: larpmanager.feature
-  fields:
-    name: External registration
-    descr: Instead of using an internal registration form, redirects the participant
-      to an external registration link
-    slug: register_link
-    overall: false
-    placeholder: false
-    order: 30
-    after_text: Now you can set the external registration link
-    after_link: orga_event
-    hidden: false
-    module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Problems
@@ -380,10 +401,11 @@
     overall: false
     placeholder: false
     order: 40
-    after_text: Now you can review the event's problems
+    after_text: You can now review the event's problems
     after_link: orga_problems
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Dynamic rates
@@ -394,10 +416,11 @@
     overall: false
     placeholder: false
     order: 20
-    after_text: Now you can set the dynamic installments
+    after_text: You can now set the dynamic installments
     after_link: orga_registration_quotas
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Vote
@@ -407,10 +430,11 @@
     overall: true
     placeholder: false
     order: 90
-    after_text: Now you can set the vote options
+    after_text: You can now set the vote options
     after_link: config/vote
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Badge
@@ -419,22 +443,24 @@
     overall: true
     placeholder: false
     order: 80
-    after_text: Now you can create badges
+    after_text: You can now create badges
     after_link: exe_badges
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Warehouse
-    descr: Enables warehouse management for organization warehouse management
+    descr: Enables warehouse management for the organization.
     slug: warehouse
     overall: true
     placeholder: false
     order: 5
-    after_text: Now you can add warehouse containers and items
+    after_text: You can now add warehouse containers and items
     after_link: exe_warehouse_containers
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Secret link
@@ -444,10 +470,11 @@
     overall: false
     placeholder: false
     order: 20
-    after_text: Now you can set the registration secret link
+    after_text: You can now set the registration secret link
     after_link: orga_run
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Fixed instalments
@@ -457,10 +484,11 @@
     overall: false
     placeholder: false
     order: 10
-    after_text: Now you can create fixed installments
+    after_text: You can now create fixed installments
     after_link: orga_registration_installments
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Relationships
@@ -469,10 +497,12 @@
     overall: false
     placeholder: false
     order: 200
-    after_text: Now you can add relationships when editing a character
+    after_text: You can now add relationships when editing a character
     after_link: orga_characters
     hidden: false
     module: writing
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Sections
@@ -482,10 +512,11 @@
     overall: false
     placeholder: false
     order: 40
-    after_text: Now you can define registration form sections
+    after_text: You can now define registration form sections
     after_link: orga_registration_sections
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Campaign
@@ -499,6 +530,7 @@
     after_link: ''
     hidden: false
     module: events
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Patron and Reduced
@@ -508,10 +540,11 @@
     overall: false
     placeholder: false
     order: 80
-    after_text: Now you can create the 'patron' and 'reduced' tickets
+    after_text: You can now create the 'patron' and 'reduced' tickets
     after_link: orga_registration_tickets
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Accounting tracking
@@ -521,10 +554,11 @@
     overall: true
     placeholder: false
     order: 140
-    after_text: Now you can review the historical accounting informations
+    after_text: You can now review historical accounting information.
     after_link: exe_accounting_rec
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Progress
@@ -534,10 +568,11 @@
     overall: false
     placeholder: false
     order: 110
-    after_text: Now you can create the progress steps
+    after_text: You can now create the progress steps
     after_link: orga_progress_steps
     hidden: false
     module: writing
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Diet
@@ -546,10 +581,11 @@
     overall: false
     placeholder: false
     order: 30
-    after_text: Now you can review the diet information submitted by participants
+    after_text: You can now review the diet information submitted by participants
     after_link: orga_diet
     hidden: true
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Deadlines
@@ -559,10 +595,11 @@
     overall: true
     placeholder: false
     order: 10
-    after_text: Now you can review the organization's deadlines
+    after_text: You can now review the organization's deadlines
     after_link: exe_deadlines
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Plots
@@ -572,10 +609,12 @@
     overall: false
     placeholder: false
     order: 130
-    after_text: Now you can create the plots of the event
+    after_text: You can now create the plots of the event
     after_link: orga_plots
     hidden: false
     module: writing
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Factions
@@ -585,10 +624,12 @@
     overall: false
     placeholder: false
     order: 120
-    after_text: Now you can create the factions of the event
+    after_text: You can now create the factions of the event
     after_link: orga_factions
     hidden: false
     module: writing
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Handout
@@ -598,10 +639,12 @@
     overall: false
     placeholder: false
     order: 140
-    after_text: Now you can create the handouts of the event
+    after_text: You can now create the handouts of the event
     after_link: orga_handouts
     hidden: false
     module: writing
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Expenses
@@ -611,10 +654,12 @@
     overall: true
     placeholder: false
     order: 30
-    after_text: Now crew can upload expenses, and you can review them
+    after_text: Crew can now upload expenses, and you can review them
     after_link: exe_expenses
     hidden: false
     module: accounting
+    dependencies:
+    - credits
 - model: larpmanager.feature
   fields:
     name: Tokens
@@ -624,10 +669,11 @@
     overall: true
     placeholder: false
     order: 50
-    after_text: Now set up the tokens configuration
+    after_text: You can now set up the tokens configuration
     after_link: config/tokens
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Credits
@@ -637,10 +683,11 @@
     overall: true
     placeholder: false
     order: 55
-    after_text: Now set up the credits configuration
+    after_text: You can now set up the credits configuration
     after_link: config/credits
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Outflows
@@ -650,10 +697,11 @@
     overall: true
     placeholder: false
     order: 90
-    after_text: Now you can create outflows
+    after_text: You can now create outflows
     after_link: exe_outflows
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Verification payments
@@ -663,22 +711,24 @@
     overall: true
     placeholder: false
     order: 130
-    after_text: Now you can verify wire payments
+    after_text: You can now verify wire payments
     after_link: exe_verification
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: Fiscal Budget
+    name: Annual fiscal report
     descr: Generates an annual summary of fiscal activity for the Italian budget report
     slug: ita_balance
     overall: true
     placeholder: false
     order: 10
-    after_text: Now you can review the annual balance
+    after_text: You can now review the annual balance sheet.
     after_link: exe_balance
     hidden: false
     module: italy
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Payments
@@ -687,10 +737,11 @@
     overall: true
     placeholder: false
     order: 10
-    after_text: Now you can set the payment methods settings
+    after_text: You can now configure the payment methods.
     after_link: exe_methods
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Refunds
@@ -699,23 +750,12 @@
     overall: true
     placeholder: false
     order: 60
-    after_text: Now participants can create refund requests, and you can review them
+    after_text: Participants can now create refund requests, and you can review them
     after_link: exe_refunds
     hidden: false
     module: accounting
-- model: larpmanager.feature
-  fields:
-    name: Opening date
-    descr: Lets you specify a date (and time) on which registration will open, keeping
-      it closed until then
-    slug: registration_open
-    overall: false
-    placeholder: false
-    order: 10
-    after_text: Now you can set the registration opening date
-    after_link: orga_run
-    hidden: false
-    module: registration
+    dependencies:
+    - credits
 - model: larpmanager.feature
   fields:
     name: Legal Notice
@@ -725,35 +765,53 @@
     overall: true
     placeholder: false
     order: 10
-    after_text: Now you can set the legal notice text
+    after_text: You can now set the legal notice text
     after_link: exe_texts
     hidden: false
     module: appearance
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Experience points
     descr: Adds support for assigning XP (experience points) to characters, which
-      can then be used to purchase skills
-    slug: px
+      can then be used to purchase abilities
+    slug: experience
     overall: false
     placeholder: false
     order: 50
-    after_text: Now you can set the experience points settings
-    after_link: config/px
+    after_text: You can now configure experience point settings.
+    after_link: config/experience
     hidden: false
     module: event
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: Player editor
+    name: Character creation
     descr: Allows participants to create and modify their own characters freely
     slug: user_character
     overall: false
     placeholder: false
     order: 30
-    after_text: Now you can set the player editing settings
+    after_text: You can now configure character creation by players.
     after_link: config/user_character
     hidden: false
     module: event
+    dependencies:
+    - character
+- model: larpmanager.feature
+  fields:
+    name: Player relationships
+    descr: Enables participants to write their own list of character relationships
+    slug: player_relationships
+    overall: false
+    placeholder: false
+    order: 31
+    after_text: ''
+    after_link: ''
+    hidden: false
+    module: event
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
     name: Character inventory
@@ -766,19 +824,22 @@
     after_link: ''
     hidden: false
     module: event
+    dependencies:
+    - character
 - model: larpmanager.feature
   fields:
-    name: Organisation tax
+    name: Organizational fee
     descr: Allows you to set a 'tax' percentage on event income that must be set aside
       for the organisation
     slug: organization_tax
     overall: true
     placeholder: false
     order: 110
-    after_text: Now you can set the organization tax options
+    after_text: You can now set the options for the Organizational fee
     after_link: config/organization_tax
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Easter egg
@@ -788,10 +849,11 @@
     overall: true
     placeholder: false
     order: 9999
-    after_text: Now you can se the special page options
+    after_text: You can now configure the special page options.
     after_link: config/centauri
     hidden: false
     module: italy
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: URL shortener
@@ -800,10 +862,11 @@
     overall: true
     placeholder: false
     order: 10
-    after_text: Now you can create url shortners
+    after_text: You can now create URL shorteners.
     after_link: exe_urlshortner
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Surcharge
@@ -813,10 +876,11 @@
     overall: false
     placeholder: false
     order: 40
-    after_text: Now you can create registration surcharges
+    after_text: You can now create registration surcharges
     after_link: orga_registration_surcharges
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Inflows
@@ -826,10 +890,11 @@
     overall: true
     placeholder: false
     order: 80
-    after_text: Now you can create inflows
+    after_text: You can now create inflows
     after_link: exe_inflows
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Carousel
@@ -843,6 +908,7 @@
     after_link: ''
     hidden: false
     module: appearance
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Treasurer
@@ -856,19 +922,20 @@
     after_link: ''
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Receipt
-    descr: Automatically generates a customizable PDF receipt for each payment and
-      emails it to the user
+    descr: Automatically generates a PDF fiscal receipt for each payment, in accordance with Italian legislation
     slug: receipts
     overall: true
     placeholder: false
     order: 9999
-    after_text: Now you can create the receipt text
-    after_link: exe_texts
+    after_text: You can now set up the receipts data
+    after_link: config/receipts
     hidden: false
-    module: accounting
+    module: italy
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Register of volunteers
@@ -877,10 +944,11 @@
     overall: true
     placeholder: false
     order: 20
-    after_text: Now you can review the volunteers registry
+    after_text: You can now review the volunteer registry.
     after_link: exe_volunteer_registry
     hidden: false
     module: italy
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Taxes
@@ -889,10 +957,11 @@
     overall: true
     placeholder: false
     order: 100
-    after_text: Now you can set the taxes options
+    after_text: You can now set the taxes options
     after_link: config/vat
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Delegated accounts
@@ -906,6 +975,7 @@
     after_link: ''
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Gift
@@ -915,10 +985,11 @@
     overall: false
     placeholder: false
     order: 60
-    after_text: Now you can select which tickets can be gifted
+    after_text: You can now select which tickets can be gifted
     after_link: orga_registration_tickets
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Additional tickets
@@ -927,10 +998,11 @@
     overall: false
     placeholder: false
     order: 50
-    after_text: Now you can configure the registration question
+    after_text: You can now configure the registration question
     after_link: orga_registration_form
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Characters
@@ -940,10 +1012,11 @@
     overall: false
     placeholder: false
     order: 1
-    after_text: Now you can create characters
+    after_text: You can now create characters
     after_link: orga_characters
     hidden: false
     module: writing
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Template
@@ -953,10 +1026,11 @@
     overall: true
     placeholder: false
     order: 11
-    after_text: Now you can create event templates
+    after_text: You can now create event templates
     after_link: exe_templates
     hidden: false
     module: events
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Fiscal code check
@@ -965,10 +1039,11 @@
     overall: true
     placeholder: false
     order: 30
-    after_text: Now you can peform the fiscal code validity check
+    after_text: You can now perform the fiscal code validity check.
     after_link: exe_membership_check
     hidden: false
     module: italy
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Archive
@@ -981,6 +1056,7 @@
     after_link: null
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Profile
@@ -993,6 +1069,7 @@
     after_link: null
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Send e-mail
@@ -1005,6 +1082,7 @@
     after_link: null
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Event
@@ -1013,10 +1091,11 @@
     overall: true
     placeholder: false
     order: 1
-    after_text: Now you can manage events
+    after_text: You can now manage events
     after_link: exe_events
     hidden: false
     module: events
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Texts
@@ -1029,6 +1108,7 @@
     after_link: null
     hidden: false
     module: appearance
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Appearance
@@ -1041,6 +1121,7 @@
     after_link: null
     hidden: false
     module: appearance
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Accounting
@@ -1053,6 +1134,7 @@
     after_link: null
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Features
@@ -1065,6 +1147,7 @@
     after_link: null
     hidden: false
     module: organization
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Configuration
@@ -1077,6 +1160,7 @@
     after_link: null
     hidden: false
     module: organization
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Roles
@@ -1089,6 +1173,7 @@
     after_link: null
     hidden: false
     module: organization
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Exe Organization
@@ -1101,6 +1186,7 @@
     after_link: null
     hidden: false
     module: organization
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Archive
@@ -1113,6 +1199,7 @@
     after_link: null
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Send e-mail
@@ -1125,6 +1212,7 @@
     after_link: null
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Cache Reloading
@@ -1137,6 +1225,7 @@
     after_link: null
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Navigation
@@ -1149,6 +1238,7 @@
     after_link: null
     hidden: false
     module: appearance
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Texts
@@ -1161,6 +1251,7 @@
     after_link: null
     hidden: false
     module: appearance
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Cancellations
@@ -1173,6 +1264,7 @@
     after_link: null
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Form
@@ -1185,6 +1277,7 @@
     after_link: null
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Tickets
@@ -1197,6 +1290,7 @@
     after_link: null
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Registrations
@@ -1209,6 +1303,7 @@
     after_link: null
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Sensitive data
@@ -1221,6 +1316,7 @@
     after_link: null
     hidden: false
     module: users
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Accounting
@@ -1233,6 +1329,7 @@
     after_link: null
     hidden: false
     module: accounting
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Appearance
@@ -1245,6 +1342,7 @@
     after_link: null
     hidden: false
     module: appearance
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Features
@@ -1257,6 +1355,7 @@
     after_link: null
     hidden: false
     module: event
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Configuration
@@ -1269,6 +1368,7 @@
     after_link: null
     hidden: false
     module: event
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Roles
@@ -1281,6 +1381,7 @@
     after_link: null
     hidden: false
     module: event
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Run
@@ -1293,6 +1394,7 @@
     after_link: null
     hidden: false
     module: event
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Orga Event
@@ -1305,6 +1407,7 @@
     after_link: null
     hidden: false
     module: event
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Quick Setup
@@ -1317,6 +1420,7 @@
     after_link: null
     hidden: false
     module: event
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: New player
@@ -1326,22 +1430,24 @@
     overall: false
     placeholder: false
     order: 75
-    after_text: Now you can create the "new player" ticket
+    after_text: You can now create the "new player" ticket
     after_link: orga_registration_tickets
     hidden: false
     module: registration
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: Publication
+    name: Promotion
     descr: Makes upcoming events visible to external sites through a public API
     slug: publisher
     overall: true
     placeholder: false
     order: 80
-    after_text: ''
-    after_link: ''
+    after_text: You can now set the promotion configurations
+    after_link: config/publication
     hidden: false
     module: events
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: One-Time Content
@@ -1352,10 +1458,11 @@
     overall: false
     placeholder: false
     order: 50
-    after_text: Now you can upload content and generate access tokens
+    after_text: You can now upload content and generate access tokens
     after_link: orga_onetimes
     hidden: false
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
     name: Translations
@@ -1365,15 +1472,16 @@
     overall: true
     placeholder: false
     order: 30
-    after_text: Now you can define custom organization translations
+    after_text: You can now define custom organization translations
     after_link: exe_translations
     hidden: false
     module: appearance
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: PX Rules
-    descr: Pseudo-feature activated by px_rules configuration
-    slug: px_rules
+    name: Experience Rules
+    descr: Pseudo-feature activated by exp_rules configuration
+    slug: exp_rules
     overall: false
     placeholder: true
     order: 0
@@ -1381,11 +1489,12 @@
     after_link: ''
     hidden: true
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: PX Modifiers
-    descr: Pseudo-feature activated by px_modifiers configuration
-    slug: px_modifiers
+    name: Experience Modifiers
+    descr: Pseudo-feature activated by exp_modifiers configuration
+    slug: exp_modifiers
     overall: false
     placeholder: true
     order: 0
@@ -1393,11 +1502,12 @@
     after_link: ''
     hidden: true
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: PX Templates
-    descr: Pseudo-feature activated by px_templates configuration
-    slug: px_templates
+    name: Experience Criteria
+    descr: Pseudo-feature activated by exp_criterions configuration
+    slug: exp_criterions
     overall: false
     placeholder: true
     order: 0
@@ -1405,11 +1515,12 @@
     after_link: ''
     hidden: true
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: Rules
-    descr: Pseudo-feature activated by px_rules configuration
-    slug: rules
+    name: Experience Templates
+    descr: Pseudo-feature activated by exp_templates configuration
+    slug: exp_templates
     overall: false
     placeholder: true
     order: 0
@@ -1417,11 +1528,12 @@
     after_link: ''
     hidden: true
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: Modifiers
-    descr: Pseudo-feature activated by px_modifiers configuration
-    slug: modifiers
+    name: Experience Systems
+    descr: Pseudo-feature activated by exp_systems configuration
+    slug: exp_systems
     overall: false
     placeholder: true
     order: 0
@@ -1429,15 +1541,114 @@
     after_link: ''
     hidden: true
     module: miscellany
+    dependencies: []
 - model: larpmanager.feature
   fields:
-    name: Templates
-    descr: Pseudo-feature activated by px_templates configuration
-    slug: templates
+    name: Activity Log
+    descr: Show detailed activity log on entities created, updated or deleted.
+    slug: logs
+    overall: true
+    placeholder: false
+    order: 1
+    after_text: ''
+    after_link: ''
+    hidden: false
+    module: miscellany
+    dependencies: []
+- model: larpmanager.feature
+  fields:
+    name: App Integration
+    descr: Enables a button in the topbar to redirect authenticated users to an external
+      application, using a configurable URL and optional JWT-based SSO
+    slug: app_integration
+    overall: true
+    placeholder: false
+    order: 90
+    after_text: Now you can configure the integration button and the external application
+      settings
+    after_link: config/app_integration
+    hidden: false
+    module: miscellany
+    dependencies: []
+- model: larpmanager.feature
+  fields:
+    name: Activation
+    descr: ''
+    slug: exe_activation
+    overall: true
+    placeholder: true
+    order: 9999
+    after_text: null
+    after_link: ''
+    hidden: false
+    module: null
+    dependencies: []
+- model: larpmanager.feature
+  fields:
+    name: Milestones
+    descr: Track event milestones
+    slug: milestones
     overall: false
+    placeholder: false
+    order: 250
+    after_text: You can now create milestones for the event
+    after_link: orga_milestones
+    hidden: false
+    module: miscellany
+    dependencies: []
+- model: larpmanager.feature
+  fields:
+    name: Ensemble
+    descr: Provides a character learning page with multiple display modes (book, cards,
+      compact list) to help players memorise other characters before the event
+    slug: ensemble
+    overall: false
+    placeholder: false
+    order: 5
+    after_text: You can now configure the ensemble page
+    after_link: config/ensemble
+    hidden: false
+    module: miscellany
+    dependencies:
+    - character
+- model: larpmanager.feature
+  fields:
+    name: Trash
+    descr: Pseudo-feature activated by allow_bulk_delete configuration to restore deleted items
+    slug: exe_trash
+    overall: true
     placeholder: true
     order: 0
     after_text: ''
     after_link: ''
     hidden: true
-    module: miscellany
+    module: accounting
+    dependencies: []
+- model: larpmanager.feature
+  fields:
+    name: Version Upgrade
+    descr: Internal pseudo-feature for the platform version upgrade page
+    slug: exe_version_upgrade
+    overall: true
+    placeholder: true
+    order: 0
+    after_text: ''
+    after_link: ''
+    hidden: true
+    module: null
+    dependencies: []
+- model: larpmanager.feature
+  fields:
+    name: Guilds
+    descr: Enables 'Guilds', player-created groups of characters with a self-managed
+      admin, invite and text
+    slug: guild
+    overall: false
+    placeholder: false
+    order: 125
+    after_text: Players can now create guilds for the event
+    after_link: orga_guilds
+    hidden: false
+    module: writing
+    dependencies:
+    - character

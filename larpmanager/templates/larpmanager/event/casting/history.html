@@ -1,5 +1,11 @@
 {% extends "base.html" %}
 {% load i18n show_tags %}
+{% block datatables_css %}
+    {% include "elements/structure/datatables-css.html" %}
+{% endblock datatables_css %}
+{% block datatables_js %}
+    {% include "elements/structure/datatables-js.html" %}
+{% endblock datatables_js %}
 {% block title %}
     {% trans "History preferences" %} - {{ run.search }}
 {% endblock title %}
@@ -7,11 +13,11 @@
     {% if features.questbuilder %}
         {% if staff %}
             <p>
-                {% trans "Go to the history preferences for" %}:
-                {% if typ == 0 %}
+                {% trans "View preference history for:" %}
+                {% if not typ %}
                     <strong>{% trans "characters" %}</strong>
                 {% else %}
-                    <a href="{% url 'orga_casting_history' run.get_slug 0 %}">{% trans "characters" %}</a>
+                    <a href="{% url 'orga_casting_history' run.get_slug %}">{% trans "characters" %}</a>
                 {% endif %}
                 {% for num, qt in quest_types.items %}
                     {% if typ == num %}
@@ -23,11 +29,11 @@
             </p>
         {% else %}
             <p>
-                {% trans "Go to the history preferences for" %}:
-                {% if typ == 0 %}
+                {% trans "View preference history for:" %}
+                {% if not typ %}
                     <strong>{% trans "characters" %}</strong>
                 {% else %}
-                    <a href="{% url 'casting_history' run.get_slug 0 %}">{% trans "characters" %}</a>
+                    <a href="{% url 'casting_history' run.get_slug %}">{% trans "characters" %}</a>
                 {% endif %}
                 {% for num, qt in quest_types.items %}
                     {% if typ == num %}
@@ -43,6 +49,7 @@
     <table id="preferences" class="go_datatable mob">
         <thead>
             <tr>
+                <th></th>
                 <th>{% trans "Player" %}</th>
                 {% with ""|center:casting_max as range %}
                     {% for _ in range %}<th>Preferenza {{ forloop.counter }}</th>{% endfor %}
@@ -52,6 +59,7 @@
         <tbody>
             {% for el in list %}
                 <tr>
+                    <td></td>
                     <td>
                         {% if staff %}
                             {{ el.member }}

@@ -27,17 +27,16 @@ and role deletion with permission revocation.
 from typing import Any
 
 import pytest
-from playwright.sync_api import expect
 
-from larpmanager.tests.utils import (just_wait,
-    check_feature,
-    go_to,
-    login_orga,
-    login_user,
-    logout,
-    submit_confirm,
-    expect_normalized,
-)
+from larpmanager.tests.utils import (check_feature,
+                                     delete_modal,
+                                     go_to,
+                                     login_orga,
+                                     login_user,
+                                     logout,
+                                     expect_normalized,
+                                     get_modal_iframe, save_modal,
+                                     )
 
 pytestmark = pytest.mark.e2e
 
@@ -48,39 +47,38 @@ def test_exe_association_role(pw_page: Any) -> None:
     login_user(page, live_server)
 
     go_to(page, live_server, "/manage/")
-    expect_normalized(page, page.locator("#banner"), "Access denied")
+    expect_normalized(page, page.locator("body"), "Access denied")
 
     login_orga(page, live_server)
 
     go_to(page, live_server, "/manage/roles")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("test role")
-    page.locator("#id_name").press("Tab")
-    page.get_by_role("searchbox").fill("us")
-    page.get_by_role("option", name="User Test -").click()
-    check_feature(page, "Configuration")
-    check_feature(page, "Accounting")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("test role")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.get_by_role("searchbox").fill("us")
+    edit_iframe.get_by_role("option", name="User Test -").click()
+    check_feature(edit_iframe, "Configuration")
+    check_feature(edit_iframe, "Accounting")
+    save_modal(page, edit_iframe)
     expect_normalized(page, page.locator('[id="u2"]'), "Organization (Configuration), Accounting (Accounting)")
 
     logout(page)
     login_user(page, live_server)
 
     go_to(page, live_server, "/manage/accounting/")
-    expect_normalized(page, page.locator("#banner"), "Accounting - Organization")
+    expect_normalized(page, page.locator("body"), "Accounting - Organization")
 
     logout(page)
     login_orga(page, live_server)
 
+    # Delete the role
     go_to(page, live_server, "/manage/roles")
-    page.get_by_role("row", name=" test role User Test").get_by_role("link").click()
-    page.get_by_role("link", name="Delete").click()
-    just_wait(page)
-    page.get_by_role("button", name="Confirmation delete").click()
+    delete_modal(page, page.locator('#u2 .fa-trash'))
 
     logout(page)
     login_user(page, live_server)
 
     go_to(page, live_server, "/manage/")
-    expect_normalized(page, page.locator("#banner"), "Access denied")
+    expect_normalized(page, page.locator("body"), "Access denied")

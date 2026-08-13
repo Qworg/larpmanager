@@ -4,13 +4,14 @@
     {% trans "Vote" %} - {% trans "Organization" %}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows the settings available for the membership voting" %}
+    {% trans "Track candidate vote counts and view the list of members who have already voted in the current year" %}
 {% endblock info %}
 {% block content %}
     <h3>{% trans "Collected votes" %}</h3>
     <table id="votes" class="go_datatable">
         <thead>
             <tr>
+                <th></th>
                 <th>Nome</th>
                 <th>Voti</th>
             </tr>
@@ -18,12 +19,16 @@
         <tbody>
             {% for idx, el in candidates.items %}
                 <tr>
+                    <td></td>
                     <td>{{ el }}</td>
                     <td>{{ el.votes }}</td>
                 </tr>
             {% endfor %}
         </tbody>
     </table>
+    {% if not list %}
+        <p class="no-elements-available">{% trans "Votes will appear here once cast." %}</p>
+    {% endif %}
     <h3>{% trans "List of voters" %}</h3>
     <p>
         {% for el in voters %}

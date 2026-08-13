@@ -48,7 +48,13 @@ INSTALLED_APPS = [
     'compressor',
     'debug_toolbar',
     'django_recaptcha',
+    'axes',
+    'django_otp',
+    'django_otp.plugins.otp_totp',
+    'django_otp.plugins.otp_static',
 ]
+
+OTP_TOTP_ISSUER = 'LarpManager'
 
 MIDDLEWARE = [
     # Profiling middleware first to track everything
@@ -57,8 +63,12 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     # Security middleware
     'django.middleware.security.SecurityMiddleware',
+    # Content-Security-Policy headers
+    'csp.middleware.CSPMiddleware',
     # Session middleware needed by auth
     'django.contrib.sessions.middleware.SessionMiddleware',
+    # Axes: rate limiting on login
+    'axes.middleware.AxesMiddleware',
     # URL correction before other processing
     'larpmanager.middleware.url.CorrectUrlMiddleware',
     # Messages depends on sessions
@@ -67,6 +77,8 @@ MIDDLEWARE = [
     'larpmanager.middleware.token.TokenAuthMiddleware',
     # Authentication (must be before anything that depends on request.user)
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    # OTP: marks request.user as verified if they passed 2FA
+    'django_otp.middleware.OTPMiddleware',
     # Custom middleware for exception handling and locale
     'larpmanager.middleware.exception.ExceptionHandlingMiddleware',
     'larpmanager.middleware.broken.BrokenLinkEmailsMiddleware',
@@ -147,10 +159,10 @@ LANGUAGES = [
     ('nl', 'Nederlands'),
     ('nb', 'Norsk'),
     ('sv', 'Svenska'),
-    # ('pt', 'Português'),
-    # ('el', 'Ελληνικά'),
-    # ('da', 'Dansk'),
-    # ('fi', 'suomi'),
+    ('fi', 'suomi'),
+    ('pt', 'Português'),
+    ('el', 'Ελληνικά'),
+    ('da', 'Dansk'),
     # ('et', 'Eesti'),
     # ('uk', 'українська мова'),
     # ('bg', 'български език'),
@@ -166,6 +178,10 @@ LANGUAGES = [
     # ('ja', '日本語'),
     # ('ko', '한국어'),
     # ('zh', '汉语'),
+]
+
+LOCALE_PATHS = [
+    BASE_DIR / 'locale',
 ]
 
 TIME_ZONE = 'UTC'
@@ -206,12 +222,115 @@ TINYMCE_DEFAULT_CONFIG = {
     'automatic_uploads': True,
     'file_picker_types': 'image media',
     'paste_data_images': False,
+
+    # Preserve Font Awesome <i> tags (empty elements with class attributes)
+    'extended_valid_elements': 'i[class|style|aria-hidden|title]',
+
+    # "skin_url": "/static/larpmanager/assets/tinymce/lm_skin",
 }
 
 
 TINYMCE_COMPRESSOR = False
 
 SECURE_REFERRER_POLICY = 'origin'
+
+# Prevent browser MIME-sniffing of served content (esp. user uploads in /media/)
+SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# Content-Security-Policy (django-csp). Inline scripts/styles are still used
+# throughout the templates, so 'unsafe-inline' stays for now; the policy still
+# restricts script/style loading to self plus the known CDNs and blocks
+# object/base injection as defense-in-depth against stored XSS.
+_CSP_CDN_HOSTS = [
+    'https://cdnjs.cloudflare.com',
+    'https://cdn.jsdelivr.net',
+    'https://cdn.datatables.net',
+    'https://code.jquery.com',
+    'https://unpkg.com',
+    'https://cdn.canvasjs.com',
+    'https://static.cloudflareinsights.com/'
+]
+
+CONTENT_SECURITY_POLICY = {
+    'DIRECTIVES': {
+        'default-src': ["'self'"],
+        'script-src': [
+            "'self'",
+            "'unsafe-inline'",
+            "'unsafe-eval'",
+            *_CSP_CDN_HOSTS,
+            'https://*.paypal.com',
+            'https://gateway.sumup.com',
+            'https://www.googletagmanager.com',
+            'https://www.google.com',
+            'https://www.gstatic.com',
+            'https://static.hotjar.com',
+            'https://script.hotjar.com',
+            'https://*.hotjar.com',
+        ],
+        'style-src': [
+            "'self'",
+            "'unsafe-inline'",
+            *_CSP_CDN_HOSTS,
+            'https://*.hotjar.com',
+            'https://fonts.googleapis.com',
+        ],
+        'font-src': [
+            "'self'",
+            'data:',
+            *_CSP_CDN_HOSTS,
+            'https://*.hotjar.com',
+            'https://fonts.gstatic.com',
+        ],
+        'img-src': ["'self'", 'data:', 'blob:', 'https:'],
+        'media-src': ["'self'", 'data:', 'blob:', 'https:'],
+        'connect-src': [
+            "'self'",
+            'https://*.paypal.com',
+            'https://gateway.sumup.com',
+            'https://api.thecatapi.com',
+            'https://*.hotjar.com',
+            'https://*.hotjar.io',
+            # Hotjar streams recordings over WebSocket; wss: is not covered by the https: sources
+            'wss://*.hotjar.com',
+            # Google Analytics / Tag Manager / Ads beacons
+            'https://www.google-analytics.com',
+            'https://*.google-analytics.com',
+            'https://*.analytics.google.com',
+            'https://www.googletagmanager.com',
+            'https://*.googletagmanager.com',
+            'https://www.google.com',
+            'https://ad.doubleclick.net',
+            'https://*.g.doubleclick.net',
+            # Address lookup in the leaflet map picker
+            'https://nominatim.openstreetmap.org',
+        ],
+        # Hotjar (and other libs) spawn workers from blob: URLs; without this it
+        # falls back to default-src 'self' and the worker is blocked
+        'worker-src': ["'self'", 'blob:'],
+        'frame-src': [
+            "'self'",
+            'https://*.paypal.com',
+            'https://gateway.sumup.com',
+            'https://www.youtube.com',
+            'https://www.google.com',
+            'https://www.googletagmanager.com',
+            'https://larpmanager.com',
+            'https://*.larpmanager.com',
+        ],
+        'object-src': ["'none'"],
+        'base-uri': ["'self'"],
+        'frame-ancestors': ["'self'", 'https://larpmanager.com', 'https://*.larpmanager.com'],
+    },
+}
+
+# Session and CSRF cookie security
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = False
+
+# Accounting
+
+MAX_ROUNDING_TOLERANCE = 0.05
 
 # Demo user password (used for creating demo accounts)
 DEMO_PASSWORD = 'pippo'
@@ -220,9 +339,10 @@ DEMO_PASSWORD = 'pippo'
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB in bytes
 
 # Allowed file extensions for TinyMCE uploads
+# SECURITY: SVG files are excluded due to XSS risk (can contain JavaScript)
 ALLOWED_UPLOAD_EXTENSIONS = {
     # Images
-    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp',
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
     # Documents
     '.pdf', '.doc', '.docx', '.odt', '.txt',
     # Audio/Video
@@ -235,9 +355,10 @@ UPLOAD_RATE_WINDOW = 60  # Time window in seconds (1 minute)
 UPLOAD_MAX_STORAGE_PER_USER = 100 * 1024 * 1024  # 100MB total per user
 
 # MIME type validation for uploads
+# SECURITY: image/svg+xml is excluded due to XSS risk (SVGs can contain JavaScript)
 ALLOWED_MIME_TYPES = {
     # Images
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
     # Documents
     'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'application/vnd.oasis.opendocument.text', 'text/plain',
@@ -249,6 +370,25 @@ ALLOWED_MIME_TYPES = {
 # email
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+MAIL_BATCH_SIZE = 10
+
+MAIL_BATCH_INTERVAL = 1
+
+MAIL_MAX_RECIPIENTS = 2000
+
+# Amazon SES Configuration (optional - fallback when custom SMTP not configured)
+AWS_SES_ACCESS_KEY_ID = None
+AWS_SES_SECRET_ACCESS_KEY = None
+AWS_SES_REGION_NAME = 'us-east-1'
+
+# Anthropic API key for the live chat assistant (optional - chat is disabled if unset)
+ANTHROPIC_API_KEY = None
+
+# Optional CLI agent used for translation instead of DeepL.
+LLM_TRANSLATION_AGENT = None
+LLM_TRANSLATION_MODEL = None
+LLM_TRANSLATION_MAX_TOKENS = 4000
 
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 
@@ -262,7 +402,6 @@ SECURE_CROSS_ORIGIN_OPENER_POLICY = 'same-origin-allow-popups'
 SAFE_DELETE_FIELD_NAME = 'deleted'
 
 CLEAN_DB = [
-    'VACUUM',
     "delete from larpmanager_textversion where created < CURRENT_DATE - INTERVAL '6 months';",
     "delete from larpmanager_log where created < CURRENT_DATE - INTERVAL '6 months';",
     # "delete from paypal_ipn where created < CURRENT_DATE - INTERVAL '6 months';",
@@ -291,6 +430,14 @@ CLEAN_DB = [
     "delete from larpmanager_casting where deleted < CURRENT_DATE - INTERVAL '6 months';",
     "delete from larpmanager_relationship where deleted < CURRENT_DATE - INTERVAL '6 months';",
     "delete from larpmanager_larpmanagerprofiler where created < CURRENT_DATE - INTERVAL '6 months';",
+
+    # recipients first: the foreign key is not cascading at database level
+    "delete from larpmanager_emailrecipient where email_content_id in ( select id from larpmanager_emailcontent where created < CURRENT_DATE - INTERVAL '12 months');",
+    "delete from larpmanager_emailcontent where created < CURRENT_DATE - INTERVAL '12 months';",
+    "delete from axes_accesslog where attempt_time < CURRENT_DATE - INTERVAL '3 months';",
+
+    # last, to reclaim the space freed by the deletions above
+    'VACUUM (ANALYZE)',
 ]
 
 
@@ -328,6 +475,22 @@ LOGIN_URL = '/login'
 LOGIN_REDIRECT_URL = 'home'
 LOGOUT_REDIRECT_URL = 'home'
 
+# django-allauth settings
+# Enable email-based user matching for social accounts
+# This allows django-allauth to find users by email instead of username
+# when users have username different from email
+SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
+SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
+ACCOUNT_UNIQUE_EMAIL = True
+
+ACCOUNT_LOGIN_METHODS = {'email', 'username'}
+
+ACCOUNT_SIGNUP_FIELDS = [
+    'email*',
+    'password1*',
+    'password2*'
+]
+
 # PROFILING
 MIN_DURATION_PROFILER = 1
 IGNORABLE_PROFILER_URLS = [
@@ -346,6 +509,7 @@ IGNORABLE_404_URLS = [
     re.compile(r'favicon\.ico'),
     re.compile(r'/wp-'),
     re.compile(r'/xmlrpc\.php'),
+    re.compile(r'/\.env\.webhook'),
 ]
 
 # PAYMENT SETTINGS
@@ -396,6 +560,11 @@ LOGGING = {
             'level': 'INFO',
             'propagate': False,
         },
+        'axes': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
         'deepl': {
             'handlers': ['console'],
             'level': 'WARNING',
@@ -407,3 +576,16 @@ LOGGING = {
         },
     },
 }
+
+AUTHENTICATION_BACKENDS = [
+    'axes.backends.AxesStandaloneBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+# django-axes: brute-force protection on login
+from datetime import timedelta  # noqa: E402
+
+AXES_FAILURE_LIMIT = 5
+AXES_COOLOFF_TIME = timedelta(minutes=30)
+AXES_RESET_ON_SUCCESS = True
+AXES_LOCKOUT_PARAMETERS = ['username', 'ip_address']

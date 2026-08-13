@@ -3,11 +3,16 @@
 {% block title %}
     {{ registration }} - {% trans "Your characters" %}
 {% endblock title %}
+{% block info %}
+    {% trans "Access your characters for this event" %}
+{% endblock info %}
 {% block content %}
-    <p>{% trans "Select which of your characters you want to access" %}:</p>
-    {% for el in urls %}
-        <p>
-            <a href="{{ el.1 }}">{{ el.0 }}</a>
-        </p>
-    {% endfor %}
+    <div class="user_resize">
+        <p>{% trans "Select which of your characters you want to access:" %}</p>
+        {% for el in urls %}
+            <p>
+                <a href="{{ el.1 }}">{{ el.0 }}</a>
+            </p>
+        {% endfor %}
+    </div>
 {% endblock content %}

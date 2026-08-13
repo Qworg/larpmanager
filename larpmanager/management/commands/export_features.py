@@ -89,18 +89,19 @@ class Command(BaseCommand):
                     "after_text",
                     "after_link",
                     "hidden",
+                    "dependencies",
                 ),
             ),
             "permission_module": (PermissionModule, ("name", "slug", "order", "icon")),
             "association_permission": (
                 AssociationPermission,
-                ("name", "descr", "slug", "number", "feature", "config", "hidden", "module"),
+                ("name", "descr", "slug", "number", "feature", "config", "active_if", "hidden", "module", "icon"),
             ),
             "event_permission": (
                 EventPermission,
-                ("name", "descr", "slug", "number", "feature", "config", "hidden", "module"),
+                ("name", "descr", "slug", "number", "feature", "config", "active_if", "hidden", "module", "icon"),
             ),
-            "payment_methods": (PaymentMethod, ("name", "slug", "instructions", "fields", "profile")),
+            "payment_methods": (PaymentMethod, ("name", "slug", "instructions", "fields", "profile", "nationality")),
         }
 
         # Process each model type and export to YAML fixture files
@@ -177,9 +178,9 @@ class Command(BaseCommand):
                 image = getattr(obj, field)
                 entry_fields[field] = image.name if image else None
 
-            # Handle many-to-many relationships as lists of primary keys
+            # Handle many-to-many relationships as lists of slugs (if available) or primary keys
             for field in m2m_fields:
-                entry_fields[field] = list(getattr(obj, field).values_list("pk", flat=True))
+                entry_fields[field] = self.export_m2m(obj, field)
 
             # Build Django fixture format entry with model identifier
             entry = {
@@ -192,3 +193,12 @@ class Command(BaseCommand):
         fixture_path = f"larpmanager/fixtures/{model_name}.yaml"
         with Path(fixture_path).open("w") as f:
             yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+    @staticmethod
+    def export_m2m(obj: object, field: str) -> list:
+        """Export a many-to-many field as slugs if available, otherwise as primary keys."""
+        related_mgr = getattr(obj, field)
+        related_model = related_mgr.model
+        if hasattr(related_model, "slug"):
+            return list(related_mgr.values_list("slug", flat=True))
+        return list(related_mgr.values_list("pk", flat=True))

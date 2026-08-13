@@ -1,29 +1,22 @@
 {% extends "utils.html" %}
 {% load i18n show_tags %}
+{% block body_class %}
+    {% if frame %}floating_iframe{% endif %}
+{% endblock body_class %}
 {% block title %}
-    {% if welcome_message %}
-        {% trans "Welcome to" %} {{ platform }}!
-    {% else %}
-        {{ form1.page_title }}
-        {% if num != "0" %}
-            - {% trans "Change" %}
+    {% if exe %}
+        {% if creation %}
+            {% trans "New" %}
         {% else %}
-            - {% trans "New" %}
+            {{ name }}
         {% endif %}
-        {% if run %}- {{ run }}{% endif %}
+        - {{ form1.page_title }}
+    {% else %}
+        {{ form1.page_title }} - {{ run.search | truncatechars:50 }}
     {% endif %}
 {% endblock title %}
 {% block info %}
-    {% if welcome_message %}
-        <div id="welcome_message">
-            <p>{% trans "This page will guide you through the creation of your first event, step by step" %}.</p>
-            <p>{% trans "Simply follow the instructions and provide the required information" %}.</p>
-        </div>
-        <hr />
-        <br />
-    {% else %}
-        {{ form1.page_info }}
-    {% endif %}
+    {% if not frame %}{{ form1.page_info }}{% endif %}
 {% endblock info %}
 {% block content %}
     {% include "elements/form/load_template.html" with form=form1 %}
@@ -36,8 +29,9 @@
           enctype="multipart/form-data"
           id="main_form">
         {% csrf_token %}
-        <div>
-            <table class="mob">
+        {% if frame %}<input type="hidden" name="frame" value="1">{% endif %}
+        <div class="form_container auto_resize">
+            <table>
                 {% include "elements/form/inner.html" with form=form1 %}
                 {% include "elements/form/inner.html" with form=form2 %}
             </table>
@@ -52,5 +46,9 @@
     {{ form2.media }}
     {% include "elements/form/max_length.js" %}
     {% include "elements/form/jump_section.js" %}
-    {% include "elements/working-ticket.js" %}
+    {% include "elements/working-ticket.js" with edit_uuid=num %}
+    {% if form1.campaign_hide_template %}
+        {% include "elements/form/campaign_hide_template.js" %}
+    {% endif %}
+    {% include "elements/helpers/iframe_resize.js" %}
 {% endblock js2 %}

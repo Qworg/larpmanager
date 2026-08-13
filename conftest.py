@@ -23,19 +23,21 @@
 import logging
 import os
 import re
+import shutil
 import subprocess
+import sys
 from collections.abc import Generator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from django.conf import settings
+from django.conf import settings, settings as django_settings
 from django.core.cache import cache
 from django.core.management import call_command
-from django.db import connection, transaction
+from django.db import DatabaseError, connection, transaction
 from django.test.utils import ContextList
-from playwright.sync_api import BrowserContext, BrowserType, Page, Response
+from playwright.sync_api import BrowserContext, BrowserType, Dialog, Page, Response
 from pytest_django.fixtures import SettingsWrapper
 
 from larpmanager.models.access import AssociationRole
@@ -53,6 +55,15 @@ _DB_SCHEMA_CHECKED = {}
 def _env_for_tests() -> None:
     os.environ.setdefault("PYTHONHASHSEED", "0")
     os.environ.setdefault("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _copy_test_media() -> None:
+    """Copy test media fixtures to MEDIA_ROOT so image files resolve during tests."""
+    src = Path(__file__).parent / "larpmanager" / "tests" / "media"
+    dst = Path(django_settings.MEDIA_ROOT)
+    if src.exists():
+        shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
 @pytest.fixture(autouse=True)
@@ -121,7 +132,7 @@ def _capture_test_artifacts(
     request: pytest.FixtureRequest,
     page: Page,
     *,
-    is_ci: bool,
+    headed: bool,  # noqa: ARG001
     video_dir: Path | None,
 ) -> Any:
     """Capture screenshot, HTML and video if test failed.
@@ -132,7 +143,7 @@ def _capture_test_artifacts(
         return None
 
     screenshot_dir = Path(__file__).parent / "test_screenshots"
-    screenshot_dir.mkdir(exist_ok=True)
+    screenshot_dir.mkdir(mode=0o770, exist_ok=True)
 
     # Generate filename with timestamp and test name
     timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
@@ -143,9 +154,9 @@ def _capture_test_artifacts(
     _save_screenshot(page, base_filename, screenshot_dir)
     _save_html_content(page, base_filename, screenshot_dir)
 
-    # Get video object before closing (only if not in CI)
+    # Get video object before closing (only if video was recorded)
     video_obj = None
-    if not is_ci and video_dir:
+    if video_dir:
         logger = logging.getLogger(__name__)
         try:
             video_obj = page.video
@@ -163,19 +174,23 @@ def pw_page(
     live_server: ContextList,
 ) -> Generator[tuple[Page, str, BrowserContext], None, None]:
     """Prepares browser, context and finally page, for playwright tests."""
-    headed = pytestconfig.getoption("--headed") or os.getenv("PYCHARM_DEBUG", "0") == "1"
+    is_pycharm = os.getenv("PYCHARM_HOSTED") == "1" or any(
+        "_jb_pytest_runner" in arg or "pycharm" in arg.lower() for arg in sys.argv
+    )
+    headed = pytestconfig.getoption("--headed") or is_pycharm
+    record = os.getenv("RECORD") == "1"
 
-    # Check if running in CI/GitHub Actions
-    is_ci = os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
-    is_ci = True  # Enable when video needed
-
-    # Configure video recording (only if not in CI)
+    # Configure video recording (only in headed mode)
     video_dir = None
-    if not is_ci:
+    if record:
         video_dir = Path(__file__).parent / "test_videos"
-        video_dir.mkdir(exist_ok=True)
+        video_dir.mkdir(mode=0o770, exist_ok=True)
 
-    browser = browser_type.launch(headless=not headed, slow_mo=50)
+    browser = browser_type.launch(
+        headless=not headed,
+        slow_mo=0,
+        args=["--disable-popup-blocking"],
+    )
     context = browser.new_context(
         storage_state=None,
         viewport={"width": 1280, "height": 800},
@@ -184,9 +199,8 @@ def pw_page(
     )
     page = context.new_page()
     base_url = live_server.url
-    page.set_default_timeout(60000)
-
-    page.on("dialog", lambda dialog: dialog.accept())
+    timeout = 60000
+    page.set_default_timeout(timeout)
 
     def on_response(response: Response) -> None:
         error_status = 500
@@ -196,10 +210,21 @@ def pw_page(
 
     page.on("response", on_response)
 
+    dialog_errors: list[str] = []
+
+    def on_dialog(dialog: Dialog) -> None:
+        msg = f"Unexpected dialog [{dialog.type}]: {dialog.message}"
+        dialog_errors.append(msg)
+        dialog.dismiss()
+
+    page.on("dialog", on_dialog)
+
     yield page, base_url, context
 
     # Capture test artifacts if test failed
-    video_info = _capture_test_artifacts(request, page, is_ci=is_ci, video_dir=video_dir)
+    video_info = None
+    if record:
+        video_info = _capture_test_artifacts(request, page, headed=headed, video_dir=video_dir)
 
     # Close context (this finalizes the video)
     context.close()
@@ -210,6 +235,10 @@ def pw_page(
         video_obj, base_filename = video_info
         screenshot_dir = Path(__file__).parent / "test_screenshots"
         _save_video(video_obj, base_filename, screenshot_dir)
+
+    # Fail after cleanup if any dialog appeared during the test
+    if dialog_errors:
+        pytest.fail("Test failed due to unexpected dialogs:\n" + "\n".join(dialog_errors))
 
 
 def _truncate_app_tables() -> None:
@@ -261,7 +290,7 @@ def clean_db(host: str, env: Mapping[str, str], name: str, user: str) -> None:
 
 
 def _database_has_tables() -> bool:
-    """Check if database has any application tables."""
+    """Check if database has application tables populated with fixture data."""
     with connection.cursor() as cursor:
         cursor.execute("""
             SELECT COUNT(*)
@@ -272,7 +301,10 @@ def _database_has_tables() -> bool:
               AND c.relname NOT LIKE 'django_%'
         """)
         count = cursor.fetchone()[0]
-        return count > 0
+        if count == 0:
+            return False
+
+    return True
 
 
 def _get_dump_schema_version() -> str | None:
@@ -342,8 +374,8 @@ def _get_applied_migrations() -> set[str]:
                 WHERE app = 'larpmanager'
             """)
             return {row[0] for row in cursor.fetchall()}
-    except (OSError, RuntimeError, Exception) as e:
-        # If query fails (table doesn't exist, etc), return empty set (schema needs reload)
+    except (OSError, RuntimeError, DatabaseError) as e:
+        # If query fails (e.g. django_migrations table missing), return empty set (schema needs reload)
         logger = logging.getLogger(__name__)
         logger.debug("Failed to get applied migrations: %s", e)
         return set()

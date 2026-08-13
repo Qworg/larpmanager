@@ -26,10 +26,14 @@ function load_question(el) {
     if ($('.lq_{0}'.format(key)).hasClass('select')) {
         el.next().trigger('click');
         $( '.lq_{0}'.format(key) ).removeClass('select');
+        // Remove from done to allow reloading when reopened
+        delete done[key];
         return;
     }
 
     $( '.lq_{0}'.format(key) ).addClass('select');
+
+    window._questionLoadPending = (window._questionLoadPending || 0) + 1;
 
     request = $.ajax({
         url: url_load_questions,
@@ -62,7 +66,7 @@ function load_question(el) {
         // Collect all updates first
         for (let r in data) {
             let vl = data[r];
-            if (vl.constructor === Array) vl = vl.join(", ");
+            if (vl.constructor === Array) vl = vl.join(" | ");
 
             if (popup.has(parseInt(r)))
                 vl += "... <a href='#' class='post_popup' pop='{0}' fie='{1}'><i class='fas fa-eye'></i></a>".format(r, q_uuid);
@@ -99,9 +103,13 @@ function load_question(el) {
                     cell.invalidate('dom');
                 }
             });
+
+            // redraw so search and ordering are evaluated on the freshly loaded column
+            table.draw(false);
         });
 
          done[q_uuid] = 1;
+         window._questionLoadPending = Math.max(0, (window._questionLoadPending || 0) - 1);
 
          if (spinner) {
             stop_spinner();
@@ -142,7 +150,12 @@ function load_question_email(el) {
         for (let nm in data) {
             let vl = data[nm];
 
-            let txt = '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td></tr>'.format(nm, vl.emails.length, vl.emails.join(", "), vl.names.join(", "));
+            let txt;
+            if (vl.characters !== undefined) {
+                txt = '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>'.format(nm, vl.emails.length, vl.characters.join(", "), vl.names.join(", "), vl.emails.join(", "));
+            } else {
+                txt = '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td></tr>'.format(nm, vl.emails.length, vl.emails.join(", "), vl.names.join(", "));
+            }
             tbl.append(txt);
         }
 
@@ -167,52 +180,131 @@ function reload_table() {
 
 regs = [];
 
-window.hideColumnsIndexMap = {};
-document.querySelectorAll('.que_load thead th').forEach(function(th) {
-    var realIndex = Array.from(th.parentNode.children).indexOf(th);
-    th.classList.forEach(function(cls) {
-        if (!window.hideColumnsIndexMap[cls]) {
-            window.hideColumnsIndexMap[cls] = [];
-        }
-        if (!window.hideColumnsIndexMap[cls].includes(realIndex)) {
-            window.hideColumnsIndexMap[cls].push(realIndex);
-        }
+window.buildHideColumnsIndexMap = function() {
+    window.hideColumnsIndexMap = {};
+    document.querySelectorAll('.que_load thead th').forEach(function(th) {
+        var realIndex = Array.from(th.parentNode.children).indexOf(th);
+        th.classList.forEach(function(cls) {
+            if (!window.hideColumnsIndexMap[cls]) {
+                window.hideColumnsIndexMap[cls] = [];
+            }
+            if (!window.hideColumnsIndexMap[cls].includes(realIndex)) {
+                window.hideColumnsIndexMap[cls].push(realIndex);
+            }
+        });
     });
-});
+};
+window.buildHideColumnsIndexMap();
 
 window.addEventListener('DOMContentLoaded', function() {
     $(function() {
 
         setTimeout(reload_table, 1000);
 
-        $('.load_que').on('click', function () {
+        $(document).on('click', '.load_que', function () {
             load_question($(this));
             return false;
         });
 
-        $('.load_email_que').on('click', function () {
+        $(document).on('click', '.load_email_que', function () {
             load_question_email($(this));
             return false;
         });
 
         $('.go_table a').hide();
 
-        $('.table_toggle').on('click', function () {
+        window.setColumnsVisible = function(indexList, visible) {
+            Object.keys(window.datatables).forEach(function(key) {
+                var table = window.datatables[key];
+                for (const index of indexList) {
+                    table.column(index).visible(visible);
+                }
+            });
+        };
+
+        window.reloadActiveQuestions = function() {
+            $('.load_que').each(function() {
+                var $el = $(this);
+                var key = $el.attr('key');
+                if ($('.lq_' + key).hasClass('select')) {
+                    $('.lq_' + key).removeClass('select');
+                    $el.next('.table_toggle').removeClass('select');
+                    delete done[key];
+                    load_question($el);
+                }
+            });
+        };
+
+        window.applyColumnToggles = function() {
+            if (!window.hideColumnsIndexMap) return;
+            var statsActive = $('a.table_toggle[tog="stats"]').hasClass('select');
+            $('a.table_toggle.select').each(function() {
+                var tog = $(this).attr('tog');
+                if (tog === 'stats') {
+                    Object.keys(window.hideColumnsIndexMap).forEach(function(key) {
+                        if (!key.startsWith('stats-')) return;
+                        var contentType = key.slice('stats-'.length);
+                        var contentActive = contentType === 'always' ||
+                            $('a.table_toggle[tog="' + contentType + '"]').hasClass('select');
+                        window.setColumnsVisible(window.hideColumnsIndexMap[key], contentActive);
+                    });
+                } else {
+                    var index_list = window.hideColumnsIndexMap[tog] || [];
+                    window.setColumnsVisible(index_list, true);
+                    if (statsActive) {
+                        var statsKey = 'stats-' + tog;
+                        var statsIndices = window.hideColumnsIndexMap[statsKey] || [];
+                        if (statsIndices.length) {
+                            window.setColumnsVisible(statsIndices, true);
+                        }
+                    }
+                }
+            });
+        };
+
+        $(document).on('click', '.table_toggle', function () {
             var tog = $(this).attr("tog");
             $(this).toggleClass('select');
 
+            if (tog === 'stats') {
+                // For each stats sub-type, show only if both stats and the parent toggle are active
+                var statsActive = $(this).hasClass('select');
+                Object.keys(window.hideColumnsIndexMap).forEach(function(key) {
+                    if (!key.startsWith('stats-')) return;
+                    var contentType = key.slice('stats-'.length);
+                    var contentActive = contentType === 'always' ||
+                        $('a.table_toggle[tog="' + contentType + '"]').hasClass('select');
+                    window.setColumnsVisible(window.hideColumnsIndexMap[key], statsActive && contentActive);
+                });
+                window._tableToggleDone = tog;
+                return false;
+            }
+
+            // Normal toggle for content columns
             var index_list = window.hideColumnsIndexMap[tog] || [];
             Object.keys(window.datatables).forEach(function(key) {
                 var table = window.datatables[key];
-
                 for (const index of index_list) {
                     var column = table.column(index);
                     column.visible(!column.visible());
-                };
+                }
             });
 
+            // If stats is active, also update the corresponding stats sub-columns
+            var statsActive = $('a.table_toggle[tog="stats"]').hasClass('select');
+            if (statsActive) {
+                var statsKey = 'stats-' + tog;
+                var statsIndices = window.hideColumnsIndexMap[statsKey] || [];
+                if (statsIndices.length) {
+                    window.setColumnsVisible(statsIndices, $(this).hasClass('select'));
+                }
+            }
+
+            window._tableToggleDone = tog;
             return false;
         });
+
+        window._questionsPageReady = true;
 
     });
 

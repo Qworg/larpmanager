@@ -1,13 +1,67 @@
 {% extends "utils.html" %}
 {% load show_tags i18n %}
 {% block title %}
-    {% trans "Registrations" %} - {{ run }}
+    {% trans "Registrations" %} - {{ run.search }}
 {% endblock title %}
-{% block info %}
-    {% trans "This page shows the signups of the event" %}
-{% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
+    <div class="table-header-row">
+        {% include "elements/table/header.html" %}
+        {% if reg_all %}
+            <div class="staff-list">
+                <div class="nav">
+                    <b>{% trans "Columns" %}</b>:
+                    <a href="#" id="load_accounting">{% trans "accounting" %}</a>
+                    <a href="#" class="table_toggle hide" tog='acc'>hidden</a>
+                    <a href="#" class="table_toggle" tog='email'>{% trans "email" %}</a>
+                    {% if registration_reg_que_age %}
+                        <a href="#" class="table_toggle" tog='age'>{% trans "age" %}</a>
+                    {% endif %}
+                    {% if features.gift %}
+                        <a href="#" class="table_toggle" tog='gift'>{% trans "gift" %}</a>
+                    {% endif %}
+                    {% if features.membership %}
+                        <a href="#" class="table_toggle" tog='membership'>{% trans "member" %}</a>
+                    {% endif %}
+                    {% if features.faction %}
+                        <a href="#" class="table_toggle" tog='factions'>{% trans "factions" %}</a>
+                    {% endif %}
+                    {% if features.custom_character %}
+                        <a href="#" class="table_toggle" tog='custom'>{% trans "customisations" %}</a>
+                    {% endif %}
+                    {% if features.discount %}
+                        <a href="#" class="table_toggle" tog='disc'>{% trans "Discounts" %}</a>
+                    {% endif %}
+                    <a href="#" class="table_toggle" tog='date'>{% trans "chronology" %}</a>
+                </div>
+            </div>
+            {% if reg_questions %}
+                <div class="staff-list">
+                    <div class="nav">
+                        {% trans "Questions:" %}
+                        {% for key, que in reg_questions.items %}
+                            {% if que.typ == 'e' or que.typ == 'p' %}
+                                <a href="#" class="table_toggle no_jump" tog='q_{{ key }}'>{{ que.name | truncatechars:25 }}</a>
+                            {% else %}
+                                <a href="#" class="load_que lq_{{ key }}"  key="{{ key }}">{{ que.name | truncatechars:25 }}</a>
+                                <a href="#" class="table_toggle hide no_jump" tog='q_{{ key }}'>hidden</a>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+                </div>
+            {% endif %}
+            {% if features.questbuilder and quest_types %}
+                <div class="staff-list">
+                    <div class="nav">
+                        Questbuilder:
+                        {% for key, qt in quest_types.items %}
+                            {% include "elements/comma.html" %}
+                            <a href="#" class="table_toggle" tog='qt_{{ qt.uuid }}'>{{ qt.name }}</a>
+                        {% endfor %}
+                    </div>
+                </div>
+            {% endif %}
+        {% endif %}
+    </div>
     {% if reg_all %}
         <div id="overlay">
             <div class="lds-roller">
@@ -37,66 +91,14 @@
                 </div>
             </div>
         </div>
-        <div class="staff-list">
-            <div class="nav">
-                <b>{% trans "Columns" %}</b>:
-                <a href="#" id="load_accounting">{% trans "accounting" %}</a>
-                <a href="#" class="table_toggle hide" tog='acc'>hidden</a>
-                <a href="#" class="table_toggle" tog='email'>{% trans "email" %}</a>
-                {% if registration_reg_que_age %}
-                    <a href="#" class="table_toggle" tog='age'>{% trans "age" %}</a>
-                {% endif %}
-                {% if features.gift %}
-                    <a href="#" class="table_toggle" tog='gift'>{% trans "gift" %}</a>
-                {% endif %}
-                {% if features.membership %}
-                    <a href="#" class="table_toggle" tog='membership'>{% trans "member" %}</a>
-                {% endif %}
-                {% if features.faction %}
-                    <a href="#" class="table_toggle" tog='factions'>{% trans "factions" %}</a>
-                {% endif %}
-                {% if features.custom_character %}
-                    <a href="#" class="table_toggle" tog='custom'>{% trans "customisations" %}</a>
-                {% endif %}
-                {% if features.discount %}
-                    <a href="#" class="table_toggle" tog='disc'>{% trans "Discounts" %}</a>
-                {% endif %}
-                <a href="#" class="table_toggle" tog='date'>{% trans "chronology" %}</a>
-            </div>
-        </div>
-        {% if reg_questions %}
-            <div class="staff-list">
-                <div class="nav">
-                    {% trans "Questions" %}:
-                    {% for key, que in reg_questions.items %}
-                        {% if que.typ == 'e' %}
-                            <a href="#" class="table_toggle no_jump" tog='q_{{ key }}'>{{ que.name | truncatechars:25 }}</a>
-                        {% else %}
-                            <a href="#" class="load_que lq_{{ key }}"  key="{{ key }}">{{ que.name | truncatechars:25 }}</a>
-                            <a href="#" class="table_toggle hide no_jump" tog='q_{{ key }}'>hidden</a>
-                        {% endif %}
-                    {% endfor %}
-                </div>
-            </div>
-        {% endif %}
-        {% if features.questbuilder and quest_types %}
-            <div class="staff-list">
-                <div class="nav">
-                    Questbuilder:
-                    {% for key, qt in quest_types.items %}
-                        {% include "elements/comma.html" %}
-                        <a href="#" class="table_toggle" tog='qt_{{ qt.uuid }}'>{{ qt.name }}</a>
-                    {% endfor %}
-                </div>
-            </div>
-        {% endif %}
         {% for key, dc in reg_all %}
             {% if dc.list %}
                 <h2>{{ dc.type }} ({{ dc.count }})</h2>
-                <table id="regs_{{ run.uuid }}_{{ dc.type }}"
+                <table id="regs_{{ run.uuid }}_{{ key }}"
                        class="que_load go_datatable registration_list">
                     <thead>
                         <tr>
+                            <th></th>
                             <th></th>
                             <th>{% trans "Participant" %}</th>
                             {% if registration_reg_que_age %}
@@ -143,11 +145,13 @@
                             <th class="acc pay_a">{% trans "Money" %}</th>
                             {% if 'credits' in association.features %}<th class="acc pay_b">{{ credits_name }}</th>{% endif %}
                             {% if 'tokens' in association.features %}<th class="acc pay_c">{{ tokens_name }}</th>{% endif %}
+                            <th></th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for registration in dc.list %}
                             <tr id="{{ registration.uuid }}">
+                                <td></td>
                                 <td>
                                     <a href="{% url 'orga_registrations_edit' run.get_slug registration.uuid %}"
                                        qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
@@ -173,7 +177,10 @@
                                     <td>
                                         {% for el in registration.chars %}
                                             {% include "elements/comma.html" %}
-                                            <a href="{% url 'orga_characters_edit' run.get_slug el.uuid %}">#{{ el.number }} {{ el.name }}</a>
+                                            <a href="{% url 'orga_characters_edit' run.get_slug el.uuid %}">
+                                                {% if writing_number %}#{{ el.number }}{% endif %}
+                                                {{ el.name }}
+                                            </a>
                                             {% if features.custom_character %}
                                                 <a href="{% url 'orga_registrations_customization' run.get_slug el.uuid %}"><i class="fas fa-user-pen"></i></a>
                                             {% endif %}
@@ -202,7 +209,7 @@
                                         <td class="custom" tooltip="{{ nm }}">
                                             {% if registration.custom|get:nm %}
                                                 {% if nm != "profile" %}
-                                                    {{ registration.custom | get:nm | safe | clean_tags | truncatechars:50 }}
+                                                    {{ registration.custom | get:nm | clean_tags | truncatechars:50 }}
                                                 {% else %}
                                                     {{ registration.custom | get:nm | safe }}
                                                 {% endif %}
@@ -213,14 +220,19 @@
                                                        fie="{{ nm }}"><i class="fas fa-eye"></i></a>
                                                     <span class="popup_text {{ nm }}">
                                                         <h2>{{ registration.member }} - {{ nm | capfirst }}</h2>
-                                                    {{ registration.custom | get:nm | safe }}</span>
+                                                        {% if nm == "profile" %}
+                                                            {{ registration.custom | get:nm | safe }}
+                                                        {% else %}
+                                                            {{ registration.custom | get:nm | clean_tags }}
+                                                        {% endif %}
+                                                    </span>
                                                 {% endif %}
                                             {% endif %}
                                         </td>
                                     {% endfor %}
                                 {% endif %}
                                 {% for key, que in reg_questions.items %}
-                                    {% if que.typ == 'e' %}
+                                    {% if que.typ == 'e' or que.typ == 'p' %}
                                         <td class="question q_{{ key }}" tooltip="{{ que.name }}">
                                             {% with ed_id=key|concat:'_red' %}
                                                 {% lookup registration ed_id as value %}
@@ -313,31 +325,41 @@
                                         <!-- filled later -->
                                     </td>
                                 {% endif %}
+                                <td>
+                                    <a href="{% url 'orga_registrations_delete' run.get_slug registration.uuid %}"
+                                       qtip="{% trans "Delete" %}"
+                                       class="only_new_v18"><i class="fas fa-trash"></i></a>
+                                </td>
                             </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             {% endif %}
         {% endfor %}
-        <div class="staff-list">
-            <div class="orga-buttons">
-                <a class="new button"
-                   href="{% url 'orga_registration_transfer' run.get_slug %}">
-                    <i class="fas fa-exchange-alt"></i> {% trans "Transfer" %}
-                </a>
-                <a class="new button"
-                   href="{% url 'orga_registrations_reload' run.get_slug %}">
-                    <i class="fas fa-arrow-rotate-right"></i> {% trans "Recompute" %}
-                </a>
-            </div>
-        </div>
-        {% include "elements/registrations_list.html" %}
+        <div id="registrations_summary">{% include "elements/registrations_list.html" %}</div>
     {% else %}
         <br />
-        <p>
+        <p class="no-elements-available">
             <i>{% trans "No registrations have been received for this event yet" %}</i>
         </p>
     {% endif %}
+    <div class="table-footer-row">
+        {% include "elements/table/footer.html" %}
+        {% if not lite_mode %}
+            <div class="staff-list">
+                <div class="orga-buttons">
+                    <a class="new button"
+                       href="{% url 'orga_registration_transfer' run.get_slug %}">
+                        <i class="fas fa-exchange-alt"></i> {% trans "Transfer" %}
+                    </a>
+                    <a class="new button"
+                       href="{% url 'orga_registrations_reload' run.get_slug %}">
+                        <i class="fas fa-arrow-rotate-right"></i> {% trans "Recompute" %}
+                    </a>
+                </div>
+            </div>
+        {% endif %}
+    </div>
 {% endblock content %}
 {% block js %}
     <script>
@@ -415,6 +437,9 @@ window.addEventListener('DOMContentLoaded', function() {
                     const cell = table.cell(update.rowSelector, update.columnClass);
                     if (cell && cell.node()) {
                         cell.data(update.value);
+                        if (update.columnClass === '.deadline' && parseInt(update.value) < 0) {
+                            $(cell.node()).addClass('redderized');
+                        }
                     }
                 });
 
@@ -443,7 +468,7 @@ window.addEventListener('DOMContentLoaded', function() {
 
     $(function() {
 
-        $('#load_accounting').on('click', function () {
+        $(document).on('click', '#load_accounting', function () {
             load_accounting($(this));
             return false;
         });
@@ -469,10 +494,10 @@ window.addEventListener('DOMContentLoaded', function() {
                     if (res.k == 0) return;
                     stop_spinner();
 
-                    uglipop({class:'popup', source:'html', content: res.v});
+                    window.openLmModal(res.v, 'popup');
 
-                    $('.popup').scrollTop( 0 );
-                    $(".popup .hide").hide();
+                    $('#lm-modal').scrollTop( 0 );
+                    $('#lm-modal .hide').hide();
                 });
 
                 return false;

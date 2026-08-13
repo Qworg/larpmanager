@@ -27,7 +27,7 @@ from django.utils.translation import gettext_lazy as _
 if TYPE_CHECKING:
     from django.http import HttpRequest
 
-from larpmanager.cache.config import get_event_config
+from larpmanager.cache.config import get_association_config, get_event_config
 from larpmanager.cache.feature import get_association_features, get_event_features
 from larpmanager.cache.permission import (
     get_association_permission_feature,
@@ -97,7 +97,7 @@ def get_association_roles(request: HttpRequest, context: dict) -> tuple[bool, di
     return is_admin, permissions, role_names
 
 
-def has_association_permission(request: HttpRequest, context: dict, permission: str) -> bool:
+def has_association_permission(request: HttpRequest, context: dict, permission: str | list[str]) -> bool:
     """Check if the user has the specified association permission.
 
     Args:
@@ -132,7 +132,11 @@ def has_association_permission(request: HttpRequest, context: dict, permission: 
     if not permission:
         return True
 
-    # Check if user has the specific permission
+    # Handle multiple permissions (list)
+    if isinstance(permission, list):
+        return any(p in user_permissions for p in permission)
+
+    # Check single permission
     return permission in user_permissions
 
 
@@ -167,8 +171,9 @@ def get_index_association_permissions(
             raise UserPermissionError
         return
 
-    # Set role names in context for template rendering
+    # Set role names and admin status in context for template rendering
     context["role_names"] = role_names
+    context["is_admin"] = is_admin
 
     # Retrieve available features for the association
     features = context.get("features") or get_association_features(association_id)
@@ -181,9 +186,6 @@ def get_index_association_permissions(
         "association",
         has_default=is_admin,
     )
-
-    # Set sidebar state from user session
-    context["is_sidebar_open"] = request.session.get("is_sidebar_open", True)
 
 
 def get_event_roles(request: HttpRequest, context: dict, slug: str) -> tuple[bool, dict[str, int], list[str]]:
@@ -257,13 +259,14 @@ def has_event_permission(
     # Early return if request is invalid or user lacks member attribute
     if (
         not request
+        or not request.user.is_authenticated
         or not hasattr(request.user, "member")
         or check_managed(context, permission_name, is_association=False)
     ):
         return False
 
     # Check if user has admin role in association (role 1)
-    if "association_role" in context and 1 in context["association_role"]:
+    if 1 in context.get("association_role", {}):
         return True
 
     # Get event-specific roles and permissions for the user
@@ -304,10 +307,11 @@ def get_index_event_permissions(
 
     """
     (is_organizer, user_event_permissions, role_names) = get_event_roles(request, context, event_slug)
-    if "association_role" in context and 1 in context["association_role"]:
+    if 1 in context.get("association_role", {}):
         is_organizer = True
     if enforce_check and not role_names and not is_organizer:
         raise UserPermissionError
+    context["is_organizer"] = is_organizer
     if role_names:
         context["role_names"] = role_names
     event_features = context.get("features") or get_event_features(context["event"].id)
@@ -359,7 +363,24 @@ def check_managed(context: dict, permission: str, *, is_association: bool = True
     return placeholder == "def"
 
 
-def get_index_permissions(
+# Essential permissions visible in lite/demo mode
+LITE_PERMISSIONS: frozenset[str] = frozenset(
+    {
+        "exe_association",
+        "exe_events",
+        "exe_payments",
+        "exe_methods",
+        "orga_event",
+        "orga_registrations",
+        "orga_registration_tickets",
+        "orga_registration_form",
+        "orga_payments",
+        "orga_characters",
+    }
+)
+
+
+def get_index_permissions(  # noqa: C901, PLR0912
     context: dict,
     features: dict,
     permissions: dict,
@@ -386,11 +407,21 @@ def get_index_permissions(
 
     """
     permissions_by_module = {}
+    is_lite_mode = context.get("lite_mode", False)
 
     # Get cached permissions for the specified type
     for permission in get_cache_index_permission(permission_type):
         # Skip hidden permissions
         if permission["hidden"]:
+            continue
+
+        # In lite mode, only show essential permissions
+        if is_lite_mode and permission["slug"] not in LITE_PERMISSIONS:
+            continue
+
+        # In a demo instance restricted to specific sidebar entries, hide the rest
+        allowed_sidebar = context.get("demo_allowed_sidebar")
+        if allowed_sidebar and permission["slug"] not in allowed_sidebar:
             continue
 
         # Check if permission is allowed in current context
@@ -406,9 +437,14 @@ def get_index_permissions(
             continue
 
         # Check config-dependent permissions
-        if permission_type == "event" and permission.get("active_if") and context.get("event"):
+        if permission.get("active_if"):
             config_key = permission["active_if"]
-            config_value = get_event_config(context["event"].id, config_key, default_value=False, context=context)
+            if permission_type == "event" and context.get("event"):
+                config_value = get_event_config(context["event"].id, config_key, context=context)
+            elif permission_type == "association" and context.get("association_id"):
+                config_value = get_association_config(context["association_id"], config_key, context=context)
+            else:
+                config_value = False
             if not config_value:
                 continue
 

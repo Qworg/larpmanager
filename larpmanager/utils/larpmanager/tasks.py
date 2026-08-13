@@ -19,25 +19,33 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import traceback
 from functools import wraps
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from background_task import background
 from django.conf import settings as conf_settings
-from django.core.exceptions import ObjectDoesNotExist
-from django.core.mail import EmailMultiAlternatives, get_connection
+from django.core import signing
+from django.core.cache import cache
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.mail import EmailMultiAlternatives
+from django.core.validators import validate_email
 from django.utils import timezone
 
 from larpmanager.cache.association_text import get_association_text
 from larpmanager.cache.config import get_event_config
 from larpmanager.cache.text_fields import remove_html_tags
+from larpmanager.mail.factory import EmailConnectionFactory
+from larpmanager.models.access import AssociationRole
 from larpmanager.models.association import Association, AssociationTextType, get_url
 from larpmanager.models.event import Event, Run
-from larpmanager.models.member import Member
-from larpmanager.models.miscellanea import Email
+from larpmanager.models.member import Member, Membership, MembershipStatus
+from larpmanager.models.miscellanea import EmailContent, EmailRecipient
+from larpmanager.utils.services.miscellanea import _newsletter_set_non_active
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,7 +55,7 @@ logger = logging.getLogger(__name__)
 INTERNAL_KWARGS = {"schedule", "repeat", "repeat_until", "remove_existing_tasks"}
 
 
-def background_auto(schedule: Any = 0, **background_kwargs: Any) -> Any:
+def background_auto(schedule: Any = 0, *, skip_duplicates: bool = False, **background_kwargs: Any) -> Any:
     """Conditionally run functions as background tasks.
 
     Creates a decorator that can run functions either synchronously
@@ -55,6 +63,7 @@ def background_auto(schedule: Any = 0, **background_kwargs: Any) -> Any:
 
     Args:
         schedule (int): Seconds to delay before execution
+        skip_duplicates (bool): Skip scheduling if an identical pending task exists
         **background_kwargs: Additional arguments for background task
 
     Returns:
@@ -85,6 +94,13 @@ def background_auto(schedule: Any = 0, **background_kwargs: Any) -> Any:
                 filtered_kwargs = {key: value for key, value in kwargs.items() if key not in INTERNAL_KWARGS}
                 # Execute function directly in foreground
                 return original_function(*args, **filtered_kwargs)
+            # Skip scheduling if an identical pending task already exists
+            if skip_duplicates:
+                from background_task.models import Task  # noqa: PLC0415
+
+                filtered_kwargs = {k: v for k, v in kwargs.items() if k not in INTERNAL_KWARGS}
+                if Task.objects.get_task(background_task.name, args=list(args), kwargs=filtered_kwargs).exists():
+                    return None
             # Schedule function as background task
             return background_task(*args, **kwargs)
 
@@ -115,44 +131,109 @@ def mail_error(subject: Any, email_body: Any, exception: Any = None) -> None:
     logger.error("Subject: %s", subject)
     logger.error("Body: %s", email_body)
     if exception:
-        error_notification_body = f"{traceback.format_exc()} <br /><br /> {subject} <br /><br /> {email_body}"
-    else:
-        error_notification_body = f"{subject} <br /><br /> {email_body}"
+        logger.error("Mail error traceback: %s", traceback.format_exc())
+    error_notification_body = f"{subject} <br /><br /> {email_body}"
     error_notification_subject = "[LarpManager] Mail error"
     for _admin_name, admin_email in conf_settings.ADMINS:
         my_send_simple_mail(error_notification_subject, error_notification_body, admin_email)
 
 
+def split_recipients(recipient_text: str) -> list:
+    """Split text by any common separator: comma, semicolon, pipe, whitespace."""
+    return [p.strip() for p in re.split(r"[,;\|\s]+", recipient_text) if p.strip()]
+
+
+def partition_shared_recipients(recipients: list, association_id: int | None) -> tuple[list, list]:
+    """Split recipients into those who shared their data with the association and those who did not.
+
+    A recipient is allowed if a Member with that email exists and has a Membership for the given
+    association whose status is not EMPTY (i.e. they shared their data). When association_id is
+    missing, no filtering is applied and every recipient is allowed.
+
+    Args:
+        recipients: List of recipient email addresses.
+        association_id: Association the email is sent on behalf of.
+
+    Returns:
+        Tuple (allowed, ignored) of email addresses, preserving input order.
+
+    """
+    if not association_id:
+        return list(recipients), []
+
+    shared_emails = {
+        email.lower()
+        for email in Membership.objects.filter(
+            association_id=association_id,
+        )
+        .exclude(status=MembershipStatus.EMPTY)
+        .values_list("member__email", flat=True)
+        if email
+    }
+
+    allowed = []
+    ignored = []
+    for email in recipients:
+        if email.strip().lower() in shared_emails:
+            allowed.append(email)
+        else:
+            ignored.append(email)
+    return allowed, ignored
+
+
+def _create_bulk_recipients(email_content: Any, recipients: list, seen_emails: dict) -> list:
+    """Create EmailRecipient records for valid, unique addresses and return their PKs."""
+    recipient_ids = []
+    for email in recipients:
+        if not email or email in seen_emails:
+            continue
+        try:
+            validate_email(email.strip())
+        except ValidationError:
+            logger.warning("Skipping invalid email address in bulk send")
+            continue
+        email_recipient = EmailRecipient.objects.create(
+            email_content=email_content,
+            recipient=email.strip(),
+            language_code=None,
+        )
+        recipient_ids.append(email_recipient.pk)
+        seen_emails[email] = 1
+    return recipient_ids
+
+
 @background_auto()
 def send_mail_exec(
-    players: str,
+    recipient_list: str,
     subj: str,
     body: str,
     association_id: int | None = None,
     run_id: int | None = None,
-    reply_to: str | None = None,
-    interval: int = 20,
+    interval: int | None = None,
 ) -> None:
-    """Send bulk emails to multiple recipients with staggered delivery.
+    """Send bulk emails to multiple recipients with batch delivery.
 
-    Sends emails to a comma-separated list of recipients with automatic delays
-    between sends to prevent spam filtering. Emails are prefixed with the
-    organization/run name and scheduled with configurable intervals.
+    Sends emails to a comma-separated list of recipients in batches of 10,
+    with a configurable delay between batches to prevent spam filtering.
+    Emails are prefixed with the organization/run name.
+
+    This function creates a single EmailContent object and multiple EmailRecipient
+    objects to avoid duplicating email content in the database.
 
     Args:
-        players: Comma-separated list of email addresses to send to
+        recipient_list: Text list of email addresses to send to
         subj: Email subject line (will be prefixed with org/run name)
         body: Email body content in HTML or plain text
         association_id: Association ID for determining sender context
         run_id: Run ID for determining sender context (alternative to association_id)
-        reply_to: Custom reply-to email address
-        interval: Interval in seconds between each email (default: 20)
+        interval: Seconds to wait between each batch (defaults to MAIL_BATCH_INTERVAL)
 
     Returns:
         None
 
     Side Effects:
-        - Schedules individual emails with specified interval delays via background tasks
+        - Creates one EmailContent and multiple EmailRecipient records
+        - Schedules batch emails with 1 second interval between batches
         - Sends notification to admins about bulk email operation
         - Logs warning if neither association_id nor run_id are provided
 
@@ -160,88 +241,150 @@ def send_mail_exec(
     seen_emails = {}
 
     sender_context = None
-    # Determine sender context (Association or Run object, or LM )
-    if association_id:
-        sender_context = Association.objects.filter(pk=association_id).first()
-    elif run_id:
+    # Determine sender context: run wins over association
+    if run_id:
         sender_context = Run.objects.filter(pk=run_id).first()
+        if not sender_context:
+            # Run was deleted since this task was scheduled; drop the dead FK
+            run_id = None
+        # Extract association_id from run if not provided
+        elif not association_id:
+            association_id = sender_context.event.association_id
+    elif association_id:
+        sender_context = Association.objects.filter(pk=association_id).first()
+        if not sender_context:
+            # Association was deleted since this task was scheduled; drop the dead FK
+            association_id = None
 
     if sender_context:
         # Add organization/run prefix to subject line
         subj = f"[{sender_context}] {subj}"
 
-    # Parse comma-separated email list
-    recipients = players.split(",")
+    # Parse symbol-separated email list
+    recipients = split_recipients(recipient_list)
+
+    max_recipients = getattr(conf_settings, "MAIL_MAX_RECIPIENTS", 2000)
+    if len(recipients) > max_recipients:
+        logger.warning("Broadcast rejected: %d recipients exceeds limit of %d", len(recipients), max_recipients)
+        return
 
     # Notify administrators about bulk email operation
     if sender_context:
         notify_admins(f"Sending {len(recipients)} - [{sender_context}]", f"{subj}")
 
-    email_count = 0
-    # Process each recipient with deduplication
-    for email in recipients:
-        if not email:
-            continue
-        if email in seen_emails:
-            continue
-        email_count += 1
-        # Schedule email with specified interval delay per recipient to prevent spam filtering
-        # noinspection PyUnboundLocalVariable
-        my_send_mail(subj, body, email.strip(), sender_context, reply_to, schedule=email_count * interval)
-        seen_emails[email] = 1
+    # Create a single EmailContent object for all recipients
+    email_content = EmailContent.objects.create(
+        association_id=association_id,
+        run_id=run_id,
+        subj=subj,
+        body=str(body),
+    )
+
+    recipient_ids = _create_bulk_recipients(email_content, recipients, seen_emails)
+
+    # Split into batches
+    batches = [
+        recipient_ids[i : i + conf_settings.MAIL_BATCH_SIZE]
+        for i in range(0, len(recipient_ids), conf_settings.MAIL_BATCH_SIZE)
+    ]
+
+    # Schedule each batch with X second delay between batches
+    batch_interval = interval if interval is not None else conf_settings.MAIL_BATCH_INTERVAL
+    for batch_index, batch in enumerate(batches):
+        my_send_mail_bkg(batch, schedule=batch_index * batch_interval)
 
 
 @background_auto(queue="mail")
-def my_send_mail_bkg(email_pk: Any) -> None:
-    """Background task to send a queued email.
+def my_send_mail_bkg(email_recipient_pk: int | list[int]) -> None:
+    """Background task to send a queued email or batch of emails.
 
     Args:
-        email_pk (int): Primary key of Email model instance to send
+        email_recipient_pk: Primary key or list of primary keys of EmailRecipient to send
 
     Side effects:
-        Sends the email and marks it as sent in database
+        Sends the email(s) and marks successfully sent emails as sent in database.
+        Failed emails remain unsent for retry in next execution.
 
     """
-    try:
-        email = Email.objects.get(pk=email_pk)
-    except ObjectDoesNotExist:
-        return
+    # Handle both single ID and list of IDs
+    email_recipient_pks = [email_recipient_pk] if isinstance(email_recipient_pk, int) else email_recipient_pk
 
-    if email.sent:
-        logger.info("Email already sent!")
-        return
+    for pk in email_recipient_pks:
+        try:
+            email_recipient = EmailRecipient.objects.select_related("email_content").get(pk=pk)
+        except ObjectDoesNotExist:
+            logger.warning("EmailRecipient %s not found", pk)
+            continue
 
-    my_send_simple_mail(email.subj, email.body, email.recipient, email.association_id, email.run_id, email.reply_to)
+        if "@" not in email_recipient.recipient:
+            logger.info("Email recipient invalid: %s", email_recipient.recipient)
+            continue
 
-    email.sent = timezone.now()
-    email.save()
+        domain = email_recipient.recipient.split("@")[-1].lower()
+
+        forbidden = ["demo", "test"]
+        if any(keyword in domain for keyword in forbidden):
+            logger.info("Email recipient forbidden: %s", email_recipient.recipient)
+            continue
+
+        if email_recipient.sent:
+            logger.info("Email %s already sent!", pk)
+            continue
+
+        email_content = email_recipient.email_content
+        body = email_content.body
+
+        if email_content.association_id:
+            # Add organization signature if available
+            signature = get_association_text(
+                email_content.association_id, AssociationTextType.SIGNATURE, email_recipient.language_code
+            )
+            if signature:
+                body += signature
+
+            # Append unsubscribe footer
+            association = Association.objects.get(pk=email_content.association_id)
+            body += add_unsubscribe_body(association, email_recipient.recipient)
+        else:
+            body += add_unsubscribe_body(None, email_recipient.recipient)
+
+        my_send_simple_mail(
+            email_content.subj,
+            body,
+            email_recipient.recipient,
+            email_content.association_id,
+            email_content.run_id,
+            email_content.reply_to,
+            email_content.attachment_path,
+            email_content.attachment_name,
+        )
+
+        # Only mark as sent if successful
+        email_recipient.sent = timezone.now()
+        email_recipient.save()
 
 
 def clean_sender(sender_name: Any) -> Any:
-    """Clean sender name for email headers by removing special characters.
-
-    Args:
-        sender_name (str): Original sender name
-
-    Returns:
-        str: Sanitized sender name safe for email headers
-
-    """
+    """Clean sender name for email headers by removing special characters."""
     sender_name = sender_name.replace(":", " ")
     sender_name = sender_name.split(",")[0]
     sender_name = re.sub(r"[^a-zA-Z0-9\s\-\']", "", sender_name)
     return re.sub(r"\s+", " ", sender_name).strip()
 
 
-def my_send_simple_mail(  # noqa: C901 - Complex email sending with multiple format and attachment options
+def my_send_simple_mail(
     subj: str,
     body: str,
     m_email: str,
     association_id: int | None = None,
     run_id: int | None = None,
     reply_to: str | None = None,
+    attachment_path: str | None = None,
+    attachment_name: str | None = None,
 ) -> None:
     """Send email with association/event-specific configuration.
+
+    Uses priority order: Custom SMTP -> Amazon SES -> Default backend
 
     Handles custom SMTP settings, sender addresses, BCC lists, and email formatting
     based on association and event configuration. Prioritizes event-level settings
@@ -254,145 +397,37 @@ def my_send_simple_mail(  # noqa: C901 - Complex email sending with multiple for
         association_id: Association ID for custom SMTP settings and sender configuration
         run_id: Run ID for event-specific SMTP settings (overrides association settings)
         reply_to: Custom Reply-To email address header
+        attachment_path: Optional absolute filesystem path to a file to attach as PDF
+        attachment_name: Optional filename to use in the email attachment (overrides the on-disk name)
 
     Raises:
         Exception: Re-raises email sending exceptions after logging error details
 
     Note:
-        Sends email using configured SMTP settings or default connection.
+        Sends email using configured backend (Custom SMTP, SES, or default).
         Logs email details in debug mode for troubleshooting.
-
     """
-    # Initialize email headers and BCC list
-    email_headers = {}
-    bcc_recipients = []
-
-    # Initialize with default LarpManager sender configuration
-    smtp_connection = None
-    sender_email = "info@larpmanager.com"
-    sender = f"LarpManager <{sender_email}>"
-    event_settings_applied = False
-
-    cache_context = {}
-
     try:
-        # Apply event-level configuration if run_id is provided and SMTP is configured
-        if run_id:
-            run = Run.objects.get(pk=run_id)
-            event = run.event
+        # Gather metadata (sender, BCC, headers)
+        metadata = _prepare_email_metadata(association_id, run_id, reply_to)
 
-            # Check if event has custom SMTP configuration
-            event_smtp_host_user = get_event_config(
-                event.id,
-                "mail_server_host_user",
-                default_value="",
-                context=cache_context,
-                bypass_cache=True,
-            )
+        # Build email message
+        email_message = _build_email_message(subj, body, m_email, metadata)
 
-            # Only apply event settings if SMTP host user is configured
-            if event_smtp_host_user:
-                sender_email = event_smtp_host_user
-                sender = f"{clean_sender(event.name)} <{sender_email}>"
+        if attachment_path:
+            if Path(attachment_path).exists():
+                if attachment_name:
+                    email_message.attach(attachment_name, Path(attachment_path).read_bytes(), "application/pdf")
+                else:
+                    email_message.attach_file(attachment_path, "application/pdf")
+            else:
+                logger.warning("Receipt attachment not found, sending without it: %s", attachment_path)
 
-                # Create custom SMTP connection for event
-                smtp_connection = get_connection(
-                    host=get_event_config(
-                        event.id, "mail_server_host", default_value="", context=cache_context, bypass_cache=True
-                    ),
-                    port=get_event_config(
-                        event.id, "mail_server_port", default_value="", context=cache_context, bypass_cache=True
-                    ),
-                    username=get_event_config(
-                        event.id,
-                        "mail_server_host_user",
-                        default_value="",
-                        context=cache_context,
-                        bypass_cache=True,
-                    ),
-                    password=get_event_config(
-                        event.id,
-                        "mail_server_host_password",
-                        default_value="",
-                        context=cache_context,
-                        bypass_cache=True,
-                    ),
-                    use_tls=get_event_config(
-                        event.id,
-                        "mail_server_use_tls",
-                        default_value=False,
-                        context=cache_context,
-                        bypass_cache=True,
-                    ),
-                )
-                event_settings_applied = True
+        # Get backend and send
+        backend = EmailConnectionFactory.get_backend(association_id, run_id)
+        backend.send_message(email_message)
 
-        # Apply association-level configuration if association_id is provided
-        if association_id:
-            association = Association.objects.get(pk=association_id)
-
-            # Add association main email to BCC if configured
-            if association.get_config("mail_cc", default_value=False, bypass_cache=True) and association.main_mail:
-                bcc_recipients.append(association.main_mail)
-
-            # Apply custom SMTP settings if configured (only if event settings not already applied)
-            association_smtp_host_user = association.get_config(
-                "mail_server_host_user", default_value="", bypass_cache=True
-            )
-
-            # Check if association has custom SMTP and event settings aren't active
-            if association_smtp_host_user:
-                if not event_settings_applied:
-                    sender_email = association_smtp_host_user
-                    sender = f"{clean_sender(association.name)} <{sender_email}>"
-
-                    # Create custom SMTP connection for association
-                    smtp_connection = get_connection(
-                        host=association.get_config("mail_server_host", default_value="", bypass_cache=True),
-                        port=association.get_config("mail_server_port", default_value="", bypass_cache=True),
-                        username=association.get_config("mail_server_host_user", default_value="", bypass_cache=True),
-                        password=association.get_config(
-                            "mail_server_host_password", default_value="", bypass_cache=True
-                        ),
-                        use_tls=association.get_config("mail_server_use_tls", default_value=False, bypass_cache=True),
-                    )
-            # Use standard LarpManager subdomain sender if no custom SMTP configured
-            elif not event_settings_applied:
-                sender_email = f"{association.slug}@larpmanager.com"
-                sender = f"{clean_sender(association.name)} <{sender_email}>"
-
-        # Fall back to default SMTP connection if no custom connection configured
-        if not smtp_connection:
-            smtp_connection = get_connection()
-
-        # Set custom Reply-To header if provided
-        if reply_to:
-            email_headers["Reply-To"] = reply_to
-
-        # Add RFC-compliant unsubscribe header
-        email_headers["List-Unsubscribe"] = f"<mailto:{sender_email}>"
-
-        # Store HTML body for multipart email
-        body_html = body
-
-        # Build multipart email with both plain text and HTML versions
-        email_message = EmailMultiAlternatives(
-            subj,
-            remove_html_tags(body),
-            sender,
-            [m_email],
-            bcc=bcc_recipients,
-            headers=email_headers,
-            connection=smtp_connection,
-        )
-
-        # Attach HTML alternative to the email
-        email_message.attach_alternative(body_html, "text/html")
-
-        # Send the email
-        email_message.send()
-
-        # Log email details in debug mode for troubleshooting
+        # Debug logging
         if conf_settings.DEBUG:
             logger.info("Sending email to: %s", m_email)
             logger.info("Subject: %s", subj)
@@ -404,28 +439,200 @@ def my_send_simple_mail(  # noqa: C901 - Complex email sending with multiple for
         raise
 
 
-def add_unsubscribe_body(association: Any) -> Any:
-    """Add unsubscribe footer to email body.
+def _prepare_email_metadata(association_id: int | None, run_id: int | None, reply_to: str | None) -> dict:
+    """Extract email metadata from association/event config.
 
     Args:
-        association: Association instance for unsubscribe URL
+        association_id: Association ID for metadata extraction
+        run_id: Run ID for event-specific metadata
+        reply_to: Custom Reply-To email address
 
     Returns:
-        str: HTML footer with unsubscribe link
-
+        Dict containing sender_email, sender_name, headers, and bcc_recipients
     """
+    metadata = {
+        "sender_email": "info@larpmanager.com",
+        "sender_name": "LarpManager",
+        "headers": {},
+        "bcc_recipients": [],
+        "base_url": get_url("").rstrip("/"),
+    }
+
+    cache_context = {}
+    event_settings_applied = False
+
+    # Apply event-level metadata
+    if run_id:
+        run = Run.objects.get(pk=run_id)
+        event = run.event
+
+        event_smtp_user = get_event_config(
+            event.id,
+            "mail_server_host_user",
+            context=cache_context,
+            bypass_cache=True,
+        )
+        if event_smtp_user:
+            metadata["sender_email"] = event_smtp_user
+            metadata["sender_name"] = event.name
+            event_settings_applied = True
+
+    # Apply association-level metadata
+    if association_id:
+        association = Association.objects.get(pk=association_id)
+
+        # Base URL for absolutizing relative links/images in the body
+        metadata["base_url"] = get_url("", association).rstrip("/")
+
+        # Add BCC if configured
+        if association.get_config("mail_cc", bypass_cache=True) and association.main_mail:
+            metadata["bcc_recipients"].append(association.main_mail)
+
+        # Store organization main email for potential Reply-To (used by SES backend)
+        if association.main_mail:
+            metadata["org_main_mail"] = association.main_mail
+
+        # Set sender (only if event didn't set it)
+        if not event_settings_applied:
+            assoc_smtp_user = association.get_config("mail_server_host_user", bypass_cache=True)
+            if assoc_smtp_user:
+                metadata["sender_email"] = assoc_smtp_user
+                metadata["sender_name"] = association.name
+            else:
+                # Use subdomain sender
+                metadata["sender_email"] = f"{association.slug}@larpmanager.com"
+                metadata["sender_name"] = association.name
+
+    # Add headers
+    if reply_to:
+        if "\r" in reply_to or "\n" in reply_to:
+            msg = "Invalid characters in reply-to address"
+            raise ValueError(msg)
+        metadata["headers"]["Reply-To"] = reply_to
+    metadata["headers"]["List-Unsubscribe"] = f"<mailto:{metadata['sender_email']}>"
+
+    return metadata
+
+
+# A whole html tag, rewritten one at a time so every attribute inside it is considered;
+# quoted attribute values are consumed as a unit, so a ">" inside them does not end the tag
+_TAG_RE = re.compile(r"""<[^>'"]*(?:(?:"[^"]*"|'[^']*')[^>'"]*)*>""")
+
+# Content of a style block, the only place outside tags where css url() references are expected
+_STYLE_BLOCK_RE = re.compile(r"(<style\b[^>]*>)(.*?)(</style\s*>)", re.IGNORECASE | re.DOTALL)
+
+# Root-relative single-value attributes (excludes protocol-relative "//host/path")
+_RELATIVE_URL_RE = re.compile(r"""(\s(?:src|href|poster|background)\s*=\s*["'])(/(?!/)[^"']*)(["'])""", re.IGNORECASE)
+
+# Srcset attributes, whose value is a comma separated list of candidates
+_RELATIVE_SRCSET_RE = re.compile(r"""(\ssrcset\s*=\s*["'])([^"']*)(["'])""", re.IGNORECASE)
+
+# Root-relative CSS url() references, in inline styles or <style> blocks
+_RELATIVE_CSS_URL_RE = re.compile(r"""(url\(\s*['"]?)(/(?!/)[^)'"]*)""", re.IGNORECASE)
+
+# Root-relative url at the start of a srcset candidate (excludes protocol-relative "//host/path")
+_SRCSET_CANDIDATE_RE = re.compile(r"(\A|,)(\s*)(/(?!/)[^\s,]*)")
+
+
+def _absolute_srcset(value: str, base_url: str) -> str:
+    """Prefix every root-relative candidate of a srcset value with the base url.
+
+    Values holding a data uri are left untouched: their comma separated base64
+    payload cannot be told apart from a candidate list, and may itself start
+    with a slash.
+    """
+    if "data:" in value.lower():
+        return value
+    return _SRCSET_CANDIDATE_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}{base_url}{match.group(3)}", value)
+
+
+def _absolute_css(css: str, base_url: str) -> str:
+    """Prefix every root-relative css url() reference with the base url."""
+    return _RELATIVE_CSS_URL_RE.sub(lambda match: f"{match.group(1)}{base_url}{match.group(2)}", css)
+
+
+def _absolute_tag(tag: str, base_url: str) -> str:
+    """Absolutize every root-relative url attribute of a single html tag."""
+    tag = _RELATIVE_URL_RE.sub(lambda match: f"{match.group(1)}{base_url}{match.group(2)}{match.group(3)}", tag)
+    tag = _RELATIVE_SRCSET_RE.sub(
+        lambda match: f"{match.group(1)}{_absolute_srcset(match.group(2), base_url)}{match.group(3)}", tag
+    )
+    # covers inline styles, the only css that lives inside a tag
+    return _absolute_css(tag, base_url)
+
+
+def absolute_email_urls(body: str, base_url: str) -> str:
+    """Rewrite root-relative links, media references and CSS urls to absolute urls.
+
+    Urls are rewritten only where they can appear: inside html tags (attributes
+    and inline styles) and inside style blocks, so plain text and scripts are
+    left untouched.
+    """
+    if not body:
+        return body
+    body = _TAG_RE.sub(lambda match: _absolute_tag(match.group(0), base_url), body)
+    return _STYLE_BLOCK_RE.sub(
+        lambda match: f"{match.group(1)}{_absolute_css(match.group(2), base_url)}{match.group(3)}", body
+    )
+
+
+def _build_email_message(subj: str, body: str, m_email: str, metadata: dict) -> EmailMultiAlternatives:
+    """Build EmailMultiAlternatives from components.
+
+    Args:
+        subj: Email subject
+        body: Email body (HTML format)
+        m_email: Recipient email address
+        metadata: Dict with sender_email, sender_name, headers, bcc_recipients, base_url, org_main_mail (optional)
+
+    Returns:
+        EmailMultiAlternatives instance ready to send
+    """
+    sender = f"{clean_sender(metadata['sender_name'])} <{metadata['sender_email']}>"
+
+    if metadata.get("base_url"):
+        body = absolute_email_urls(body, metadata["base_url"])
+
+    # Note: Connection is NOT set here - backend handles sending
+    message = EmailMultiAlternatives(
+        subj,
+        remove_html_tags(body),
+        sender,
+        [m_email],
+        bcc=metadata["bcc_recipients"],
+        headers=metadata["headers"],
+    )
+    message.attach_alternative(body, "text/html")
+
+    # Store organization main email for SES backend to use as Reply-To if needed
+    if "org_main_mail" in metadata:
+        message.org_main_mail = metadata["org_main_mail"]
+
+    return message
+
+
+def add_unsubscribe_body(association: Any, recipient_email: str = "") -> str:
+    """Add unsubscribe footer to email body with a signed token link."""
+    token_data: dict[str, Any] = {"email": recipient_email}
+    if association:
+        token_data["association_slug"] = association.slug
+    token = signing.dumps(token_data, salt="unsubscribe")
+    hex_token = token.encode().hex()
+    unsubscribe_url = get_url(f"unsubscribe/{hex_token}/", association)
     html_footer = "<br /><br />-<br />"
-    html_footer += f"<a href='{get_url('unsubscribe', association)}'>Unsubscribe</a>"
+    html_footer += f"<a ses:no-track href='{unsubscribe_url}'>Unsubscribe</a>"
     return html_footer
 
 
-def my_send_mail(  # noqa: C901 - Complex mail sending with template and attachment handling
+def my_send_mail(
     subject: str,
     body: str,
     recipient: str | Member,
     context_object: Run | Event | Association | Any | None = None,
     reply_to: str | None = None,
     schedule: int = 0,
+    attachment_path: str | None = None,
+    attachment_name: str | None = None,
 ) -> None:
     """Queue email for sending with context-aware formatting.
 
@@ -440,12 +647,14 @@ def my_send_mail(  # noqa: C901 - Complex mail sending with template and attachm
              Supports Run, Event, Association, or objects with run_id/association_id/event_id
         reply_to: Custom reply-to email address
         schedule: Delay in seconds before sending email
+        attachment_path: Optional absolute filesystem path to a file to attach
+        attachment_name: Optional filename to use in the email attachment (overrides the on-disk name)
 
     Returns:
         None
 
     Side Effects:
-        - Creates Email record in database
+        - Creates EmailContent and EmailRecipient records in database
         - Schedules background task for email delivery
         - Modifies body with signature and unsubscribe link
 
@@ -453,15 +662,48 @@ def my_send_mail(  # noqa: C901 - Complex mail sending with template and attachm
     # Clean up duplicate spaces in subject line
     subject = subject.replace("  ", " ")
 
-    # Determine language for translations (extract before processing body)
+    # Determine language for translations
     language_code = None
     if isinstance(recipient, Member):
         language_code = recipient.language
 
-    # Initialize context variables for database relationships
-    run_id = None
-    association_id = None
+    # Initialize context variables
+    association_id, run_id = get_context_elements(context_object)
 
+    # Convert Member instance to email string if needed
+    if isinstance(recipient, Member):
+        recipient = recipient.email
+
+    # Ensure string types for database storage
+    subject_string = str(subject)
+    body_string = str(body)
+
+    # Create email content record for tracking
+    email_content = EmailContent.objects.create(
+        association_id=association_id,
+        run_id=run_id,
+        subj=subject_string,
+        body=body_string,
+        reply_to=reply_to,
+        attachment_path=attachment_path,
+        attachment_name=attachment_name,
+    )
+
+    # Create email recipient record
+    email_recipient = EmailRecipient.objects.create(
+        email_content=email_content,
+        recipient=recipient,
+        language_code=language_code,
+    )
+
+    # Queue email for background processing
+    my_send_mail_bkg(email_recipient.pk, schedule=schedule)
+
+
+def get_context_elements(context_object: dict) -> tuple[int, int]:
+    """Extract run and association element ids."""
+    association_id = None
+    run_id = None
     # Extract context information from the provided object
     if context_object:
         # Handle direct model instances
@@ -480,55 +722,66 @@ def my_send_mail(  # noqa: C901 - Complex mail sending with template and attachm
             association_id = context_object.association_id
         elif hasattr(context_object, "event_id") and context_object.event_id:
             association_id = context_object.event.association_id
-
-        # Add organization signature if available
-        if association_id:
-            signature = get_association_text(association_id, AssociationTextType.SIGNATURE, language_code)
-            if signature:
-                body += signature
-
-    # Append unsubscribe footer based on context
-    body += add_unsubscribe_body(context_object)
-
-    # Convert Member instance to email string if needed
-    if isinstance(recipient, Member):
-        recipient = recipient.email
-
-    # Ensure string types for database storage
-    subject_string = str(subject)
-    body_string = str(body)
-
-    # Create email record for tracking and delivery
-    email = Email.objects.create(
-        association_id=association_id,
-        run_id=run_id,
-        recipient=recipient,
-        subj=subject_string,
-        body=body_string,
-        reply_to=reply_to,
-    )
-
-    # Queue email for background processing
-    my_send_mail_bkg(email.pk, schedule=schedule)
+    return association_id, run_id
 
 
 def notify_admins(subject: str, message_text: str = "", exception: Exception | None = None) -> None:
-    """Send notification email to system administrators.
+    """Send notification email to system administrators."""
+    # Rate-limit: suppress duplicate notifications for the same subject within 5 minutes
+    rate_key = "notify_admins:" + hashlib.md5(subject.encode(), usedforsecurity=False).hexdigest()
+    if cache.get(rate_key):
+        return
+    cache.set(rate_key, 1, timeout=300)
 
-    Args:
-        subject (str): Notification subject
-        message_text (str): Notification message
-        exception (Exception, optional): Exception to include in notification
-
-    Side effects:
-        Sends notification emails to all configured ADMINS
-
-    """
     # Ensure message_text is a string to prevent type errors during concatenation
     message_text = str(message_text)
 
     if exception:
-        traceback_text = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-        message_text += "\n" + traceback_text
+        logger.error(
+            "Admin notification traceback: %s",
+            "".join(traceback.format_exception(type(exception), exception, exception.__traceback__)),
+        )
     for _name, email in conf_settings.ADMINS:
         my_send_mail(subject, message_text, email)
+
+
+# DELETION
+
+
+@background(schedule=0)
+def delete_run_task(run_uuid: str) -> None:
+    """Delete the event (and all its runs) identified by this run uuid.
+
+    Nulls out parent FK on child events first to prevent cascade-deleting them.
+    """
+    try:
+        run = Run.objects.select_related("event").get(uuid=run_uuid)
+    except Run.DoesNotExist:
+        return
+    event = run.event
+    Event.objects.filter(parent=event).update(parent=None)
+    event.delete()
+
+
+@background(schedule=0)
+def delete_association_task(association_slug: str) -> None:
+    """Unsubscribe newsletter and delete association in the background.
+
+    Nulls out parent FK on child events whose parent belongs to this association,
+    so external child events are not cascade-deleted.
+    """
+    try:
+        association = Association.objects.get(slug=association_slug)
+    except Association.DoesNotExist:
+        return
+    events_in_assoc = Event.objects.filter(association=association)
+    Event.objects.filter(parent__in=events_in_assoc).update(parent=None)
+    newsletter_emails = set(
+        AssociationRole.objects.filter(association=association, number=1).values_list("members__email", flat=True)
+    )
+    if association.main_mail:
+        newsletter_emails.add(association.main_mail)
+    for email in newsletter_emails:
+        if email:
+            _newsletter_set_non_active(email)
+    association.delete()

@@ -19,7 +19,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 
 """
-Test: Character form creation with complex field types and player editor.
+Test: Character form creation with complex field types and character creation.
 Verifies text/paragraph fields, single/multiple choice with availability limits,
 restricted/mandatory/hidden/disabled fields, character creation/approval workflow, and field visibility.
 """
@@ -30,15 +30,16 @@ from typing import Any
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import (just_wait,
-    fill_tinymce,
-    go_to,
-    login_orga,
-    login_user,
-    logout,
-    submit_confirm,
-    expect_normalized,
-)
+from larpmanager.tests.utils import (submit_register,
+                                     click_option, drag_reorder,
+                                     fill_tinymce,
+                                     go_to,
+                                     login_orga,
+                                     login_user,
+                                     logout,
+                                     submit_confirm,
+                                     expect_normalized, new_option, submit_option, get_option,
+                                     get_modal_iframe, save_modal, _wait_lm_ready, sidebar, expand_options, )
 
 pytestmark = pytest.mark.e2e
 
@@ -51,16 +52,16 @@ def test_orga_character_form(pw_page: Any) -> None:
     # activate characters
     go_to(page, live_server, "/test/manage/features/character/on")
 
-    # activate player editor
+    # activate character creation
     go_to(page, live_server, "/test/manage/features/user_character/on")
 
     # set config
     go_to(page, live_server, "/test/manage/config")
-    page.get_by_role("link", name="Player editor ").click()
+    page.get_by_role("link", name=re.compile(r"^Character creation ")).click()
     page.locator("#id_user_character_max").click()
     page.locator("#id_user_character_max").fill("1")
     page.locator("#id_user_character_approval").check()
-    page.get_by_role("link", name="Character form ").click()
+    page.get_by_role("link", name=re.compile(r"^Character Sheet")).click()
     page.locator("#id_character_form_wri_que_max").check()
     submit_confirm(page)
 
@@ -87,8 +88,9 @@ def test_orga_character_form(pw_page: Any) -> None:
 
     logout(page)
 
-    go_to(page, live_server, "/test/")
+    go_to(page, live_server, "/test/gallery/")
     page.get_by_role("link", name="pinoloooooooooo").click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "Player: Admin Test public: public Presentation baba")
 
     create_second_char(live_server, page)
@@ -97,9 +99,10 @@ def test_orga_character_form(pw_page: Any) -> None:
 def create_second_char(live_server: Any, page: Any) -> None:
     login_user(page, live_server)
     go_to(page, live_server, "/test/register/")
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
-    page.get_by_role("link", name="Create your character!").click()
+    submit_register(page)
+
+    go_to(page, live_server, "/test/register/")
+    sidebar(page, "Create your character")
     page.locator("#id_name").click()
     page.locator("#id_name").fill("olivaaaa")
 
@@ -107,32 +110,35 @@ def create_second_char(live_server: Any, page: Any) -> None:
 
     fill_tinymce(page, "id_text", "sdfdsfds")
     expect(page.locator("#id_que_u6")).to_match_aria_snapshot(
-        '- combobox:\n  - option "-------" [disabled] [selected]\n  - option "all"\n  - option "few - (Available 1)"'
+        '- radio /all.*/\n- radio /few.*/'
     )
-    page.locator("#id_que_u6").select_option("u2")
-    page.locator("#id_que_u8").click()
-    page.locator("#id_que_u8").click()
+    click_option(page.locator("#id_que_u6_0"))
     expect(page.locator("#id_que_u8")).to_match_aria_snapshot(
-        '- combobox:\n  - option "-------" [disabled] [selected]\n  - option "only" [disabled]\n  - option "all"'
+        '- radio /only.*/\n- radio /all.*/'
     )
-    expect(page.locator("#id_que_u7")).to_match_aria_snapshot(
-        '- checkbox "all"\n- text: all\n- checkbox "many - (Available 1)"\n- text: many - (Available 1)\n- checkbox "few" [disabled]\n- text: few'
-    )
-    expect(page.get_by_role("checkbox", name="few")).to_be_disabled()
-    page.get_by_role("checkbox", name="many - (Available 1)").check()
+    expect(page.locator("#id_que_u7")).to_match_aria_snapshot("""
+      - checkbox "all all descr"
+      - text: all all descr
+      - checkbox "many many descr 1 available"
+      - text: many many descr 1 available
+      - checkbox "few few descr" [disabled]
+      - text: few few descr
+    """)
+    expect(page.locator("#id_que_u7_2")).to_be_disabled()
+    click_option(page.locator("#id_que_u7_1"))
     expect_normalized(page, page.locator('[id="id_que_u7_tr"]'), "options: 1 / 2")
     page.locator("#id_que_u9").click()
     page.locator("#id_que_u9").fill("asda")
     submit_confirm(page)
     expect_normalized(page,
         page.locator("#one"),
-        "Player: User Test Status: Creation available text: few multiple text: many mandatory: asda Presentation dsfdfsd Text sdfdsfds",
+        "player: user test status: creation available text: all multiple text: many mandatory: asda presentation dsfdfsd text sdfdsfds",
     )
 
 
 def show_chars(page: Any, live_server: Any) -> None:
     go_to(page, live_server, "/test/manage/config")
-    page.get_by_role("link", name=re.compile(r"^Writing")).click()
+    page.get_by_role("link", name=re.compile(r"^Characters")).click()
     page.locator("#id_writing_field_visibility").check()
     submit_confirm(page)
 
@@ -143,77 +149,89 @@ def show_chars(page: Any, live_server: Any) -> None:
 
 
 def check_first_char(page: Any, live_server: Any) -> None:
-    page.get_by_role("link", name="Change").click()
+    page.get_by_role("link", name="Edit").click()
     expect(page.locator("#id_que_u4")).to_have_value("aaaaaaaaaa")
     page.get_by_text("bbbbbbbbbb").click()
     expect(page.get_by_text("bbbbbbbbbb")).to_have_value("bbbbbbbbbb")
-    expect(page.locator("#id_que_u6")).to_have_value("u1")
-    page.locator("#id_que_u8").click()
-    expect(page.locator("#id_que_u8")).to_have_value("u6")
+    expect(page.locator('input[name="que_u6"]:checked')).to_have_value("u1")
+    expect(page.locator('input[name="que_u8"]:checked')).to_have_value("u6")
     expect(page.locator("#id_que_u7")).to_match_aria_snapshot(
-        '- checkbox "all" [checked]\n- text: all\n- checkbox "many" [checked]\n- text: many\n- checkbox "few - (Available 1)" [disabled]\n- text: few - (Available 1)'
+        '- checkbox /all.*/ [checked]\n- checkbox /many.*/ [checked]'
     )
     expect(page.locator("#id_que_u9")).to_have_value("fill mandatory")
     expect(page.locator("#id_que_u12")).to_have_value("public")
     submit_confirm(page)
 
     go_to(page, live_server, "/test/manage/characters/")
-    page.locator('[id="u2"]').get_by_role("link", name="").click()
-    page.locator("#id_que_u4").click()
-    page.locator("#id_que_u4").fill("cccccccccc")
-    page.locator("#id_que_u4").press("Tab")
-    page.get_by_text("bbbbbbbbbb").click()
-    page.get_by_text("bbbbbbbbbb").fill("dddddddddd")
-    page.locator("#id_que_u6").select_option("u2")
-    page.locator("#id_que_u8").select_option("u7")
-    page.get_by_role("checkbox", name="all").uncheck()
-    page.get_by_role("checkbox", name="few").check()
-    page.locator("#id_que_u10").fill("disabled")
-    page.locator("#id_que_u11").fill("hidden")
-    page.locator("#id_status").select_option("a")
-    submit_confirm(page)
-    page.locator('[id="u2"]').get_by_role("link", name="").click()
-    expect(page.locator("#id_que_u4")).to_have_value("cccccccccc")
-    expect(page.get_by_text("dddddddddd")).to_have_value("dddddddddd")
-    expect(page.locator("#id_que_u6")).to_have_value("u2")
-    expect(page.locator("#id_que_u8")).to_have_value("u7")
-    expect(page.locator("#id_que_u10")).to_have_value("disabled")
-    expect(page.locator("#id_que_u11")).to_have_value("hidden")
-    expect_normalized(page, page.locator("#lbl_id_que_u4"), "short text")
-    page.get_by_role("cell", name="long text").dblclick()
-    expect_normalized(page, page.locator("#lbl_id_que_u5"), "long text")
-    expect_normalized(page, page.locator("#main_form"), "short descr")
-    page.get_by_text("long descr").click()
-
+    page.locator('[id="u2"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_que_u4").click()
+    edit_iframe.locator("#id_que_u4").fill("cccccccccc")
+    edit_iframe.locator("#id_que_u4").press("Tab")
+    edit_iframe.get_by_text("bbbbbbbbbb").click()
+    edit_iframe.get_by_text("bbbbbbbbbb").fill("dddddddddd")
+    # the character is already saved: unselected options start collapsed
+    expand_options(edit_iframe)
+    edit_iframe.locator('label[for="id_que_u6_1"]').click()
+    edit_iframe.locator('label[for="id_que_u8_0"]').click()
+    edit_iframe.locator('label[for="id_que_u7_0"]').click()
+    edit_iframe.locator('label[for="id_que_u7_2"]').click()
+    edit_iframe.locator("#id_que_u10").fill("disabled")
+    edit_iframe.locator("#id_que_u11").fill("hidden")
+    edit_iframe.locator("#id_status").select_option("a")
+    save_modal(page, edit_iframe)
+    page.locator('[id="u2"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    expect(edit_iframe.locator("#id_que_u4")).to_have_value("cccccccccc")
+    expect(edit_iframe.get_by_text("dddddddddd")).to_have_value("dddddddddd")
+    expect(edit_iframe.locator('input[name="que_u6"]:checked')).to_have_value("u2")
+    expect(edit_iframe.locator('input[name="que_u8"]:checked')).to_have_value("u7")
+    expect_normalized(edit_iframe, edit_iframe.locator("#lbl_id_que_u4"), "short text")
+    edit_iframe.get_by_role("cell", name="long text").dblclick()
+    expect_normalized(edit_iframe, edit_iframe.locator("#lbl_id_que_u5"), "long text")
+    expect_normalized(edit_iframe, edit_iframe.locator("#main_form"), "short descr")
+    edit_iframe.get_by_text("long descr").click()
 
 def recheck_char(live_server: Any, page: Any) -> None:
-    expect_normalized(page, page.locator("#main_form"), "long descr")
-    expect_normalized(page, page.locator("#lbl_id_que_u8"), "restricted")
-    expect_normalized(page, page.locator("#main_form"), "restricted text only only descr all all descr")
-    expect_normalized(page, page.locator('[id="id_que_u7_tr"]'), "multiple text")
+    edit_iframe = get_modal_iframe(page)
+    # the character is already saved: unselected options start collapsed
+    expand_options(edit_iframe)
+    expect_normalized(page, edit_iframe.locator("#main_form"), "long descr")
+    expect_normalized(page, edit_iframe.locator("#lbl_id_que_u8"), "restricted")
+    # the show/hide options link sits between the options and the question hint
+    expect_normalized(page, edit_iframe.locator("#main_form"), "only only descr all all descr")
+    expect_normalized(page, edit_iframe.locator("#main_form"), "choose one option - restricted text")
+    expect_normalized(page, edit_iframe.locator('[id="id_que_u7_tr"]'), "multiple text")
     expect_normalized(page,
-        page.locator('[id="id_que_u7_tr"]'), "multiple descr all all descr many many descr few few descr"
+        edit_iframe.locator('[id="id_que_u7_tr"]'), "all all descr many many descr few few descr"
     )
-    submit_confirm(page)
+    expect_normalized(page,
+        edit_iframe.locator('[id="id_que_u7_tr"]'), "select one or more options - multiple descr"
+    )
+    save_modal(page, edit_iframe)
     go_to(page, live_server, "/test/character/list")
-    page.get_by_role("link", name="").click()
-    expect(page.locator("#id_que_u10")).to_have_value("disabled")
+    page.locator(".fa-edit").click()
+    expect(page.locator("#id_que_u10")).to_have_count(0)
+    expect_normalized(page, page.locator("#id_que_u10_tr"), "disabled")
+    expect(page.locator("#id_que_u11")).to_have_count(0)
+    expect(page.locator("#one")).not_to_contain_text("Hidden")
     submit_confirm(page)
 
 
 def create_first_char(live_server: Any, page: Any) -> None:
     go_to(page, live_server, "/test/register/")
     page.get_by_role("link", name="Register").click()
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
-    page.get_by_role("link", name="Create your character!").click()
+    submit_register(page)
+
+    go_to(page, live_server, "/test/register/")
+    sidebar(page, "Create your character")
     page.locator("#id_name").click()
     page.locator("#id_name").fill("pinoloooooooooo")
 
     fill_presentation_text(page)
 
-    expect_normalized(page, page.locator("#lbl_id_text"), "Text (*)")
-    expect_normalized(page, page.locator("#lbl_id_teaser"), "Presentation (*)")
+    expect_normalized(page, page.locator("#lbl_id_text"), "Text")
+    expect_normalized(page, page.locator("#lbl_id_teaser"), "Presentation")
     expect_normalized(page, page.locator("#lbl_id_name"), "Name (*)")
     expect_normalized(page, page.locator("#main_form"), "short descr")
     page.locator("#id_que_u4").click()
@@ -224,24 +242,19 @@ def create_first_char(live_server: Any, page: Any) -> None:
     page.locator("#id_que_u5").fill("bbbbbbbbbb")
     expect(page.locator("#id_que_u5")).to_have_value("bbbbbbbbbb")
     expect_normalized(page, page.locator("#main_form"), "long descr")
-    expect_normalized(page, page.locator("#main_form"), "text length: 10 / 10")
     expect_normalized(page, page.locator("#lbl_id_que_u6"), "available text")
-    expect_normalized(page, page.locator("#main_form"), "available descr all all few few descr")
-    page.locator("#id_que_u6").select_option("u1")
-    page.locator("#id_que_u8").select_option("u6")
+    # the show/hide options link sits between the options and the question hint
+    expect_normalized(page, page.locator("#main_form"), "available text all all few few descr 2 available hide other options choose one option - available descr")
+    click_option(page.locator("#id_que_u6_0"))
+    click_option(page.locator("#id_que_u8_1"))
     expect_normalized(page, page.locator("#lbl_id_que_u8"), "restricted")
-    expect_normalized(page, page.locator("#main_form"), "restricted text only only descr all all descr")
-    page.get_by_text("many - (Available 2)").click()
-    page.locator("#id_que_u7 div").filter(has_text="many - (Available 2)").click()
-    expect_normalized(page, page.locator("#id_que_u7"), "many - (Available 2)")
-    expect_normalized(page, page.locator("#id_que_u7"), "few - (Available 1)")
+    expect_normalized(page, page.locator("#main_form"), "restricted only only descr 1 available all all descr hide other options choose one option - restricted text")
+    click_option(page.locator("#id_que_u7_1"))
     expect_normalized(page,
-        page.locator('[id="id_que_u7_tr"]'), "multiple descr all all descr many many descr few few descr"
+        page.locator('[id="id_que_u7_tr"]'), "multiple text all all descr many many descr 2 available few few descr 1 available hide other options select one or more options - multiple descr options: 1 / 2"
     )
     expect_normalized(page, page.locator('[id="id_que_u7_tr"]'), "multiple text")
-    page.get_by_role("checkbox", name="all").check()
-    page.get_by_role("checkbox", name="many - (Available 2)").check()
-    page.get_by_text("options: 2 /").click()
+    click_option(page.locator("#id_que_u7_0"))
     page.locator("#id_que_u12").click()
     page.locator("#id_que_u12").fill("public")
     page.locator("#id_que_u12").press("Tab")
@@ -260,172 +273,201 @@ def fill_presentation_text(page: Any) -> None:
 
 def add_field_special(page: Any) -> None:
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_typ").press("Tab")
-    page.locator("#id_name").fill("mandatory")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("mandatory descr")
-    page.locator("#id_status").select_option("m")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_typ").press("Tab")
+    edit_iframe.locator("#id_name").fill("mandatory")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("mandatory descr")
+    edit_iframe.locator("#id_status").select_option("m")
+    save_modal(page, edit_iframe)
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_typ").press("Tab")
-    page.locator("#id_name").fill("disabled")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("disabled descr")
-    page.locator("#id_status").select_option("d")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_typ").press("Tab")
+    edit_iframe.locator("#id_name").fill("disabled")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("disabled descr")
+    edit_iframe.locator("#id_status").select_option("d")
+    save_modal(page, edit_iframe)
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_typ").press("Tab")
-    page.locator("#id_name").fill("hidden")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("hidden descr")
-    page.locator("#id_status").select_option("h")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_typ").press("Tab")
+    edit_iframe.locator("#id_name").fill("hidden")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("hidden descr")
+    edit_iframe.locator("#id_status").select_option("h")
+    save_modal(page, edit_iframe)
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_typ").press("Tab")
-    page.locator("#id_name").fill("public")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("public descr")
-    page.locator("#id_visibility").select_option("c")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_typ").press("Tab")
+    edit_iframe.locator("#id_name").fill("public")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("public descr")
+    edit_iframe.locator("#id_visibility").select_option("c")
+    save_modal(page, edit_iframe)
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_typ").press("Tab")
-    page.locator("#id_name").fill("only creation")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("only descr")
-    page.get_by_role("checkbox", name="Creation").check()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_typ").press("Tab")
+    edit_iframe.locator("#id_name").fill("only creation")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("only descr")
+    edit_iframe.get_by_role("checkbox", name="Creation").check()
+    save_modal(page, edit_iframe)
 
 
 def add_field_restricted(page: Any) -> None:
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("restricted")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("restricted text")
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("all")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("all descr")
-    page.locator("#id_description").press("Tab")
-    submit_confirm(page)
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("few")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("few descr")
-    page.locator("#id_description").press("Tab")
-    page.locator("#id_max_available").fill("1")
-    submit_confirm(page)
-    submit_confirm(page)
-    page.locator('[id="u8"]').get_by_role("link", name="").click()
-    page.locator('[id="u8"]').get_by_role("link", name="").click()
-    page.get_by_role("link", name="").click()
-    page.locator('[id="u7"]').get_by_role("link", name="").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("w")
-    page.locator("#id_name").press("Home")
-    page.locator("#id_name").fill("only")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").press("Home")
-    page.locator("#id_description").fill("only descr")
-    submit_confirm(page)
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("restricted")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("restricted text")
+
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("all")
+    option_row.locator("#id_name").press("Tab")
+    option_row.locator("#id_description").fill("all descr")
+    option_row.locator("#id_description").press("Tab")
+    submit_option(edit_iframe, option_row)
+
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("few")
+    option_row.locator("#id_name").press("Tab")
+    option_row.locator("#id_description").fill("few descr")
+    option_row.locator("#id_description").press("Tab")
+    option_row.locator("#id_max_available").fill("1")
+    submit_option(edit_iframe, option_row)
+
+    save_modal(page, edit_iframe)
+
+    drag_reorder(
+        page,
+        page.locator('tr[id="u8"] td.reorder-handle'),
+        page.locator('tr[id="u8"]').locator("xpath=preceding-sibling::tr[1]"),
+    )
+    page.locator('[id="u8"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+
+    opts = edit_iframe.locator("#inline-options .inline-option")
+    drag_reorder(page, opts.nth(1).locator("td.reorder-handle"), opts.nth(0))
+    option_row = get_option(edit_iframe, "u7")
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("w")
+    option_row.locator("#id_name").press("Home")
+    option_row.locator("#id_name").fill("only")
+    option_row.locator("#id_name").press("Tab")
+    option_row.locator("#id_description").press("Home")
+    option_row.locator("#id_description").fill("only descr")
+    submit_option(edit_iframe, option_row)
+
+    save_modal(page, edit_iframe)
 
 
 def add_field_multiple(page: Any) -> None:
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("m")
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("multiple text")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("multiple descr")
-    page.locator("#id_max_length").click()
-    page.locator("#id_max_length").fill("2")
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("all")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("all descr")
-    submit_confirm(page)
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("many")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("many descr")
-    page.locator("#id_description").press("Tab")
-    page.locator("#id_max_available").fill("2")
-    submit_confirm(page)
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("few")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("few")
-    page.locator("#id_description").press("Tab")
-    page.locator("#id_description").click()
-    page.locator("#id_description").press("ArrowRight")
-    page.locator("#id_description").fill("few descr")
-    page.locator("#id_description").press("Tab")
-    page.locator("#id_max_available").fill("1")
-    submit_confirm(page)
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("m")
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("multiple text")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("multiple descr")
+    edit_iframe.locator("#id_max_length").click()
+    edit_iframe.locator("#id_max_length").fill("2")
+
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("all")
+    option_row.locator("#id_name").press("Tab")
+    option_row.locator("#id_description").fill("all descr")
+    submit_option(edit_iframe, option_row)
+
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("many")
+    option_row.locator("#id_name").press("Tab")
+    option_row.locator("#id_description").fill("many descr")
+    option_row.locator("#id_description").press("Tab")
+    option_row.locator("#id_max_available").fill("2")
+    submit_option(edit_iframe, option_row)
+
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("few")
+    option_row.locator("#id_name").press("Tab")
+    option_row.locator("#id_description").fill("few")
+    option_row.locator("#id_description").press("Tab")
+    option_row.locator("#id_description").click()
+    option_row.locator("#id_description").press("ArrowRight")
+    option_row.locator("#id_description").fill("few descr")
+    option_row.locator("#id_description").press("Tab")
+    option_row.locator("#id_max_available").fill("1")
+    submit_option(edit_iframe, option_row)
+
+    save_modal(page, edit_iframe)
 
 
 def add_field_available(page: Any) -> None:
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("available text")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("available descr")
-    page.locator("#id_description").press("Tab")
-    page.locator("#id_status").press("Tab")
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("all")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("all")
-    page.locator("#id_description").press("Tab")
-    submit_confirm(page)
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("few")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("few descr")
-    page.locator("#id_description").press("Tab")
-    page.locator("#id_max_available").fill("2")
-    submit_confirm(page)
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("available text")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("available descr")
+    edit_iframe.locator("#id_description").press("Tab")
+    edit_iframe.locator("#id_status").press("Tab")
+
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("all")
+    option_row.locator("#id_name").press("Tab")
+    option_row.locator("#id_description").fill("all")
+    option_row.locator("#id_description").press("Tab")
+    submit_option(edit_iframe, option_row)
+
+    option_row = new_option(edit_iframe)
+    option_row.locator("#id_name").click()
+    option_row.locator("#id_name").fill("few")
+    option_row.locator("#id_name").press("Tab")
+    option_row.locator("#id_description").fill("few descr")
+    option_row.locator("#id_description").press("Tab")
+    option_row.locator("#id_max_available").fill("2")
+    submit_option(edit_iframe, option_row)
+
+    save_modal(page, edit_iframe)
 
 
 def add_field_text(page: Any) -> None:
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_typ").press("Tab")
-    page.locator("#id_name").fill("short text")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("short descr")
-    page.locator("#id_description").press("Tab")
-    page.locator("#id_max_length").click()
-    page.locator("#id_max_length").press("ArrowLeft")
-    page.locator("#id_max_length").fill("10")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_typ").press("Tab")
+    edit_iframe.locator("#id_name").fill("short text")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("short descr")
+    edit_iframe.locator("#id_description").press("Tab")
+    edit_iframe.locator("#id_max_length").click()
+    edit_iframe.locator("#id_max_length").press("ArrowLeft")
+    edit_iframe.locator("#id_max_length").fill("10")
+    save_modal(page, edit_iframe)
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("p")
-    page.locator("#id_typ").press("Tab")
-    page.locator("#id_name").fill("long text")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_description").fill("long descr")
-    page.locator("#id_description").press("Tab")
-    page.locator("#id_status").press("Tab")
-    page.locator("#id_visibility").press("Tab")
-    page.get_by_role("checkbox", name="Creation").press("Tab")
-    page.get_by_role("checkbox", name="Proposed").press("Tab")
-    page.get_by_role("checkbox", name="Revision").press("Tab")
-    page.get_by_role("checkbox", name="Approved").press("Tab")
-    page.locator("#id_max_length").fill("10")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("p")
+    edit_iframe.locator("#id_typ").press("Tab")
+    edit_iframe.locator("#id_name").fill("long text")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_description").fill("long descr")
+    edit_iframe.locator("#id_description").press("Tab")
+    edit_iframe.locator("#id_status").press("Tab")
+    edit_iframe.locator("#id_visibility").press("Tab")
+    edit_iframe.get_by_role("checkbox", name="Creation").press("Tab")
+    edit_iframe.get_by_role("checkbox", name="Proposed").press("Tab")
+    edit_iframe.get_by_role("checkbox", name="Revision").press("Tab")
+    edit_iframe.get_by_role("checkbox", name="Approved").press("Tab")
+    edit_iframe.locator("#id_max_length").fill("10")
+    save_modal(page, edit_iframe)

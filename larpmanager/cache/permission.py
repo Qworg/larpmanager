@@ -31,15 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def association_permission_feature_key(permission_slug: str) -> str:
-    """Generate cache key for association permission features.
-
-    Args:
-        permission_slug (str): Permission slug
-
-    Returns:
-        str: Cache key for association permission feature
-
-    """
+    """Generate cache key for association permission features."""
     return f"association_permission_feature_{permission_slug}"
 
 
@@ -79,14 +71,14 @@ def update_association_permission_feature(slug: str) -> tuple[str, str, str]:
     return slug, tutorial, config
 
 
-def get_association_permission_feature(slug: str) -> tuple[str, str | None, dict | None]:
+def get_association_permission_feature(slug: str | list[str]) -> tuple[str, str | None, dict | None]:
     """Get cached association permission feature data.
 
     Retrieves feature data for an association permission from cache first,
     falling back to database if not cached.
 
     Args:
-        slug: Permission slug identifier
+        slug: Permission slug(s) identifier
 
     Returns:
         A tuple containing:
@@ -99,12 +91,14 @@ def get_association_permission_feature(slug: str) -> tuple[str, str | None, dict
     if not slug:
         return "def", None, None
 
+    permission = slug[0] if isinstance(slug, list) else slug
+
     # Attempt to retrieve from cache first
-    cached_feature_data = cache.get(association_permission_feature_key(slug))
+    cached_feature_data = cache.get(association_permission_feature_key(permission))
 
     # If cache miss, update cache and return fresh data
     if cached_feature_data is None:
-        cached_feature_data = update_association_permission_feature(slug)
+        cached_feature_data = update_association_permission_feature(permission)
 
     return cached_feature_data
 
@@ -115,15 +109,7 @@ def clear_association_permission_cache(association: AssociationPermission) -> No
 
 
 def event_permission_feature_key(permission_slug: str) -> str:
-    """Generate cache key for event permission features.
-
-    Args:
-        permission_slug (str): Permission slug
-
-    Returns:
-        str: Cache key for event permission feature
-
-    """
+    """Generate cache key for event permission features."""
     return f"event_permission_feature_{permission_slug}"
 
 
@@ -234,6 +220,7 @@ def update_index_permission(permission_type: str) -> list[dict]:
         "hidden",
         "config",
         "active_if",
+        "icon",
         "feature__placeholder",
         "feature__slug",
         "module__name",
@@ -247,15 +234,7 @@ def update_index_permission(permission_type: str) -> list[dict]:
 
 
 def get_cache_index_permission(permission_type: str) -> list:
-    """Get or update cached permission index for a given type.
-
-    Args:
-        permission_type: The permission type to retrieve from cache.
-
-    Returns:
-        The cached or freshly updated permission index.
-
-    """
+    """Get or update cached permission index for a given type."""
     # Attempt to retrieve from cache
     cached_result = cache.get(index_permission_key(permission_type))
 

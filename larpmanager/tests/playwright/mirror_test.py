@@ -30,7 +30,9 @@ from typing import Any
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, go_to, login_orga, submit, submit_confirm, expect_normalized
+from larpmanager.tests.utils import go_to, login_orga, submit, submit_confirm, expect_normalized, \
+    submit_register, \
+    get_modal_iframe, save_modal
 
 pytestmark = pytest.mark.e2e
 
@@ -45,7 +47,7 @@ def test_orga_mirror(pw_page: Any) -> None:
 
     # show chars
     go_to(page, live_server, "/test/manage/config")
-    page.get_by_role("link", name=re.compile(r"^Writing")).click()
+    page.get_by_role("link", name=re.compile(r"^Characters")).click()
     page.locator("#id_writing_field_visibility").check()
     submit_confirm(page)
 
@@ -54,7 +56,7 @@ def test_orga_mirror(pw_page: Any) -> None:
     submit_confirm(page)
 
     # check gallery
-    go_to(page, live_server, "/test/")
+    go_to(page, live_server, "/test/gallery/")
     expect_normalized(page, page.locator("#one"), "Test Character")
 
     # activate casting
@@ -69,13 +71,14 @@ def test_orga_mirror(pw_page: Any) -> None:
     # create mirror
     go_to(page, live_server, "/test/manage/characters/")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Mirror")
-    page.locator("#id_mirror").select_option("u1")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Mirror")
+    edit_iframe.locator("#id_mirror").select_option("u1")
+    save_modal(page, edit_iframe)
 
     # check gallery
-    go_to(page, live_server, "/test/")
+    go_to(page, live_server, "/test/gallery/")
     expect_normalized(page, page.locator("#one"), "Mirror")
     expect_normalized(page, page.locator("#one"), "Test Character")
 
@@ -84,7 +87,7 @@ def test_orga_mirror(pw_page: Any) -> None:
 
 def casting(live_server: Any, page: Any) -> None:
     go_to(page, live_server, "/test/manage/config")
-    page.get_by_role("link", name="Casting ").click()
+    page.get_by_role("link", name=re.compile(r"^Casting ")).click()
     page.locator("#id_casting_characters").click()
     page.locator("#id_casting_characters").fill("1")
     page.locator("#id_casting_min").click()
@@ -95,29 +98,39 @@ def casting(live_server: Any, page: Any) -> None:
 
     # sign up and fill preferences
     go_to(page, live_server, "/test/register")
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
+    submit_register(page)
 
     go_to(page, live_server, "/test/casting")
-    page.locator("#faction0").select_option("all")
-    page.locator("#choice0").click()
-    expect_normalized(page, page.locator("#casting"), "Mirror")
-    expect_normalized(page, page.locator("#casting"), "Test Character")
-    page.wait_for_timeout(5000)
-    page.locator("#choice0").select_option("u2")
+    expect_normalized(page, page.locator("#char-list"), "Mirror")
+    expect_normalized(page, page.locator("#char-list"), "Test Character")
+    page.locator("#char-list .char-card").filter(has_text="Mirror").click()
     submit(page)
 
-    # perform casting
+    # test toggle casting
     go_to(page, live_server, "/test/manage/casting")
+    expect_normalized(page, page.locator(".change").first, "YES")
+    page.locator(".change").first.click()
+    expect(page.locator(".change").first).to_have_text("NO")
+
+    go_to(page, live_server, "/test/manage/casting")
+    expect_normalized(page, page.locator(".change").first, "NO")
+    page.locator(".change").first.click()
+    expect(page.locator(".change").first).to_have_text("YES")
+
+    # perform casting
     page.get_by_role("button", name="Start algorithm").click()
-    expect_normalized(page, page.locator("#assegnazioni"), "#1 Test Character")
-    expect_normalized(page, page.locator("#assegnazioni"), "-> #2 Mirror")
+    expect_normalized(page, page.locator("#assegnazioni"), "Test Character")
+    expect_normalized(page, page.locator("#assegnazioni"), "-> Mirror")
     page.get_by_role("button", name="Upload").click()
 
     # check assignment
     go_to(page, live_server, "/test/manage/registrations")
-    expect_normalized(page, page.locator("#one"), "#1 Test Character")
+    expect_normalized(page, page.locator("#one"), "Test Character")
 
-    go_to(page, live_server, "/test")
+    go_to(page, live_server, "/test/gallery/")
     expect_normalized(page, page.locator("#one"), "Test Character")
     expect(page.locator("#one")).not_to_contain_text("Mirror")
+
+    # the assigned character sheet names the mirror character pointing at it
+    go_to(page, live_server, "/test/character/u1/")
+    expect_normalized(page, page.locator("#char_mirror_inv"), "Mirror")

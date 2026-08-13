@@ -3,43 +3,54 @@
 {% block title %}
     {% trans "Template" %} - {% trans "Organization" %}
 {% endblock title %}
-{% block info %}
-    {% trans "This page shows all event templates; you can edit them, or create new ones" %}
-{% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
+    {% include "elements/table/header.html" %}
     <table id="events" class="go_datatable writing gall ">
         <thead>
             <tr>
                 <th></th>
+                <th></th>
                 <th>{% trans "Name" %}</th>
                 <th>{% trans "Role" %}</th>
+                <th></th>
                 <th></th>
             </tr>
         </thead>
         <tbody>
             {% for el in list %}
                 <tr id="{{ el.uuid }}">
+                    <td></td>
                     <td>
                         <a href="{% url 'exe_templates_edit' el.uuid %}"
                            qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
                     </td>
                     <td>{{ el }}</td>
                     <td>
-                        <a href="{% url 'exe_templates_roles' el.uuid 0 %}">{% trans "Add" %}</a>
+                        <a href="{% url 'exe_templates_roles_new' el.uuid %}">{% trans "Add" %}</a>
                         {% if el.roles %}
                             -
                             {% for rl in el.roles %}
                                 {% include "elements/comma.html" %}
-                                <a href="{% url 'exe_templates_roles' el.uuid rl.uuid %}">{{ rl.name }}</a>
+                                <a href="{% url 'exe_templates_roles_edit' el.uuid rl.uuid %}">{{ rl.name }}</a>
                             {% endfor %}
                         {% endif %}
                     </td>
                     <td>
                         <a href="{% url 'exe_templates_config' el.uuid %}">{% trans "Configuration" %}</a>
                     </td>
+                    <td>
+                        <a href="{% url 'exe_templates_delete' el.uuid %}"
+                           qtip="{% trans "Delete" %}"
+                           class="only_new_v18"><i class="fas fa-trash"></i></a>
+                    </td>
                 </tr>
             {% endfor %}
         </tbody>
     </table>
+    {% if not list %}
+        <p class="no-elements-available">
+            {% trans "No templates defined yet. Create a template to reuse event configurations and role assignments across events." %}
+        </p>
+    {% endif %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}

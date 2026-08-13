@@ -36,18 +36,7 @@ from larpmanager.accounting.balance import (
     get_run_accounting,
 )
 from larpmanager.accounting.invoice import invoice_verify
-from larpmanager.forms.accounting import (
-    ExeCollectionForm,
-    ExeCreditForm,
-    ExeDonationForm,
-    ExeExpenseForm,
-    ExeInflowForm,
-    ExeInvoiceForm,
-    ExeOutflowForm,
-    ExePaymentForm,
-    ExeRefundRequestForm,
-    ExeTokenForm,
-)
+from larpmanager.forms.accounting import ExePaymentForm
 from larpmanager.forms.writing import UploadElementsForm
 from larpmanager.models.accounting import (
     AccountingItemDonation,
@@ -77,7 +66,28 @@ from larpmanager.templatetags.show_tags import format_decimal
 from larpmanager.utils.core.base import check_association_context
 from larpmanager.utils.core.common import get_object_uuid
 from larpmanager.utils.core.paginate import exe_paginate
-from larpmanager.utils.services.edit import backend_get, exe_edit
+from larpmanager.utils.edit.backend import backend_delete, backend_delete_frame, backend_get
+from larpmanager.utils.edit.exe import ExeAction, exe_delete, exe_edit, exe_new
+from larpmanager.utils.security.confirm import confirm_post
+from larpmanager.views.orga.accounting import payment_edit
+
+# Slug of permission / page for each invoice type
+INVOICE_PAGES = {
+    PaymentType.DONATE: "exe_donations",
+    PaymentType.COLLECTION: "exe_collections",
+    PaymentType.MEMBERSHIP: "exe_membership",
+}
+INVOICE_DEFAULT_PAGE = "exe_payments"
+
+
+def invoice_page(request: HttpRequest, invoice_uuid: str) -> str:
+    """Return the accounting page owning the invoice, by its payment type."""
+    invoice_type = (
+        PaymentInvoice.objects.filter(uuid=invoice_uuid, association_id=request.association["id"])
+        .values_list("typ", flat=True)
+        .first()
+    )
+    return INVOICE_PAGES.get(invoice_type, INVOICE_DEFAULT_PAGE)
 
 
 @login_required
@@ -116,13 +126,15 @@ def exe_outflows(request: HttpRequest) -> HttpResponse:
                 ("descr", _("Description")),
                 ("value", _("Value")),
                 ("payment_date", _("Date")),
-                ("statement", _("Statement")),
+                ("statement", _("Receipt")),
             ],
             # Define custom display callbacks for specific fields
             "callbacks": {
                 "statement": lambda el: f"<a href='{el.download()}'>Download</a>",
                 "type": lambda el: el.get_exp_display(),
             },
+            # Add delete view name for delete button
+            "delete_view": "exe_outflows_delete",
         },
     )
 
@@ -137,25 +149,22 @@ def exe_outflows(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_outflows_new(request: HttpRequest) -> HttpResponse:
+    """Create a new accounting outflow record."""
+    return exe_new(request, ExeAction.OUTFLOWS)
+
+
+@login_required
 def exe_outflows_edit(request: HttpRequest, outflow_uuid: str) -> HttpResponse:
-    """Edit accounting outflow record.
-
-    Args:
-        request: Django HTTP request object containing user authentication
-                and form data for editing the outflow record
-        outflow_uuid: UUID of the outflow record to edit
-
-    Returns:
-        HttpResponse: Rendered edit form on GET request or redirect
-                     to outflows list on successful POST save
-
-    Raises:
-        Http404: If outflow record with given ID does not exist
-        PermissionDenied: If user lacks permission to edit outflows
-
-    """
+    """Edit accounting outflow record."""
     # Delegate to generic edit handler with outflow-specific form and redirect
-    return exe_edit(request, ExeOutflowForm, outflow_uuid, "exe_outflows")
+    return exe_edit(request, ExeAction.OUTFLOWS, outflow_uuid)
+
+
+@login_required
+def exe_outflows_delete(request: HttpRequest, outflow_uuid: str) -> HttpResponse:
+    """Delete outflow."""
+    return exe_delete(request, ExeAction.OUTFLOWS, outflow_uuid)
 
 
 @login_required
@@ -189,12 +198,13 @@ def exe_inflows(request: HttpRequest) -> HttpResponse:
                 ("descr", _("Description")),
                 ("value", _("Value")),
                 ("payment_date", _("Date")),
-                ("statement", _("Statement")),
+                ("statement", _("Receipt")),
             ],
             # Configure custom rendering callbacks for special fields
             "callbacks": {
                 "statement": lambda el: f"<a href='{el.download()}'>Download</a>",
             },
+            "delete_view": "exe_inflows_delete",
         },
     )
 
@@ -209,9 +219,21 @@ def exe_inflows(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_inflows_new(request: HttpRequest) -> HttpResponse:
+    """Create a new inflow entry for the association."""
+    return exe_new(request, ExeAction.INFLOWS)
+
+
+@login_required
 def exe_inflows_edit(request: HttpRequest, inflow_uuid: str) -> HttpResponse:
     """Edit an inflow entry for the association."""
-    return exe_edit(request, ExeInflowForm, inflow_uuid, "exe_inflows")
+    return exe_edit(request, ExeAction.INFLOWS, inflow_uuid)
+
+
+@login_required
+def exe_inflows_delete(request: HttpRequest, inflow_uuid: str) -> HttpResponse:
+    """Delete inflow."""
+    return exe_delete(request, ExeAction.INFLOWS, inflow_uuid)
 
 
 @login_required
@@ -237,6 +259,17 @@ def exe_donations(request: HttpRequest) -> HttpResponse:
     # Check user has permission to view donations for this association
     context = check_association_context(request, "exe_donations")
 
+    # Pending donation invoice approvals requiring confirmation
+    context["pending_invoices"] = (
+        PaymentInvoice.objects.filter(
+            association_id=context["association_id"],
+            status=PaymentStatus.SUBMITTED,
+            typ=PaymentType.DONATE,
+        )
+        .select_related("member", "method")
+        .order_by("-created")
+    )
+
     # Define table column headers and their corresponding field names
     # These will be displayed in the donations list template
     context.update(
@@ -247,6 +280,7 @@ def exe_donations(request: HttpRequest) -> HttpResponse:
                 ("value", _("Value")),  # Monetary amount
                 ("created", _("Date")),  # When donation was created
             ],
+            "delete_view": "exe_donations_delete",
         },
     )
 
@@ -261,9 +295,21 @@ def exe_donations(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_donations_new(request: HttpRequest) -> HttpResponse:
+    """Create a new organization-wide donation entry."""
+    return exe_new(request, ExeAction.DONATIONS)
+
+
+@login_required
 def exe_donations_edit(request: HttpRequest, donation_uuid: str) -> HttpResponse:
     """Edit an organization-wide donation entry."""
-    return exe_edit(request, ExeDonationForm, donation_uuid, "exe_donations")
+    return exe_edit(request, ExeAction.DONATIONS, donation_uuid)
+
+
+@login_required
+def exe_donations_delete(request: HttpRequest, donation_uuid: str) -> HttpResponse:
+    """Delete donation."""
+    return exe_delete(request, ExeAction.DONATIONS, donation_uuid)
 
 
 @login_required
@@ -297,6 +343,7 @@ def exe_credits(request: HttpRequest) -> HttpResponse:
                 ("value", _("Value")),
                 ("created", _("Date")),
             ],
+            "delete_view": "exe_credits_delete",
         },
     )
 
@@ -311,9 +358,21 @@ def exe_credits(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_credits_new(request: HttpRequest) -> HttpResponse:
+    """Create a new credit entry."""
+    return exe_new(request, ExeAction.CREDITS)
+
+
+@login_required
 def exe_credits_edit(request: HttpRequest, credit_uuid: str) -> HttpResponse:
     """Simple edit view wrapper for credit management."""
-    return exe_edit(request, ExeCreditForm, credit_uuid, "exe_credits")
+    return exe_edit(request, ExeAction.CREDITS, credit_uuid)
+
+
+@login_required
+def exe_credits_delete(request: HttpRequest, credit_uuid: str) -> HttpResponse:
+    """Delete credit."""
+    return exe_delete(request, ExeAction.CREDITS, credit_uuid)
 
 
 @login_required
@@ -351,6 +410,7 @@ def exe_tokens(request: HttpRequest) -> HttpResponse:
                 ("value", _("Value")),
                 ("created", _("Date")),
             ],
+            "delete_view": "exe_tokens_delete",
         },
     )
     # Render paginated view with AccountingItemOther model data
@@ -364,9 +424,21 @@ def exe_tokens(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_tokens_new(request: HttpRequest) -> HttpResponse:
+    """Create a new registration token."""
+    return exe_new(request, ExeAction.TOKENS)
+
+
+@login_required
 def exe_tokens_edit(request: HttpRequest, token_uuid: str) -> HttpResponse:
     """Edit an existing registration token."""
-    return exe_edit(request, ExeTokenForm, token_uuid, "exe_tokens")
+    return exe_edit(request, ExeAction.TOKENS, token_uuid)
+
+
+@login_required
+def exe_tokens_delete(request: HttpRequest, token_uuid: str) -> HttpResponse:
+    """Delete token."""
+    return exe_delete(request, ExeAction.TOKENS, token_uuid)
 
 
 @login_required
@@ -396,24 +468,25 @@ def exe_expenses(request: HttpRequest) -> HttpResponse:
             "fields": [
                 ("member", _("Member")),
                 ("type", _("Type")),
+                ("action", _("Action")),
                 ("run", _("Event")),
                 ("descr", _("Description")),
+                ("statement", _("Receipt")),
                 ("value", _("Value")),
                 ("created", _("Date")),
-                ("statement", _("Statement")),
-                ("action", _("Action")),
             ],
             # Define custom rendering callbacks for specific fields
             "callbacks": {
                 # Render statement as downloadable link
                 "statement": lambda el: f"<a href='{el.download()}'>Download</a>",
                 # Show approve button only for non-approved expenses
-                "action": lambda el: f"<a href='{reverse('exe_expenses_approve', args=[el.uuid])}'>{approve}</a>"
+                "action": lambda el: f"<a href='{reverse('exe_expenses_approve', args=[el.uuid])}' class='frame-confirm'>{approve}</a>"
                 if not el.is_approved
                 else "",
                 # Display human-readable expense type
                 "type": lambda el: el.get_exp_display(),
             },
+            "delete_view": "exe_expenses_delete",
         },
     )
 
@@ -428,9 +501,21 @@ def exe_expenses(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_expenses_new(request: HttpRequest) -> HttpResponse:
+    """Create a new expense for an association."""
+    return exe_new(request, ExeAction.EXPENSES)
+
+
+@login_required
 def exe_expenses_edit(request: HttpRequest, expense_uuid: str) -> HttpResponse:
     """Edit an expense for an association."""
-    return exe_edit(request, ExeExpenseForm, expense_uuid, "exe_expenses")
+    return exe_edit(request, ExeAction.EXPENSES, expense_uuid)
+
+
+@login_required
+def exe_expenses_delete(request: HttpRequest, expense_uuid: str) -> HttpResponse:
+    """Delete expense."""
+    return exe_delete(request, ExeAction.EXPENSES, expense_uuid)
 
 
 @login_required
@@ -447,12 +532,24 @@ def exe_expenses_approve(request: HttpRequest, expense_uuid: str) -> HttpRespons
         msg = "not your orga"
         raise Http404(msg)
 
+    is_frame = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+
+    # Show a confirmation page before applying the change: bare frame popup when
+    # opened via the iframe modal, full-chrome confirm page on a direct GET otherwise
+    if request.method != "POST":
+        context["frame"] = is_frame
+        context["el_name"] = str(exp)
+        template = "elements/dashboard/approve_confirm.html" if is_frame else "elements/confirm_action.html"
+        return render(request, template, context)
+
     # Mark expense as approved and save changes
     exp.is_approved = True
     exp.save()
 
     # Show success message and redirect to expenses list
     messages.success(request, _("Request approved"))
+    if is_frame:
+        return render(request, "elements/dashboard/form_success.html", context)
     return redirect("exe_expenses")
 
 
@@ -473,6 +570,21 @@ def exe_payments(request: HttpRequest) -> HttpResponse:
     # Check user permissions for accessing payments section
     context = check_association_context(request, "exe_payments")
 
+    # Hide "New" button when association has no registrations to attach a payment to
+    if not Registration.objects.filter(run__event__association_id=context["association_id"]).exists():
+        context["hide_new"] = True
+
+    # Pending registration invoice approvals requiring confirmation
+    context["pending_invoices"] = (
+        PaymentInvoice.objects.filter(
+            association_id=context["association_id"],
+            status=PaymentStatus.SUBMITTED,
+            typ=PaymentType.REGISTRATION,
+        )
+        .select_related("member", "method")
+        .order_by("-created")
+    )
+
     # Define base fields to display in payments table
     fields = [
         ("member", _("Member")),
@@ -484,6 +596,7 @@ def exe_payments(request: HttpRequest) -> HttpResponse:
         ("trans", _("Fee")),
         ("created", _("Date")),
         ("info", _("Info")),
+        ("receipt", _("Receipt")),
     ]
 
     # Add VAT-related fields if VAT feature is enabled for this organization
@@ -505,7 +618,11 @@ def exe_payments(request: HttpRequest) -> HttpResponse:
                 "status": lambda el: el.inv.get_status_display() if el.inv else "",
                 "net": lambda el: format_decimal(el.net),
                 "trans": lambda el: format_decimal(el.trans) if el.trans else "",
+                "receipt": lambda el: f"<a href='{el.inv.download()}' target='_blank' download>{_('Download')}</a>"
+                if el.inv and el.inv.invoice and el.pay == PaymentChoices.MONEY
+                else "",
             },
+            "delete_view": "exe_payments_delete",
         },
     )
 
@@ -520,82 +637,41 @@ def exe_payments(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
-def exe_payments_edit(request: HttpRequest, payment_uuid: str) -> HttpResponse:
-    """Edit organization-wide payment method."""
-    return exe_edit(request, ExePaymentForm, payment_uuid, "exe_payments")
+def exe_payments_new(request: HttpRequest) -> HttpResponse:
+    """Create a new organization-wide payment method."""
+    return exe_new(request, ExeAction.PAYMENTS)
 
 
 @login_required
-def exe_invoices(request: HttpRequest) -> HttpResponse:
-    """Display and manage payment invoices for the organization.
-
-    This view provides a paginated list of payment invoices with filtering
-    and confirmation capabilities for submitted invoices.
-
-    Args:
-        request: HTTP request object containing user and session data
-
-    Returns:
-        HttpResponse: Rendered template with invoice list and pagination
-
-    """
-    # Check user permissions for invoice management
-    context = check_association_context(request, "exe_invoices")
-    confirm = _("Confirm")
-
-    # Update context with table configuration
-    context.update(
-        {
-            # Define selectable relationships for filtering
-            "selrel": ("method", "member"),
-            # Define table columns and headers
-            "fields": [
-                ("member", _("Member")),
-                ("method", _("Method")),
-                ("type", _("Type")),
-                ("status", _("Status")),
-                ("gross", _("Gross")),
-                ("trans", _("Transaction")),
-                ("causal", _("Causal")),
-                ("details", _("Details")),
-                ("created", _("Date")),
-                ("action", _("Action")),
-            ],
-            # Define data formatting callbacks for each column
-            "callbacks": {
-                # Display payment method as string
-                "method": lambda el: str(el.method),
-                # Show human-readable type and status labels
-                "type": lambda el: el.get_typ_display(),
-                "status": lambda el: el.get_status_display(),
-                # Format monetary values with proper decimal formatting
-                "gross": lambda el: format_decimal(el.mc_gross),
-                "trans": lambda el: format_decimal(el.mc_fee) if el.mc_fee else "",
-                # Display causal and details information
-                "causal": lambda el: el.causal,
-                "details": lambda el: el.get_details(),
-                # Show confirm action only for submitted invoices
-                "action": lambda el: f"<a href='{reverse('exe_invoices_confirm', args=[el.uuid])}'>{confirm}</a>"
-                if el.status == PaymentStatus.SUBMITTED
-                else "",
-            },
-        },
-    )
-
-    # Return paginated invoice list with edit functionality
-    return exe_paginate(
+def exe_payments_edit(request: HttpRequest, payment_uuid: str) -> HttpResponse:
+    """Edit payment and its linked invoice (if present) in a combined form."""
+    context = check_association_context(request, "exe_payments")
+    context["exe"] = True
+    return payment_edit(
         request,
         context,
-        PaymentInvoice,
-        "larpmanager/exe/accounting/invoices.html",
-        "exe_invoices_edit",
+        payment_uuid,
+        ExePaymentForm,
+        lambda: redirect("exe_payments"),
     )
 
 
 @login_required
-def exe_invoices_edit(request: HttpRequest, invoice_uuid: str) -> HttpResponse:
-    """Edit an existing invoice."""
-    return exe_edit(request, ExeInvoiceForm, invoice_uuid, "exe_invoices")
+def exe_payments_delete(request: HttpRequest, payment_uuid: str) -> HttpResponse:
+    """Delete payment."""
+    return exe_delete(request, ExeAction.PAYMENTS, payment_uuid)
+
+
+@login_required
+def exe_invoices_delete(request: HttpRequest, invoice_uuid: str) -> HttpResponse:
+    """Delete a payment invoice and redirect to the page listing invoices of its type."""
+    page = invoice_page(request, invoice_uuid)
+    context = check_association_context(request, page)
+    if request.GET.get("frame") == "1" or request.POST.get("frame") == "1":
+        context["frame"] = True
+        return backend_delete_frame(request, context, PaymentInvoice, invoice_uuid)
+    backend_delete(request, context, PaymentInvoice, invoice_uuid)
+    return redirect(page)
 
 
 @login_required
@@ -610,17 +686,26 @@ def exe_invoices_confirm(request: HttpRequest, invoice_uuid: str) -> HttpRespons
         invoice_uuid: The invoice uuid
 
     Returns:
-        HttpResponse: Redirect to the invoices list page
+        HttpResponse: Redirect to the accounting page listing invoices of that type
 
     Raises:
         Http404: If invoice is already confirmed or in invalid status
 
     """
-    # Check user permissions for invoice management
-    context = check_association_context(request, "exe_invoices")
+    # Check user permissions on the accounting page owning invoices of this type
+    page = invoice_page(request, invoice_uuid)
+    context = check_association_context(request, page)
 
     # Retrieve the specific invoice by number
     backend_get(context, PaymentInvoice, invoice_uuid)
+
+    is_frame = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
+
+    # In iframe mode, show a confirmation page before applying the change
+    if is_frame and request.method != "POST":
+        context["frame"] = True
+        context["el_name"] = str(context["el"])
+        return render(request, "elements/dashboard/approve_confirm.html", context)
 
     # Validate current status allows confirmation
     if context["el"].status == PaymentStatus.CREATED or context["el"].status == PaymentStatus.SUBMITTED:
@@ -634,9 +719,11 @@ def exe_invoices_confirm(request: HttpRequest, invoice_uuid: str) -> HttpRespons
     # Persist changes to database
     context["el"].save()
 
-    # Show success message and redirect to invoice list
-    messages.success(request, _("Element approved") + "!")
-    return redirect("exe_invoices")
+    # Show success message and redirect to the page listing invoices of that type
+    messages.success(request, _("Element approved!"))
+    if is_frame:
+        return render(request, "elements/dashboard/form_success.html", context)
+    return redirect(page)
 
 
 @login_required
@@ -644,6 +731,17 @@ def exe_collections(request: HttpRequest) -> HttpResponse:
     """Display collections list for association executives."""
     # Check user permissions and get association context
     context = check_association_context(request, "exe_collections")
+
+    # Pending collection invoice approvals requiring confirmation
+    context["pending_invoices"] = (
+        PaymentInvoice.objects.filter(
+            association_id=context["association_id"],
+            status=PaymentStatus.SUBMITTED,
+            typ=PaymentType.COLLECTION,
+        )
+        .select_related("member", "method")
+        .order_by("-created")
+    )
 
     # Fetch collections with related data, ordered by creation date
     context["list"] = (
@@ -658,7 +756,13 @@ def exe_collections(request: HttpRequest) -> HttpResponse:
 @login_required
 def exe_collections_edit(request: HttpRequest, collection_uuid: str) -> HttpResponse:
     """Edit an existing collection."""
-    return exe_edit(request, ExeCollectionForm, collection_uuid, "exe_collections")
+    return exe_edit(request, ExeAction.COLLECTIONS, collection_uuid)
+
+
+@login_required
+def exe_collections_delete(request: HttpRequest, collection_uuid: str) -> HttpResponse:
+    """Delete collection."""
+    return exe_delete(request, ExeAction.COLLECTIONS, collection_uuid)
 
 
 @login_required
@@ -686,7 +790,7 @@ def exe_refunds(request: HttpRequest) -> HttpResponse:
     context.update(
         {
             "fields": [
-                ("details", _("Informations")),
+                ("details", _("General information")),
                 ("member", _("Member")),
                 ("value", _("Total required")),
                 ("credits", _("Remaining credits")),
@@ -702,6 +806,7 @@ def exe_refunds(request: HttpRequest) -> HttpResponse:
                 if el.status != RefundStatus.PAYED
                 else "",
             },
+            "delete_view": "exe_refunds_delete",
         },
     )
 
@@ -710,9 +815,21 @@ def exe_refunds(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_refunds_new(request: HttpRequest) -> HttpResponse:
+    """Create a new refund request."""
+    return exe_new(request, ExeAction.REFUNDS)
+
+
+@login_required
 def exe_refunds_edit(request: HttpRequest, refund_uuid: str) -> HttpResponse:
     """Single-line wrapper - delegates to exe_edit with refund form."""
-    return exe_edit(request, ExeRefundRequestForm, refund_uuid, "exe_refunds")
+    return exe_edit(request, ExeAction.REFUNDS, refund_uuid)
+
+
+@login_required
+def exe_refunds_delete(request: HttpRequest, refund_uuid: str) -> HttpResponse:
+    """Delete refund."""
+    return exe_delete(request, ExeAction.REFUNDS, refund_uuid)
 
 
 @login_required
@@ -752,7 +869,7 @@ def exe_refunds_confirm(request: HttpRequest, refund_uuid: str) -> HttpResponse:
     context["el"].save()
 
     # Show success message to the user and redirect to refunds list
-    messages.success(request, _("Element approved") + "!")
+    messages.success(request, _("Element approved!"))
     return redirect("exe_refunds")
 
 
@@ -832,8 +949,8 @@ def exe_accounting_rec(request: HttpRequest) -> HttpResponse:
         return redirect("exe_accounting_rec")
 
     # Set date range based on first and last records
-    context["start"] = context["list"][0].created
-    context["end"] = context["list"].reverse()[0].created
+    context["start"] = context["list"].first().created
+    context["end"] = context["list"].last().created
 
     return render(request, "larpmanager/exe/accounting/accounting_rec.html", context)
 
@@ -853,12 +970,15 @@ def check_year(request: HttpRequest, context: dict) -> int:
         int: The validated year value, defaults to current year if invalid
 
     Raises:
-        Association.DoesNotExist: If association with given ID doesn't exist
+        ObjectDoesNotExist: If association with given ID doesn't exist
 
     """
     # Get association and generate valid years range
     association = Association.objects.get(pk=context["association_id"])
     context["years"] = list(range(timezone.now().year, association.created.year - 1, -1))
+
+    if not context["years"]:
+        context["years"] = [timezone.now().year]
 
     # Process POST data if present
     if request.POST:
@@ -914,6 +1034,16 @@ def exe_balance(request: HttpRequest) -> HttpResponse:
         AccountingItemMembership.objects.filter(association_id=context["association_id"], year=year),
     )
 
+    # Membership fees collected this year but attributed to next year (advance payments)
+    context["membership_advances"] = get_sum(
+        AccountingItemMembership.objects.filter(
+            association_id=context["association_id"],
+            year=year + 1,
+            created__gte=start,
+            created__lt=end,
+        ),
+    )
+
     # Calculate total donations received in the year
     context["donations"] = get_sum(
         AccountingItemDonation.objects.filter(
@@ -948,8 +1078,14 @@ def exe_balance(request: HttpRequest) -> HttpResponse:
         ),
     )
 
-    # Sum all incoming funds
-    context["in"] = context["memberships"] + context["donations"] + context["tickets"] + context["inflows"]
+    # Sum all incoming funds (advances for next year are cash received this year)
+    context["in"] = (
+        context["memberships"]
+        + context["membership_advances"]
+        + context["donations"]
+        + context["tickets"]
+        + context["inflows"]
+    )
 
     # Initialize expenditure tracking
     context["expenditure"] = {}
@@ -1079,7 +1215,7 @@ def exe_verification(request: HttpRequest) -> HttpResponse:
         if form.is_valid():
             # Process uploaded verification file and count verified payments
             counter = invoice_verify(context, request.FILES["first"])
-            messages.success(request, _("Verified payments") + "!" + " " + str(counter))
+            messages.success(request, _("Verified payments!") + " " + str(counter))
             return redirect("exe_verification")
 
     else:
@@ -1092,6 +1228,7 @@ def exe_verification(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+@confirm_post
 def exe_verification_manual(request: HttpRequest, invoice_uuid: str) -> HttpResponse:
     """Manually verify a payment invoice for an organization.
 

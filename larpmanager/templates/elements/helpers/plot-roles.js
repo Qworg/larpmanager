@@ -2,7 +2,7 @@
 
 <script>
 
-const editUrl = "{% url 'orga_characters_edit' run.get_slug 0 %}";
+const editUrl = "{% url 'orga_characters_new' run.get_slug %}";
 
 {% if edit_uuid %}
     var edit_uuid = '{{ edit_uuid }}';
@@ -14,12 +14,9 @@ window.addEventListener('DOMContentLoaded', function() {
 
     var already = [];
 
-    function add_role(ch_id, ch_name) {
-
-        console.log(ch_id);
-        console.log(ch_name);
-
-        charUrl = editUrl.replace(/\/0\/$/, `/${ch_id}/`);;
+    function add_role(ch_id, ch_name, ch_uuid) {
+        var urlId = ch_uuid || ch_id;
+        charUrl = editUrl.replace(/\/new\/$/, `/${urlId}/edit/`);;
 
         var html = `
         <tr id="id_char_role_{0}_tr">
@@ -30,7 +27,7 @@ window.addEventListener('DOMContentLoaded', function() {
                 <p>
                     <a href="#" class="my_toggle" tog="f_ch_{0}">{% trans "Show" %}</a>
                 </p>
-                <div class="hide hide_later f_ch_{0}">
+                <div class="hide  f_ch_{0}">
                     <textarea name="char_role_{0}" id="ch_{0}"></textarea>
                 </div>
                 <div class="helptext">{{ form.role_help_text }} {1}</div>
@@ -40,11 +37,13 @@ window.addEventListener('DOMContentLoaded', function() {
 
         $('#main_form table tbody').append(html);
 
+        {% if not TINYMCE_DISABLED %}
         window.addTinyMCETextarea('.f_ch_{0} textarea'.format(ch_id)).then((editorId) => {
             setUpAutoSave(editorId);
             setUpCharFinder(editorId);
             setUpHighlight(editorId);
         });
+        {% endif %}
         already.push(ch_id);
 
     }
@@ -53,7 +52,9 @@ window.addEventListener('DOMContentLoaded', function() {
         let prevSelected = ($("#id_characters").val() || []).map(String);
 
         document.getElementById('main_form').addEventListener('submit', function(e) {
+            {% if not TINYMCE_DISABLED %}
             tinymce.triggerSave();
+            {% endif %}
         });
 
         // add new
@@ -73,19 +74,23 @@ window.addEventListener('DOMContentLoaded', function() {
 
             // handle removed: hide rows
             for (const id of removed) {
-                el = $('#id_char_role_' + id + '_tr');
+                const $opt = $sel.find('option[value="' + id +'"]');
+                const pk = ($opt.length && $opt.data('pk')) ? $opt.data('pk') : id;
+                el = $('#id_char_role_' + pk + '_tr');
                 el.hide(300);
             }
 
             // handle added: show existing or create new
             for (const id of added) {
-                key = '#id_char_role_' + id + '_tr';
+                const $opt = $sel.find('option[value="' + id +'"]');
+                const name = $opt.text();
+                const pk = $opt.data('pk') || id;
+                key = '#id_char_role_' + pk + '_tr';
                 const $row = $(key);
                 if ($row.length) {
                     $(key).show(300);
                 } else {
-                    const name = $sel.find('option[value="' + id +'"').text();
-                    add_role(id, name);
+                    add_role(pk, name, id);
                 }
             }
 

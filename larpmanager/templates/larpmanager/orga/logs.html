@@ -1,0 +1,13 @@
+{% extends "utils.html" %}
+{% load i18n %}
+{% block title %}
+    {% trans "Logs" %} - {{ event.name }}
+{% endblock title %}
+{% block info %}
+    {% trans "View all log entries recorded for this event" %}
+{% endblock info %}
+{% block content %}
+    {% include "elements/table/header.html" %}
+    {% include "elements/paginate.html" %}
+    {% include "elements/table/footer.html" %}
+{% endblock content %}

@@ -85,7 +85,7 @@ class TestModelSignals(BaseTestCase):
 
     def test_association_pre_save_generates_encryption_key(self) -> None:
         """Test that Association pre_save signal generates Fernet key"""
-        association = Association(name="Test Association Name", email="test@example.com")
+        association = Association(name="Test Association Name", main_mail="test@example.com")
         association.save()
 
         # Should have generated encryption key
@@ -376,6 +376,7 @@ class TestModelSignals(BaseTestCase):
     def test_event_config_post_save_resets_configs(self, mock_reset: Any) -> None:
         """Test that EventConfig post_save signal resets configs cache"""
         event = self.get_event()
+        mock_reset.reset_mock()  # Reset after setup (new association may save version config)
 
         config = EventConfig(event=event, name="test_key", value="test_value")
         config.save()
@@ -397,6 +398,7 @@ class TestModelSignals(BaseTestCase):
     def test_association_config_post_save_resets_configs(self, mock_reset: Any) -> None:
         """Test that AssociationConfig post_save signal resets configs cache"""
         association = self.get_association()
+        mock_reset.reset_mock()  # Reset after setup (new association may save version config)
 
         config = AssociationConfig(association=association, name="test_key", value="test_value")
         config.save()
@@ -418,6 +420,7 @@ class TestModelSignals(BaseTestCase):
     def test_run_config_post_save_resets_configs(self, mock_reset: Any) -> None:
         """Test that RunConfig post_save signal resets configs cache"""
         run = self.get_run()
+        mock_reset.reset_mock()  # Reset after setup (new association may save version config)
 
         config = RunConfig(run=run, name="test_key", value="test_value")
         config.save()
@@ -439,6 +442,7 @@ class TestModelSignals(BaseTestCase):
     def test_member_config_post_save_resets_configs(self, mock_reset: Any) -> None:
         """Test that MemberConfig post_save signal resets configs cache"""
         member = self.get_member()
+        mock_reset.reset_mock()  # Reset after setup (new association may save version config)
 
         config = MemberConfig(member=member, name="test_key", value="test_value")
         config.save()
@@ -479,7 +483,7 @@ class TestModelSignals(BaseTestCase):
 
     def test_association_pre_save_creates_default_values(self) -> None:
         """Test that Association pre_save signal creates default values like encryption key"""
-        association = Association(name="New Association", email="new@example.com")
+        association = Association(name="New Association", main_mail="new@example.com")
         association.save()
 
         # Should have created encryption key
@@ -491,7 +495,7 @@ class TestModelSignals(BaseTestCase):
         """Test that Association post_save signal updates features"""
         mock_get_features.return_value = {}
 
-        association = Association(name="Test Association", email="test@example.com")
+        association = Association(name="Test Association", main_mail="test@example.com")
         association.save()
 
         # Should call get_association_features to update features
@@ -628,7 +632,7 @@ class TestModelSignals(BaseTestCase):
         from larpmanager.models.base import Feature
 
         user_character_feature, _ = Feature.objects.get_or_create(
-            slug="user_character", defaults={"name": "Player editor", "order": 1}
+            slug="user_character", defaults={"name": "Character creation", "order": 1}
         )
         event.features.add(user_character_feature)
 
@@ -665,7 +669,7 @@ class TestModelSignals(BaseTestCase):
         from larpmanager.models.base import Feature
 
         user_character_feature, _ = Feature.objects.get_or_create(
-            slug="user_character", defaults={"name": "Player editor", "order": 1}
+            slug="user_character", defaults={"name": "Character creation", "order": 1}
         )
         # Ensure the feature is not in the event's features (if it was added by setup)
         event.features.remove(user_character_feature) if user_character_feature in event.features.all() else None
@@ -728,7 +732,7 @@ class TestModelSignals(BaseTestCase):
         from larpmanager.models.base import Feature
 
         user_character_feature, _ = Feature.objects.get_or_create(
-            slug="user_character", defaults={"name": "Player editor", "order": 1}
+            slug="user_character", defaults={"name": "Character creation", "order": 1}
         )
         event.features.add(user_character_feature)
 

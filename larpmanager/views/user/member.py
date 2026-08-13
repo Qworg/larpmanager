@@ -18,6 +18,8 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 
+import base64
+import io
 import logging
 import math
 import random
@@ -26,37 +28,47 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import qrcode
+from axes.handlers.proxy import AxesProxyHandler
+from axes.helpers import get_lockout_response
 from django.conf import settings as conf_settings
 from django.contrib import messages
 from django.contrib.auth import login, user_logged_in
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User, update_last_login
-from django.core.exceptions import ValidationError
+from django.contrib.auth.signals import user_login_failed
+from django.core import signing
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.core.validators import URLValidator
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
-from django.utils.translation import activate, get_language
-from django.utils.translation import gettext_lazy as _
+from django.utils.translation import activate, get_language, gettext_lazy as _
+from django_otp import login as otp_login, match_token
+from django_otp.plugins.otp_totp.models import TOTPDevice
 from PIL import Image, UnidentifiedImageError
 
 from larpmanager.accounting.member import info_accounting
 from larpmanager.cache.association_text import get_association_text
-from larpmanager.cache.config import get_association_config
+from larpmanager.cache.config import get_association_config, save_single_config
 from larpmanager.forms.member import (
     AvatarForm,
     LanguageForm,
     MembershipConfirmForm,
     MembershipRequestForm,
+    OTPConfirmForm,
+    OTPVerifyForm,
     ProfileForm,
 )
 from larpmanager.mail.member import send_membership_confirm
 from larpmanager.models.accounting import AccountingItemMembership
 from larpmanager.models.association import Association, AssociationTextType
+from larpmanager.models.larpmanager import LarpManagerNewsletter, NewsletterStatus
 from larpmanager.models.member import (
     Badge,
+    LogOperationType,
     Member,
     Membership,
     MembershipStatus,
@@ -72,13 +84,16 @@ from larpmanager.models.registration import Registration, RegistrationCharacterR
 from larpmanager.models.utils import generate_id
 from larpmanager.models.writing import CharacterConfig
 from larpmanager.utils.core.base import get_context
-from larpmanager.utils.core.common import get_badge, get_channel, get_contact
+from larpmanager.utils.core.common import get_badge, get_channel, get_contact, welcome_user
 from larpmanager.utils.core.exceptions import check_association_feature
+from larpmanager.utils.edit.backend import save_log
 from larpmanager.utils.io.pdf import get_membership_request
+from larpmanager.utils.io.upload import normalize_profile_image
+from larpmanager.utils.larpmanager.versions import LATEST_AVAILABLE_VERSION, VERSIONS
+from larpmanager.utils.publication.api import get_client_ip
 from larpmanager.utils.users.fiscal_code import calculate_fiscal_code
 from larpmanager.utils.users.member import get_leaderboard, get_member_uuid
-from larpmanager.utils.users.registration import registration_status
-from larpmanager.views.user.event import get_character_rels_dict, get_payment_invoices_dict, get_pre_registrations_dict
+from larpmanager.views.user.event import build_registration_list, get_member_registrations
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +152,60 @@ def language(request: HttpRequest) -> HttpResponse:
         # Display language selection form for GET requests
         form = LanguageForm(current_language=current_language)
 
-    return render(request, "larpmanager/member/language.html", {"form": form})
+    if request.user.is_authenticated:
+        context = get_context(request)
+    else:
+        context = {"effective_version": request.association.get("assoc_version", LATEST_AVAILABLE_VERSION)}
+    context["form"] = form
+    return render(request, "larpmanager/member/language.html", context)
+
+
+def _save_profile(request: HttpRequest, context: dict, form: ProfileForm, member: Member) -> HttpResponseRedirect:
+    """Perform profile save and checks for after-save redirects."""
+    profile = form.save()
+    save_log(context, Member, profile, profile.uuid)
+
+    # Update membership status
+    membership = context["membership"]
+    membership.compiled = True
+    if membership.status == MembershipStatus.EMPTY:
+        membership.status = MembershipStatus.JOINED
+    membership.save()
+    save_log(context, Membership, membership, None, operation_type=LogOperationType.UPDATE)
+
+    activate(profile.language)
+
+    message = _("Personal data updated!")
+
+    # Check if membership workflow is needed
+    if "membership" in context["features"] and membership.status in [
+        MembershipStatus.EMPTY,
+        MembershipStatus.JOINED,
+    ]:
+        message += " " + _("Last step, please upload your membership application.")
+        messages.success(request, message)
+        return redirect("membership")
+
+    # Redirect to payment page if a registration has outstanding payment alert
+    if "payment" in context["features"]:
+        alert_registrations = Registration.objects.filter(
+            member=member, alert=True, run__event__association_id=context["association_id"]
+        )
+        if alert_registrations:
+            message = _("To confirm your registration, please pay the amount indicated.")
+            messages.success(request, message)
+            return redirect("accounting_registration", registration_uuid=alert_registrations.first().uuid)
+
+    # Redirect to first registration with a pending action (e.g. create your character)
+    my_regs = get_member_registrations(member, context["association_id"])
+    for registration in build_registration_list(member, my_regs, context["association_id"], membership):
+        for character_action in registration.run.status.get("character_actions") or []:
+            if character_action.get("status_type") == "todo":
+                messages.success(request, message)
+                return redirect(character_action["url"])
+
+    messages.success(request, message)
+    return redirect("home")
 
 
 @login_required
@@ -153,37 +221,13 @@ def profile(request: HttpRequest) -> Any:
         return HttpResponseRedirect("/")
 
     member = context["member"]
-    association_features = context["features"]
     members_fields = context["members_fields"]
 
     # Handle POST request (form submission)
     if request.method == "POST":
         form = ProfileForm(request.POST, request.FILES, instance=member, context=context)
         if form.is_valid():
-            prof = form.save()
-
-            # Update membership status
-            membership = context["membership"]
-            membership.compiled = True
-            if membership.status == MembershipStatus.EMPTY:
-                membership.status = MembershipStatus.JOINED
-            membership.save()
-
-            activate(prof.language)
-
-            message = _("Personal data updated") + "!"
-
-            # Check if membership workflow is needed
-            if "membership" in association_features and membership.status in [
-                MembershipStatus.EMPTY,
-                MembershipStatus.JOINED,
-            ]:
-                message += " " + _("Last step, please upload your membership application") + "."
-                messages.success(request, message)
-                return redirect("membership")
-
-            messages.success(request, message)
-            return redirect("home")
+            return _save_profile(request, context, form, member)
 
     # Handle GET request (display form)
     else:
@@ -208,12 +252,37 @@ def profile(request: HttpRequest) -> Any:
         context["profile"] = member.profile_thumb.url
 
     # Add vote configuration only if voting is enabled
-    if "vote" in association_features:
+    if "vote" in context["features"]:
         context["vote_open"] = get_association_config(
-            context["membership"].association_id, "vote_open", default_value=False, context=context
+            context["membership"].association_id, "vote_open", context=context
         )
 
     return render(request, "larpmanager/member/profile.html", context)
+
+
+@login_required
+def profile_upgrade(request: HttpRequest) -> HttpResponse:
+    """Let a member opt in to the latest interface for the current association."""
+    context = get_context(request)
+    if context["association_id"] == 0:
+        return HttpResponseRedirect("/")
+
+    assoc_version = context.get("assoc_version", LATEST_AVAILABLE_VERSION)
+
+    if assoc_version >= LATEST_AVAILABLE_VERSION or context.get("effective_version") >= LATEST_AVAILABLE_VERSION:
+        return redirect("profile")
+
+    if request.method == "POST":
+        save_single_config(context["member"], "interface_version", str(LATEST_AVAILABLE_VERSION))
+        messages.success(request, _("You are now using the latest interface version."))
+        return redirect("profile")
+
+    context["latest_version"] = LATEST_AVAILABLE_VERSION
+    context["latest_version_description"] = next(
+        (version["description"] for version in VERSIONS if version["number"] == LATEST_AVAILABLE_VERSION),
+        "",
+    )
+    return render(request, "larpmanager/member/profile_upgrade.html", context)
 
 
 def load_profile(request: HttpRequest, img: Any, ext: str) -> JsonResponse:  # noqa: ARG001
@@ -258,21 +327,19 @@ def profile_upload(request: HttpRequest) -> JsonResponse:
     if not form.is_valid():
         return JsonResponse({"res": "ko"})
 
-    # Extract image and file extension
     img = form.cleaned_data["image"]
-    ext = img.name.split(".")[-1]
 
-    # Generate unique filename with member ID and UUID
-    n_path = f"member/{request.user.member.pk}_{uuid4().hex}.{ext}"
+    try:
+        img_data = normalize_profile_image(img.read())
+    except (OSError, UnidentifiedImageError, ValueError):
+        logger.exception("Failed to normalize profile image")
+        return JsonResponse({"res": "ko"})
 
-    # Save file to storage and get the actual path
-    path = default_storage.save(n_path, ContentFile(img.read()))
+    n_path = f"member/{request.user.member.pk}_{uuid4().hex}.jpg"
 
-    # Update member profile with new image path
+    path = default_storage.save(n_path, ContentFile(img_data))
     request.user.member.profile = path
     request.user.member.save()
-
-    # Return success response with thumbnail URL
     return JsonResponse({"res": "ok", "src": request.user.member.profile_thumb.url})
 
 
@@ -302,18 +369,17 @@ def profile_rotate(request: HttpRequest, rotation_angle: int) -> JsonResponse:
     # Build full filesystem path and open image
     path = str(Path(conf_settings.MEDIA_ROOT) / path)
     try:
-        im = Image.open(path)
+        with Image.open(path) as im:
+            # Rotate image based on direction parameter (90 degrees clockwise if 1, otherwise counterclockwise)
+            out = im.rotate(90) if rotation_angle == 1 else im.rotate(-90)
 
-        # Rotate image based on direction parameter (90 degrees clockwise if 1, otherwise counterclockwise)
-        out = im.rotate(90) if rotation_angle == 1 else im.rotate(-90)
+            # Extract file extension and generate new unique filename
+            ext = path.split(".")[-1]
+            n_path = f"{Path(path).parent}/{request.user.member.pk}_{uuid4().hex}.{ext}"
 
-        # Extract file extension and generate new unique filename
-        ext = path.split(".")[-1]
-        n_path = f"{Path(path).parent}/{request.user.member.pk}_{uuid4().hex}.{ext}"
-
-        # Save rotated image and update member profile
-        out.save(n_path)
-        request.user.member.profile = n_path
+            # Save rotated image and update member profile
+            out.save(n_path)
+            request.user.member.profile = n_path
     except (OSError, UnidentifiedImageError):
         logger.exception("Failed to rotate profile image")
         return JsonResponse({"res": "ko"})
@@ -389,14 +455,14 @@ def profile_privacy_rewoke(request: HttpRequest, slug: str) -> HttpResponse:
         membership.save()
 
         # Notify user of successful operation
-        messages.success(request, _("Data share removed successfully") + "!")
+        messages.success(request, _("Data share removed successfully!"))
     except Exception as err:
         # Handle any errors by raising 404
         msg = "error in performing request"
         raise Http404(msg) from err
 
     # Redirect back to privacy settings page
-    return redirect("profile_privacy")
+    return redirect("privacy")
 
 
 @login_required
@@ -439,6 +505,7 @@ def membership(request: HttpRequest) -> HttpResponse:
                 # Mark membership as submitted and send confirmation
                 el.status = MembershipStatus.SUBMITTED
                 el.save()
+                save_log(context, Membership, el, None, operation_type=LogOperationType.UPDATE)
                 send_membership_confirm(request, el)
 
                 # Show success message and redirect to home
@@ -452,6 +519,7 @@ def membership(request: HttpRequest) -> HttpResponse:
             if form.is_valid():
                 # Save form data and update status to uploaded
                 form.save()
+                save_log(context, Membership, el, None, operation_type=LogOperationType.UPDATE)
                 el.status = MembershipStatus.UPLOADED
                 el.save()
 
@@ -548,7 +616,7 @@ def public(request: HttpRequest, slug: str) -> HttpResponse:  # noqa: C901 - Com
 
     # Add LARP history if enabled in association configuration
     association_id = context["association_id"]
-    if get_association_config(association_id, "player_larp_history", default_value=False):
+    if get_association_config(association_id, "player_larp_history"):
         # Fetch registrations with related run and event data
         context["regs"] = (
             Registration.objects.filter(
@@ -621,12 +689,12 @@ def chat(request: HttpRequest, slug: str) -> Any:
 
     my_member_id = context["member"].id
     if member_id == my_member_id:
-        messages.success(request, _("You can't send messages to yourself") + "!")
+        messages.success(request, _("You can't send messages to yourself!"))
         return redirect("home")
 
     channel = get_channel(member_id, my_member_id)
     if request.method == "POST":
-        tx = request.POST["text"]
+        tx = request.POST.get("text", "")
         if len(tx) > 0:
             ChatMessage(
                 sender_id=my_member_id,
@@ -757,28 +825,88 @@ def leaderboard(request: HttpRequest, page: int = 1) -> HttpResponse:
     return render(request, "larpmanager/general/leaderboard.html", context)
 
 
-@login_required
-def unsubscribe(request: HttpRequest) -> HttpResponse:
-    """Unsubscribe user from newsletter communications.
+def _unsubscribe_org(request: HttpRequest, email: str, association: Association) -> dict:
+    member = None
+    mb = None
+    try:
+        member = Member.objects.get(email=email)
+        mb = get_user_membership(member, association.id)
+        mb.newsletter = NewsletterChoices.NO
+        mb.save()
+    except Member.DoesNotExist:
+        pass
+    has_regs = Registration.objects.filter(
+        member__email=email,
+        run__event__association=association,
+        cancellation_date__isnull=True,
+        deleted__isnull=True,
+    ).exists()
+    if member and mb:
+        save_log(
+            {"member": member, "association_id": association.id},
+            Membership,
+            mb,
+            mb.id,
+            info=f"unsubscribe ip:{get_client_ip(request)}",
+        )
+    return {"done": True, "is_org": True, "has_registrations": has_regs}
 
-    Args:
-        request: HTTP request object containing user and association data
 
-    Returns:
-        Redirect response to home page
+def _unsubscribe_global(request: HttpRequest, email: str) -> dict:
+    newsletter, _ = LarpManagerNewsletter.objects.get_or_create(email=email)
+    newsletter.status = NewsletterStatus.UNSUBSCRIBED
+    newsletter.save()
+    try:
+        member = Member.objects.get(email=email)
+        save_log(
+            {"member": member, "association_id": None},
+            LarpManagerNewsletter,
+            newsletter,
+            newsletter.id,
+            info=f"unsubscribe ip:{get_client_ip(request)}",
+        )
+    except Member.DoesNotExist:
+        pass
+    return {"done": True, "is_org": False}
 
-    """
-    # Build context with user and association information
-    context = get_context(request)
 
-    # Get user membership and update newsletter preference
-    mb = get_user_membership(context["member"], context["association_id"])
-    mb.newsletter = NewsletterChoices.NO
-    mb.save()
+def unsubscribe(request: HttpRequest, token: str = "") -> HttpResponse:
+    """Unsubscribe user from newsletter communications via signed token link."""
+    if not token:
+        return redirect("home")
 
-    # Show success message and redirect to home
-    messages.success(request, _("The request of removal from further communication has been successfull!"))
-    return redirect("home")
+    try:
+        token = bytes.fromhex(token).decode()
+        data = signing.loads(token, salt="unsubscribe", max_age=86400 * 30)
+    except signing.BadSignature:
+        return render(request, "larpmanager/general/unsubscribe.html", {"error": True})
+
+    email = data.get("email", "")
+    association_slug = data.get("association_slug")
+
+    association = None
+    if association_slug:
+        try:
+            association = Association.objects.get(slug=association_slug)
+        except Association.DoesNotExist:
+            return render(request, "larpmanager/general/unsubscribe.html", {"error": True})
+
+    if request.method == "POST" and request.POST.get("confirm"):
+        ctx = _unsubscribe_org(request, email, association) if association else _unsubscribe_global(request, email)
+        return render(request, "larpmanager/general/unsubscribe.html", ctx)
+
+    has_regs = (
+        Registration.objects.filter(
+            member__email=email,
+            run__event__association=association,
+            cancellation_date__isnull=True,
+            deleted__isnull=True,
+        ).exists()
+        if association
+        else False
+    )
+    ctx = {"email": email, "is_org": bool(association), "has_registrations": has_regs}
+    return render(request, "larpmanager/general/unsubscribe.html", ctx)
 
 
 @login_required
@@ -808,6 +936,9 @@ def vote(request: HttpRequest) -> HttpResponse:
 
     # Check if membership payment is required and completed
     if "membership" in context["features"]:
+        if context["membership"].status != MembershipStatus.ACCEPTED:
+            messages.error(request, _("You must be an approved member to vote."))
+            return redirect("membership")
         que = AccountingItemMembership.objects.filter(association_id=context["association_id"], year=context["year"])
         if not que.filter(member_id=context["member"].id).exists():
             messages.error(request, _("You must complete payment of membership dues in order to vote!"))
@@ -822,12 +953,10 @@ def vote(request: HttpRequest) -> HttpResponse:
     # Retrieve voting configuration from association settings
     association_id = context["association_id"]
 
-    context["vote_open"] = get_association_config(association_id, "vote_open", default_value=False, context=context)
-    context["vote_cands"] = get_association_config(
-        association_id, "vote_candidates", default_value="", context=context
-    ).split(",")
-    context["vote_min"] = get_association_config(association_id, "vote_min", default_value="1", context=context)
-    context["vote_max"] = get_association_config(association_id, "vote_max", default_value="1", context=context)
+    context["vote_open"] = get_association_config(association_id, "vote_open", context=context)
+    context["vote_cands"] = get_association_config(association_id, "vote_candidates", context=context).split(",")
+    context["vote_min"] = get_association_config(association_id, "vote_min", context=context)
+    context["vote_max"] = get_association_config(association_id, "vote_max", context=context)
 
     # Process vote submission if POST request
     if request.method == "POST":
@@ -854,7 +983,7 @@ def vote(request: HttpRequest) -> HttpResponse:
         try:
             idx = int(mb)
             context["candidates"].append(Member.objects.get(pk=idx))
-        except (ValueError, Member.DoesNotExist) as e:
+        except (ValueError, ObjectDoesNotExist) as e:
             # Skip invalid candidate IDs
             logger.debug("Invalid candidate ID or member not found: %s: %s", mb, e)
 
@@ -895,7 +1024,7 @@ def delegated(request: HttpRequest) -> HttpResponse:
     # Handle delegated user trying to return to parent account
     if request.user.member.parent:
         if request.method == "POST":
-            message = _("You are now logged in with your main account") + ": " + str(request.user.member.parent)
+            message = _("You are now logged in with your main account:") + " " + str(request.user.member.parent)
             return _switch_account(request, request.user.member.parent.user, message)
         # Show option to return to parent account
         return render(request, "larpmanager/member/delegated.html", context)
@@ -914,7 +1043,7 @@ def delegated(request: HttpRequest) -> HttpResponse:
                 msg = f"delegated account not found: {account_login}"
                 raise Http404(msg)
             delegated = del_dict[account_login]
-            message = _("You are now logged in with the delegate account") + ": " + str(delegated)
+            message = _("You are now logged in with the delegate account:") + " " + str(delegated)
             return _switch_account(request, delegated.user, message)
 
         # Handle creating a new delegated account
@@ -1007,30 +1136,11 @@ def registrations(request: HttpRequest) -> HttpResponse:
             with status and related information.
 
     """
-    nt = []
     context = get_context(request)
-
-    # Get user's registrations in this association
-    my_regs = Registration.objects.filter(member=context["member"], run__event_id=context["association_id"])
-    my_regs_dict = {registration.run_id: registration for registration in my_regs}
-
-    # Prepare context data
-    context.update(
-        {
-            "pre_registrations_dict": get_pre_registrations_dict(context["association_id"], context["member"]),
-            "character_rels_dict": get_character_rels_dict(my_regs_dict, context["member"]),
-            "payment_invoices_dict": get_payment_invoices_dict(my_regs_dict, context["member"]),
-        },
+    my_regs = get_member_registrations(context["member"], context["association_id"])
+    context["registration_list"] = build_registration_list(
+        context["member"], my_regs, context["association_id"], context["membership"]
     )
-
-    # Process each registration to calculate status and append to results
-    for registration in my_regs:
-        # Calculate registration status
-        registration.run.status = registration_status(registration.run, context["member"], context)
-        nt.append(registration)
-
-    # Render template with processed registration list
-    context["registration_list"] = nt
     return render(request, "larpmanager/member/registrations.html", context)
 
 
@@ -1115,3 +1225,92 @@ def _configs_character_rels(character_rels: list[RegistrationCharacterRel]) -> N
 
     for rel in character_rels:
         rel.character.configs_dict = configs_mapping.get(rel.character_id, {})
+
+
+@login_required
+def security(request: HttpRequest) -> HttpResponse:
+    """Manage TOTP device setup and deletion for the current user."""
+    context = get_context(request)
+
+    confirmed_devices = list(TOTPDevice.objects.filter(user=request.user, confirmed=True))
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+
+        if action == "delete":
+            device_id = request.POST.get("device_id")
+            TOTPDevice.objects.filter(pk=device_id, user=request.user).delete()
+            messages.success(request, _("Authenticator device removed"))
+            return redirect("security")
+
+        if action == "confirm":
+            pending = TOTPDevice.objects.filter(user=request.user, confirmed=False).first()
+            if pending is None:
+                return redirect("security")
+            form = OTPConfirmForm(request.POST)
+            if form.is_valid():
+                token = form.cleaned_data["token"]
+                if pending.verify_token(token):
+                    pending.confirmed = True
+                    pending.save()
+                    otp_login(request, pending)
+                    messages.success(request, _("Authenticator app configured successfully"))
+                    return redirect("security")
+                messages.error(request, _("Invalid code, please try again"))
+            context["confirm_form"] = form
+        else:
+            context["confirm_form"] = OTPConfirmForm()
+    else:
+        TOTPDevice.objects.filter(user=request.user, confirmed=False).delete()
+        context["confirm_form"] = OTPConfirmForm()
+
+    if not confirmed_devices:
+        pending = TOTPDevice.objects.get_or_create(user=request.user, name="default", confirmed=False)[0]
+        img = qrcode.make(pending.config_url)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        qr_data = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        context["pending_device"] = pending
+        context["qr_code_data"] = qr_data
+
+    context["devices"] = confirmed_devices
+    return render(request, "larpmanager/member/security.html", context)
+
+
+def otp_verify(request: HttpRequest) -> HttpResponse:
+    """Second-step OTP verification after credential login."""
+    user_id = request.session.get("otp_pending_user_id")
+    if not user_id:
+        return redirect("login")
+
+    try:
+        user = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        del request.session["otp_pending_user_id"]
+        return redirect("login")
+
+    credentials = {"username": user.username}
+    if not AxesProxyHandler.is_allowed(request, credentials):
+        request.session.pop("otp_pending_user_id", None)
+        request.session.pop("otp_next_url", None)
+        return get_lockout_response(request, credentials=credentials)
+
+    if request.method == "POST":
+        form = OTPVerifyForm(request.POST)
+        if form.is_valid():
+            token = form.cleaned_data["token"]
+            device = match_token(user, token)
+            if device is not None:
+                user.backend = get_user_backend()
+                login(request, user)
+                otp_login(request, device)
+                request.session.pop("otp_pending_user_id", None)
+                next_url = request.session.pop("otp_next_url", None)
+                welcome_user(request, user)
+                return redirect(next_url or conf_settings.LOGIN_REDIRECT_URL)
+            user_login_failed.send(sender=__name__, credentials=credentials, request=request)
+            form.add_error("token", _("Invalid code, please try again"))
+    else:
+        form = OTPVerifyForm()
+
+    return render(request, "registration/otp_verify.html", {"form": form})

@@ -19,12 +19,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 from __future__ import annotations
 
+import ast
 import html
 import logging
 import random
 import re
 import string
-import time
 import unicodedata
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
@@ -36,8 +36,9 @@ from background_task.models import Task
 from diff_match_patch import diff_match_patch
 from django.conf import settings as conf_settings
 from django.contrib import messages
+from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
-from django.db.models import Max, QuerySet, Subquery
+from django.db.models import Max, Prefetch, QuerySet, Subquery
 from django.http import Http404, HttpRequest
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -45,9 +46,8 @@ from django.utils.translation import gettext_lazy as _
 from larpmanager.cache.feature import get_event_features
 from larpmanager.models.accounting import Collection, Discount
 from larpmanager.models.association import Association
-from larpmanager.models.base import BaseModel, Feature, FeatureModule
-from larpmanager.models.casting import Quest, QuestType, Trait
-from larpmanager.models.event import DevelopStatus, Event, Run
+from larpmanager.models.base import BaseModel, Feature
+from larpmanager.models.event import DevelopStatus, Event, EventConfig, Run
 from larpmanager.models.member import Badge, Member
 from larpmanager.models.miscellanea import (
     Album,
@@ -57,15 +57,10 @@ from larpmanager.models.miscellanea import (
     WorkshopModule,
 )
 from larpmanager.models.registration import Registration
-from larpmanager.models.utils import my_uuid_short, strip_tags
+from larpmanager.models.utils import strip_tags
 from larpmanager.models.writing import (
     Handout,
-    HandoutTemplate,
-    Plot,
-    Prologue,
-    PrologueType,
     Relationship,
-    SpeedLarp,
 )
 
 if TYPE_CHECKING:
@@ -74,6 +69,11 @@ if TYPE_CHECKING:
 
 class DelimiterNotFoundError(ValueError):
     """Raised when CSV delimiter cannot be detected."""
+
+
+def feature_visible(feature_slug: str, features: dict | set, allowed_sidebar: list[str] | None) -> bool:
+    """Check whether a feature is enabled and not excluded by a demo's allowed sidebar restriction."""
+    return feature_slug in features and (not allowed_sidebar or feature_slug in allowed_sidebar)
 
 
 logger = logging.getLogger(__name__)
@@ -87,31 +87,13 @@ utc = pytz.UTC
 
 # ## PROFILING CHECK
 def check_already(nm: str, params: str) -> bool:
-    """Check if a background task is already queued.
-
-    Args:
-        nm (str): Task name
-        params: Task parameters
-
-    Returns:
-        bool: True if task already exists in queue
-
-    """
+    """Check if a background task is already queued."""
     q = Task.objects.filter(task_name=nm, task_params=params)
     return q.exists()
 
 
 def get_channel(first_entity_id: int, second_entity_id: int) -> int:
-    """Generate unique channel ID for two entities.
-
-    Args:
-        first_entity_id (int): First entity ID
-        second_entity_id (int): Second entity ID
-
-    Returns:
-        int: Unique channel ID using Cantor pairing
-
-    """
+    """Generate unique channel ID for two entities."""
     first_entity_id = int(first_entity_id)
     second_entity_id = int(second_entity_id)
     if first_entity_id > second_entity_id:
@@ -120,39 +102,17 @@ def get_channel(first_entity_id: int, second_entity_id: int) -> int:
 
 
 def cantor(first_integer: int, second_integer: int) -> float:
-    """Cantor pairing function to map two integers to a unique integer.
-
-    Args:
-        first_integer (int): First integer
-        second_integer (int): Second integer
-
-    Returns:
-        float: Unique pairing result
-
-    """
+    """Cantor pairing function to map two integers to a unique integer."""
     return ((first_integer + second_integer) * (first_integer + second_integer + 1) / 2) + second_integer
 
 
 def compute_diff(self: object, other: object) -> None:
-    """Compute differences between this instance and another.
-
-    Args:
-        self: Current instance
-        other: Other instance to compare against
-
-    """
+    """Compute differences between this instance and another."""
     check_diff(self, other.text, self.text)
 
 
 def check_diff(self: object, old_text: str, new_text: str) -> None:
-    """Generate HTML diff between two text strings.
-
-    Args:
-        self: Instance to store diff result
-        old_text: First text string
-        new_text: Second text string
-
-    """
+    """Generate HTML diff between two text strings."""
     if old_text == new_text:
         self.diff = None
         return
@@ -165,6 +125,7 @@ def check_diff(self: object, old_text: str, new_text: str) -> None:
 def get_object_uuid(
     model_class: type[BaseModel],
     identifier: str | int,
+    queryset_base: Any = None,
     **filters: Any,
 ) -> BaseModel:
     """Get object by UUID or ID with fallback.
@@ -175,6 +136,7 @@ def get_object_uuid(
     Args:
         model_class: Django model class to query
         identifier: UUID string to look up
+        queryset_base: Optional queryset to use instead of model_class.objects (for optimizations like prefetch_related)
         **filters: Additional filter kwargs (e.g., event=event, association_id=123)
 
     Returns:
@@ -184,20 +146,12 @@ def get_object_uuid(
         Http404: If object not found by UUID or ID (after 2 second wait)
 
     """
+    # Use provided queryset or default to model objects
+    queryset = queryset_base if queryset_base is not None else model_class.objects
+
     try:
-        return model_class.objects.get(uuid=identifier, **filters)
+        return queryset.get(uuid=identifier, **filters)
     except (ObjectDoesNotExist, ValueError, AttributeError) as err:
-        # TEMPORARY Fallback to ID lookup ONLY if UUID lookup fails and identifier is numeric
-        if str(identifier).isdigit():
-            try:
-                return model_class.objects.get(pk=identifier, **filters)
-            except ObjectDoesNotExist:
-                # Wait 2 seconds before raising 404 to handle race conditions
-                time.sleep(2)
-                msg = f"{model_class.__name__} does not exist"
-                raise Http404(msg) from err
-        # Wait 2 seconds before raising 404 to handle race conditions
-        time.sleep(2)
         msg = f"{model_class.__name__} does not exist"
         raise Http404(msg) from err
 
@@ -211,20 +165,7 @@ def add_context_by_uuid(
     set_name: bool = False,
     **filters: Any,
 ) -> None:
-    """Get object by UUID and add to context.
-
-    Args:
-        context: Context dictionary to update
-        context_key: Key name to store the object in context
-        model_class: Django model class to query
-        identifier: UUID string or ID to look up
-        set_name: If True, also set context["name"] = str(object)
-        **filters: Additional filter kwargs for get_object_uuid
-
-    Raises:
-        Http404: If object not found
-
-    """
+    """Get object by UUID and add to context."""
     obj = get_object_uuid(model_class, identifier, **filters)
     context[context_key] = obj
     if set_name:
@@ -236,17 +177,20 @@ def get_member(member_uuid: str) -> Member:
     return get_object_uuid(Member, member_uuid)
 
 
+def get_assoc_member(member_uuid: str, association_id: int) -> Member:
+    """Get a member by UUID, scoped to those with a Membership in the association."""
+    queryset = Member.objects.filter(memberships__association_id=association_id).distinct()
+    return get_object_uuid(Member, member_uuid, queryset_base=queryset)
+
+
+def get_help_question_member(member_uuid: str, association_id: int) -> Member:
+    """Get a member by UUID, scoped to those with a HelpQuestion in the association."""
+    queryset = Member.objects.filter(questions__association_id=association_id).distinct()
+    return get_object_uuid(Member, member_uuid, queryset_base=queryset)
+
+
 def get_contact(member_id: int, other_member_id: int) -> object | None:
-    """Get contact relationship between two members.
-
-    Args:
-        member_id: ID of first member
-        other_member_id: ID of second member
-
-    Returns:
-        Contact: Contact instance or None if not found
-
-    """
+    """Get contact relationship between two members."""
     try:
         return Contact.objects.get(me_id=member_id, you_id=other_member_id)
     except ObjectDoesNotExist:
@@ -278,13 +222,26 @@ def get_registration(context: dict, registration_uuid: str) -> None:
 
 
 def get_discount(context: dict, discount_uuid: str) -> None:
-    """Get discount by ID and add to context."""
-    add_context_by_uuid(context, "discount", Discount, discount_uuid, set_name=True)
+    """Get discount by ID and add to context, scoped to the current run."""
+    add_context_by_uuid(
+        context,
+        "discount",
+        Discount,
+        discount_uuid,
+        set_name=True,
+        runs=context["run"],
+    )
 
 
 def get_album(context: dict, album_uuid: str) -> None:
-    """Get album by ID and add to context."""
-    add_context_by_uuid(context, "album", Album, album_uuid)
+    """Get album by ID and add to context, scoped to the current association."""
+    add_context_by_uuid(
+        context,
+        "album",
+        Album,
+        album_uuid,
+        association_id=context["association_id"],
+    )
 
 
 def get_album_cod(context: dict, album_code: str) -> None:
@@ -305,80 +262,11 @@ def get_feature(context: dict, feature_slug: str) -> None:
         raise Http404(msg) from err
 
 
-def get_feature_module(context: dict, num: int) -> None:
-    """Retrieve FeatureModule by ID and add it to context, or raise 404 if not found."""
-    try:
-        context["feature_module"] = FeatureModule.objects.get(pk=num)
-    except ObjectDoesNotExist as err:
-        msg = "FeatureModule does not exist"
-        raise Http404(msg) from err
-
-
-def get_plot(context: dict, plot_uuid: str) -> None:
-    """Fetch and add plot to context with related data.
-
-    Args:
-        context: View context dictionary to update
-        plot_uuid: Primary key of the plot to retrieve
-
-    Raises:
-        Http404: If plot does not exist for the event
-
-    """
-    try:
-        # Fetch plot with optimized queries for related objects and characters
-        context["plot"] = (
-            Plot.objects.select_related("event", "progress", "assigned")
-            .prefetch_related("characters", "plotcharacterrel_set__character")
-            .get(event=context["event"], uuid=plot_uuid)
-        )
-        # Set plot name in context for template display
-        context["name"] = context["plot"].name
-    except ObjectDoesNotExist as err:
-        msg = "Plot does not exist"
-        raise Http404(msg) from err
-
-
-def get_quest_type(context: dict, quest_type_uuid: str) -> None:
-    """Get quest type from context by number."""
-    get_element(context, quest_type_uuid, "quest_type", QuestType)
-
-
-def get_quest(context: dict, quest_uuid: str) -> None:
-    """Get a quest element and add it to the context."""
-    get_element(context, quest_uuid, "quest", Quest)
-
-
-def get_trait(character_context: dict, trait_uuid: str) -> None:
-    """Get trait from character context by name."""
-    get_element(character_context, trait_uuid, "trait", Trait)
-
-
 def get_handout(context: dict, handout_uuid: str) -> None:
     """Fetch handout from database and populate context with its data."""
     get_element(context, handout_uuid, "handout", Handout)
     if "handout" in context:
         context["handout"].data = context["handout"].show()
-
-
-def get_handout_template(context: dict, handout_template_uuid: str) -> dict:
-    """Add handout template to context dict."""
-    get_element(context, handout_template_uuid, "handout_template", HandoutTemplate)
-
-
-def get_prologue(context: dict, prologue_uuid: str) -> None:
-    """Retrieve prologue element and add it to the context."""
-    get_element(context, prologue_uuid, "prologue", Prologue)
-
-
-def get_prologue_type(context: dict, prologue_type_uuid: str) -> None:
-    """Fetch prologue type and add it to context with its name."""
-    get_element(context, prologue_type_uuid, "prologue_type", PrologueType)
-
-
-def get_speedlarp(context: dict, speedlarp_uuid: str) -> None:
-    """Get speedlarp object and add it to context with its name."""
-    get_element(context, speedlarp_uuid, "speedlarp", SpeedLarp)
 
 
 def get_badge(context: dict, badge_uuid: str) -> Badge:
@@ -391,19 +279,7 @@ def get_badge(context: dict, badge_uuid: str) -> Badge:
 
 
 def get_collection_partecipate(context: dict, contribution_code: str) -> Collection:
-    """Retrieve collection by contribution code for the current association.
-
-    Args:
-        context: View context containing association_id
-        contribution_code: Unique contribution code for the collection
-
-    Returns:
-        Collection object matching the criteria
-
-    Raises:
-        Http404: If collection does not exist
-
-    """
+    """Retrieve collection by contribution code for the current association."""
     try:
         return Collection.objects.get(contribute_code=contribution_code, association_id=context["association_id"])
     except ObjectDoesNotExist as err:
@@ -412,19 +288,7 @@ def get_collection_partecipate(context: dict, contribution_code: str) -> Collect
 
 
 def get_collection_redeem(context: dict, redeem_code: str) -> Collection:
-    """Get Collection by redeem code and association from context.
-
-    Args:
-        context: View context containing association_id
-        redeem_code: Unique redemption code for the collection
-
-    Returns:
-        Collection: The matching Collection instance
-
-    Raises:
-        Http404: If collection not found for given code and association
-
-    """
+    """Get Collection by redeem code and association from context."""
     try:
         return Collection.objects.get(redeem_code=redeem_code, association_id=context["association_id"])
     except ObjectDoesNotExist as error:
@@ -442,34 +306,27 @@ def get_element(
     element_uuid: str,
     context_key_name: str,
     model_class: type[BaseModel],
+    queryset_base: Any = None,
 ) -> None:
-    """Retrieve a model instance and add it to the context dictionary.
-
-    Fetches a model instance related to a parent event and stores it in the provided
-    context dictionary
-
-    Args:
-        context: Context dictionary that must contain an 'event' key with a model
-            instance that has a `get_class_parent()` method. The retrieved object
-            will be added to this dictionary under the key specified by `context_key_name`.
-        element_uuid: The element uuid used to look up the model instance.
-        context_key_name: The key name under which the retrieved object will be stored
-            in the context dictionary. Also used in error messages.
-        model_class: The Django model class to query. Must have a foreign key relationship
-            to an 'event' and optionally a 'number' field if `by_number=True`.
-
-    Raises:
-        Http404: If the requested object does not exist in the database.
-    """
-    if element_uuid is None or element_uuid == "0":
+    """Retrieve a model instance and add it to the context dictionary."""
+    if not element_uuid:
         return
 
-    context[context_key_name] = get_element_event(context, element_uuid, model_class)
+    context[context_key_name] = get_element_event(context, element_uuid, model_class, queryset_base)
     context["class_name"] = context_key_name
 
 
-def get_element_event(context: dict, element_uuid: str, model_class: type[BaseModel]) -> BaseModel:
-    """Retrieves an element by UUID taking into account association /event hierarchy."""
+def get_element_event(
+    context: dict, element_uuid: str, model_class: type[BaseModel], queryset_base: Any = None
+) -> BaseModel:
+    """Retrieves an element by UUID taking into account association /event hierarchy.
+
+    Args:
+        context: Context dictionary with event/association data
+        element_uuid: UUID of element to retrieve
+        model_class: Model class to query
+        queryset_base: Optional optimized queryset to use instead of model_class.objects
+    """
     filters = {}
     # Add association filter / event filter
     if hasattr(model_class, "association"):
@@ -480,6 +337,7 @@ def get_element_event(context: dict, element_uuid: str, model_class: type[BaseMo
     return get_object_uuid(
         model_class,
         element_uuid,
+        queryset_base=queryset_base,
         **filters,
     )
 
@@ -512,18 +370,7 @@ def get_player_relationship(context: dict, other_character_uuid: str) -> None:
 
 
 def ensure_timezone_aware(dt: datetime) -> datetime:
-    """Ensure a datetime object is timezone-aware.
-
-    Converts timezone-naive datetime objects to timezone-aware using the
-    default timezone. Already timezone-aware datetimes are returned unchanged.
-
-    Args:
-        dt: Datetime object to check and potentially convert
-
-    Returns:
-        Timezone-aware datetime object
-
-    """
+    """Ensure a datetime object is timezone-aware."""
     return dt if timezone.is_aware(dt) else timezone.make_aware(dt)
 
 
@@ -533,15 +380,7 @@ def get_time_diff(start_datetime: date, end_datetime: date) -> int:
 
 
 def get_time_diff_today(target_date: datetime | date | None) -> int:
-    """Calculate time difference between given date and today.
-
-    Args:
-        target_date: Date to compare with today
-
-    Returns:
-        Time difference in days, or -1 if target_date is None
-
-    """
+    """Calculate time difference between given date and today."""
     if not target_date:
         return -1
 
@@ -558,15 +397,7 @@ def generate_number(length: int) -> str:
 
 
 def html_clean(text: str | None) -> str:
-    """Clean HTML tags and unescape HTML entities from text.
-
-    Args:
-        text: Input text that may contain HTML tags and entities.
-
-    Returns:
-        Cleaned text with HTML tags removed and entities unescaped.
-
-    """
+    """Clean HTML tags and unescape HTML entities from text."""
     if not text:
         return ""
     # Remove all HTML tags from the text
@@ -641,16 +472,7 @@ def remove_choice(choices: list[tuple], term_to_remove: str) -> list[tuple]:
 
 
 def check_field(model_class: type, field_name: str) -> bool:
-    """Check if a field exists in the Django model class.
-
-    Args:
-        model_class: The Django model class to check
-        field_name: The name of the field to look for
-
-    Returns:
-        True if field exists, False otherwise
-
-    """
+    """Check if a field exists in the Django model class."""
     # Iterate through all fields including hidden ones
     return any(field.name == field_name for field in model_class._meta.get_fields(include_hidden=True))  # noqa: SLF001  # Django model metadata
 
@@ -672,93 +494,24 @@ def round_to_two_significant_digits(number: float) -> int:
     # Convert input to Decimal for precise arithmetic
     decimal_number = Decimal(number)
     small_number_threshold = 1000
+    medium_number_threshold = 10000
 
     # Round by 10 for smaller numbers
     if abs(number) < small_number_threshold:
         rounded_decimal = decimal_number.quantize(Decimal("1E1"), rounding=ROUND_DOWN)
-    # Round by 100 for larger numbers
-    else:
+    # Round by 100 for medium numbers
+    elif abs(number) < medium_number_threshold:
         rounded_decimal = decimal_number.quantize(Decimal("1E2"), rounding=ROUND_DOWN)
+    # Round by 1000 otherwise
+    else:
+        rounded_decimal = decimal_number.quantize(Decimal("1E3"), rounding=ROUND_DOWN)
 
     # Convert back to integer and return
     return int(rounded_decimal)
 
 
-def exchange_order(
-    context: dict, model_class: type, element_uuid: str, move_up: int, elements: object | None = None
-) -> None:
-    """Exchange ordering positions between two elements in a sequence.
-
-    This function moves an element up or down in the ordering sequence by swapping
-    its order value with an adjacent element. If no adjacent element exists,
-    it simply increments or decrements the order value.
-
-    Args:
-        context: Context dictionary to store the current element after operation.
-        model_class: Model class of elements to reorder.
-        element_uuid: UUID of the element to move.
-        move_up: Direction to move - 1 for up (increase order), 0 for down (decrease order).
-        elements: Optional queryset of elements. Defaults to event elements if None.
-
-    Returns:
-        None: Function modifies elements in-place and updates context['current'].
-
-    Note:
-        The function handles edge cases where elements have the same order value
-        by adjusting one of them to maintain proper ordering.
-
-    """
-    # Get elements queryset, defaulting to event elements if not provided
-    elements = elements or context["event"].get_elements(model_class)
-    current_element = elements.get(uuid=element_uuid)
-
-    # Determine direction: move_up=True means move up (increase order), False means down
-    queryset = (
-        elements.filter(order__gt=current_element.order)
-        if move_up
-        else elements.filter(order__lt=current_element.order)
-    )
-    queryset = queryset.order_by("order" if move_up else "-order")
-
-    # Apply additional filters based on current element's attributes
-    # This ensures we only swap within the same logical group
-    for attribute_name in ("question", "section", "applicable"):
-        if hasattr(current_element, attribute_name):
-            queryset = queryset.filter(**{attribute_name: getattr(current_element, attribute_name)})
-
-    # Get the next element in the desired direction
-    adjacent_element = queryset.first()
-
-    # If no adjacent element found, just increment/decrement order
-    if not adjacent_element:
-        current_element.order += 1 if move_up else -1
-        current_element.save()
-        context["current"] = current_element
-        return
-
-    # Exchange ordering values between current and adjacent element
-    current_element.order, adjacent_element.order = adjacent_element.order, current_element.order
-
-    # Handle edge case where both elements have same order (data inconsistency)
-    if current_element.order == adjacent_element.order:
-        adjacent_element.order += -1 if move_up else 1
-
-    # Save both elements and update context
-    current_element.save()
-    adjacent_element.save()
-    context["current"] = current_element
-
-
 def normalize_string(input_string: str) -> str:
-    """Normalize a string by converting to lowercase, removing spaces and accents.
-
-    Args:
-        input_string: Input string to normalize.
-
-    Returns:
-        Normalized string with lowercase, no spaces, and no accented characters.
-
-    """
+    """Normalize a string by converting to lowercase, removing spaces and accents."""
     # Convert to lowercase
     normalized_string = input_string.lower()
 
@@ -771,72 +524,13 @@ def normalize_string(input_string: str) -> str:
     )
 
 
-def copy_class(target_event_id: int, source_event_id: int, model_class: type) -> None:
-    """Copy all objects of a given class from source event to target event.
-
-    Args:
-        target_event_id: Target event ID to copy objects to
-        source_event_id: Source event ID to copy objects from
-        model_class: Django model class to copy instances of
-
-    """
-    model_class.objects.filter(event_id=target_event_id).delete()
-
-    for source_object in model_class.objects.filter(event_id=source_event_id):
-        try:
-            # save a copy of m2m relations
-            many_to_many_data = {}
-
-            # noinspection PyProtectedMember
-            for field in source_object._meta.many_to_many:  # noqa: SLF001  # Django model metadata
-                many_to_many_data[field.name] = list(getattr(source_object, field.name).all())
-
-            source_object.pk = None
-            source_object.event_id = target_event_id
-            # noinspection PyProtectedMember
-            source_object._state.adding = True  # noqa: SLF001  # Django model state
-            # Regenerate unique fields that need new values for the copy
-            if hasattr(source_object, "uuid"):
-                source_object.uuid = None  # Let UuidMixin.save() regenerate with retry logic
-            for field_name, generation_function in {"access_token": my_uuid_short}.items():
-                if not hasattr(source_object, field_name):
-                    continue
-                setattr(source_object, field_name, generation_function())
-            source_object.save()
-
-            # copy m2m relations
-            for field_name, related_values in many_to_many_data.items():
-                getattr(source_object, field_name).set(related_values)
-        except Exception as error:  # noqa: BLE001 - Complex object cloning may fail in many ways, log and continue
-            logger.warning("found exp: %s", error)
-
-
 def get_payment_methods_ids(context: dict) -> set[int]:
-    """Get set of payment method IDs for an association.
-
-    Args:
-        context: Context dictionary containing association ID
-
-    Returns:
-        set: Set of payment method primary keys
-
-    """
+    """Get set of payment method IDs for an association."""
     return set(Association.objects.get(pk=context["association_id"]).payment_methods.values_list("pk", flat=True))
 
 
 def detect_delimiter(content: str) -> str:
-    """Detect CSV delimiter from content header line.
-
-    Args:
-        content: CSV content string
-
-    Returns:
-        str: Detected delimiter character
-
-    Raises:
-        DelimiterNotFoundError: If no delimiter is found
-
-    """
+    """Detect CSV delimiter from content header line."""
     header_line = content.split("\n")[0]
     for delimiter in ["\t", ";", ","]:
         if delimiter in header_line:
@@ -846,15 +540,7 @@ def detect_delimiter(content: str) -> str:
 
 
 def clean(s: str) -> str:
-    """Clean and normalize string by removing symbols, spaces, and accents.
-
-    Args:
-        s: String to clean
-
-    Returns:
-        str: Cleaned string with normalized characters
-
-    """
+    """Clean and normalize string by removing symbols, spaces, and accents."""
     s = s.lower()
     s = re.sub(r"[^\w]", " ", s)  # remove symbols
     s = re.sub(r"\s", " ", s)  # replace whitespaces with spaces
@@ -888,6 +574,7 @@ def _search_char_reg(context: dict, character: object, search_result: dict) -> N
     search_result["player"] = character.registration.display_member()
     search_result["player_full"] = str(character.registration.member)
     search_result["player_uuid"] = character.registration.member.uuid
+    search_result["player_id"] = character.registration.member_id
     search_result["first_aid"] = character.registration.member.first_aid
 
     # Set profile image with fallback hierarchy: character custom -> member -> None
@@ -1030,7 +717,7 @@ def format_email_body(email: object) -> str:
     return cleaned[:cutoff] + "..." if len(cleaned) > cutoff else cleaned
 
 
-def get_now() -> object:
+def get_now() -> datetime:
     """Get current time - if executed in debug/test, without timezone, add it."""
     now = timezone.now()
     if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
@@ -1040,28 +727,20 @@ def get_now() -> object:
 
 
 def get_display_choice(choices: list[tuple[str, str]], key: str) -> str:
-    """Get display name for a choice field value.
-
-    Args:
-        choices: List of (key, display_name) tuples
-        key: Key to look up display name for
-
-    Returns:
-        str: Display name for the key, empty string if not found
-
-    """
+    """Get display name for a choice field value."""
     for choice_key, display_name in choices:
         if choice_key == key:
             return display_name
     return ""
 
 
-def get_coming_runs(association_id: int | None, *, future: bool = True) -> QuerySet[Run]:
+def get_coming_runs(association_id: int | None, *, future: bool = True, include_hidden: bool = False) -> QuerySet[Run]:
     """Get upcoming or past runs for an association.
 
     Args:
         association_id: Association ID to filter by. If None, returns runs for all associations.
         future: If True, get future runs; if False, get past runs. Defaults to True.
+        include_hidden: If True, keep runs in development status Hidden. Defaults to False.
 
     Returns:
         QuerySet of Run objects, ordered by end date.
@@ -1070,6 +749,8 @@ def get_coming_runs(association_id: int | None, *, future: bool = True) -> Query
     """
     # Base queryset: exclude cancelled runs and invisible events, optimize with select_related
     runs = Run.objects.exclude(development=DevelopStatus.CANC).exclude(event__visible=False).select_related("event")
+    if not include_hidden:
+        runs = runs.exclude(development=DevelopStatus.START)
 
     # Filter by association if specified
     if association_id:
@@ -1086,3 +767,69 @@ def get_coming_runs(association_id: int | None, *, future: bool = True) -> Query
         runs = runs.filter(end__lte=reference_date.date()).order_by("-end")
 
     return runs
+
+
+def _geo_prefetch(prefix: str = "") -> Prefetch:
+    path = f"{prefix}__configs" if prefix else "event__configs"
+    return Prefetch(
+        path,
+        queryset=EventConfig.objects.filter(name__in=["pub_lat", "pub_lon"]),
+        to_attr="geo_configs",
+    )
+
+
+def with_geo_configs(runs_qs: QuerySet) -> QuerySet:
+    """Prefetch pub_lat/pub_lon EventConfigs so Event.maps_url needs no extra queries."""
+    return runs_qs.prefetch_related(_geo_prefetch())
+
+
+def with_geo_configs_registrations(registrations_qs: QuerySet) -> QuerySet:
+    """Prefetch pub_lat/pub_lon EventConfigs through registration->run->event."""
+    return registrations_qs.prefetch_related(_geo_prefetch("run__event"))
+
+
+def _validate_and_fetch_objects(model_class: type, ids: int | list[int], model_name: str) -> list:
+    """Validate IDs and fetch objects, logging warnings for missing IDs.
+
+    Args:
+        model_class: The Django model class to query
+        ids: Single ID or list of IDs to fetch
+        model_name: Name of the model for logging purposes
+
+    Returns:
+        List of model instances found
+    """
+    # Normalize to list
+    if isinstance(ids, int):
+        ids = [ids]
+
+    objects = model_class.objects.filter(id__in=ids)
+    found_ids = set(objects.values_list("id", flat=True))
+    missing_ids = set(ids) - found_ids
+
+    if missing_ids:
+        logger.info("%s IDs %s not found for cache refresh", model_name, missing_ids)
+
+    return list(objects)
+
+
+def clean_html(tx: str) -> str:
+    """Remove HTML tags and clean up whitespace from the given string."""
+    tx = tx.replace("<br />", " ")
+    return strip_tags(tx)
+
+
+def is_rate_limited(key: str, timeout: int = 10) -> bool:
+    """Return True if the action identified by key is rate-limited."""
+    return not cache.add(f"rl_{key}", 1, timeout)
+
+
+def parse_multi_config(value: str) -> list:
+    """Parse a MULTI_BOOL config string (stored as Python list repr) into a list."""
+    if not value:
+        return []
+    try:
+        result = ast.literal_eval(value)
+        return result if isinstance(result, list) else []
+    except (ValueError, SyntaxError):
+        return []

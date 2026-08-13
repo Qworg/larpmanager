@@ -25,7 +25,7 @@ from typing import Any
 from django.conf import settings as conf_settings
 from django.core.cache import cache
 
-from larpmanager.models.miscellanea import WarehouseItem
+from larpmanager.models.miscellanea import WarehouseItem, WarehouseItemAssignment, WarehouseTag
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def build_item_data(item: WarehouseItem) -> dict[str, Any]:
     return {
         "id": item.id,
         "name": item.name,
-        "tags": [(tag.id, tag.name) for tag in item.tags.all()],
+        "tags": [(tag.uuid, tag.name) for tag in item.tags.all()],
     }
 
 
@@ -66,7 +66,7 @@ def init_association_warehouse_cache(association_id: int) -> dict[int, dict[str,
             item_id: {
                 'id': item_id,
                 'name': item_name,
-                'tags': [(tag_id, tag_name), ...]
+                'tags': [(tag_uuid, tag_name), ...]
             }
         }
 
@@ -94,18 +94,7 @@ def init_association_warehouse_cache(association_id: int) -> dict[int, dict[str,
 
 
 def get_association_warehouse_cache(association_id: int) -> dict[int, dict[str, Any]]:
-    """Get warehouse cache for an association, initializing if not present.
-
-    Retrieves cached warehouse data for the specified association. If no cached
-    data exists, initializes the cache with fresh data.
-
-    Args:
-        association_id: The Association ID to get warehouse cache for
-
-    Returns:
-        dict[int, dict[str, Any]]: Dictionary containing cached warehouse data
-
-    """
+    """Get warehouse cache for an association, initializing if not present."""
     cache_key = get_association_warehouse_key(association_id)
     cached_warehouse = cache.get(cache_key)
 
@@ -135,7 +124,7 @@ def update_warehouse_item_cache(item: WarehouseItem) -> None:
         # Update the specific item's data
         cached_data[item.id] = build_item_data(item)
         cache.set(cache_key, cached_data, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
-        logger.debug("Updated warehouse item %s in cache", item.uui)
+        logger.debug("Updated warehouse item %s in cache", item.uuid)
 
     except Exception:
         logger.exception("Error updating warehouse item %s cache", item.id)
@@ -166,7 +155,7 @@ def on_warehouse_item_tags_m2m_changed(
     sender: type,  # noqa: ARG001
     instance: WarehouseItem,
     action: str,
-    pk_set: set[int] | None,  # noqa: ARG001
+    pk_set: set[int] | None,
     **kwargs: object,  # noqa: ARG001
 ) -> None:
     """Handle warehouse item-tag relationship changes.
@@ -175,9 +164,9 @@ def on_warehouse_item_tags_m2m_changed(
 
     Args:
         sender: The through model class that manages the M2M relationship
-        instance: The WarehouseItem instance whose tags are changing
+        instance: The WarehouseItem or WarehouseTag instance involved in the relationship
         action: The type of change being performed on the relationship
-        pk_set: Set of primary keys of the WarehouseTag objects being affected
+        pk_set: Set of primary keys of the related objects being affected
         **kwargs: Additional keyword arguments passed by the Django signal system
 
     Returns:
@@ -185,4 +174,76 @@ def on_warehouse_item_tags_m2m_changed(
 
     """
     if action in ("post_add", "post_remove", "post_clear"):
-        update_warehouse_item_cache(instance)
+        if isinstance(instance, WarehouseTag):
+            # Instance is a WarehouseTag, need to update all affected items
+            if action == "post_clear":
+                # For post_clear on a tag, pk_set is None, so clear entire cache
+                clear_association_warehouse_cache(instance.association_id)
+            elif pk_set:
+                # Update cache for each affected item
+                items_to_update = WarehouseItem.objects.filter(id__in=pk_set)
+                for item in items_to_update:
+                    update_warehouse_item_cache(item)
+        else:
+            # Instance is a WarehouseItem (when item.tags.add/remove is used)
+            update_warehouse_item_cache(instance)
+
+
+def get_event_warehouse_assignments_key(event_id: int) -> str:
+    """Generate cache key for an event's warehouse item assignments."""
+    return f"event__warehouse_assignments__{event_id}"
+
+
+def clear_event_warehouse_assignments_cache(event_id: int) -> None:
+    """Reset warehouse assignments cache for given event ID."""
+    cache_key = get_event_warehouse_assignments_key(event_id)
+    cache.delete(cache_key)
+    logger.debug("Reset warehouse assignments cache for event %s", event_id)
+
+
+def build_event_warehouse_assignments_cache(event: Any) -> dict[int, dict[str, Any]]:
+    """Build cache of item assignments for an event, keyed by item ID.
+
+    Each entry is {"list": [(area_uuid, area_name, quantity), ...], "count": N}.
+    """
+    assignments_cache: dict[int, dict[str, Any]] = {}
+
+    try:
+        rows: dict[int, list] = {}
+        for assignment in WarehouseItemAssignment.objects.filter(event=event).select_related("area", "item"):
+            rows.setdefault(assignment.item_id, []).append(
+                (assignment.area.uuid, assignment.area.name, assignment.quantity or 0),
+            )
+        for item_id, entries in rows.items():
+            assignments_cache[item_id] = {"list": entries, "count": len(entries)}
+
+        cache_key = get_event_warehouse_assignments_key(event.id)
+        cache.set(cache_key, assignments_cache, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
+        logger.debug("Cached warehouse assignments for event %s (%s items)", event.id, len(assignments_cache))
+
+    except Exception:
+        logger.exception("Error building warehouse assignments cache for event %s", event.id)
+        assignments_cache = {}
+
+    return assignments_cache
+
+
+def get_event_warehouse_assignments_cache(event: Any) -> dict[int, dict[str, Any]]:
+    """Get warehouse assignments cache for an event, initializing if not present."""
+    cache_key = get_event_warehouse_assignments_key(event.id)
+    cached_assignments = cache.get(cache_key)
+
+    if cached_assignments is None:
+        logger.debug("Cache miss for event %s warehouse assignments, initializing", event.id)
+        cached_assignments = build_event_warehouse_assignments_cache(event)
+
+    return cached_assignments
+
+
+def on_warehouse_item_assignment_changed(
+    sender: type,  # noqa: ARG001
+    instance: WarehouseItemAssignment,
+    **kwargs: object,  # noqa: ARG001
+) -> None:
+    """Rebuild event warehouse assignments cache when an assignment is saved or deleted."""
+    clear_event_warehouse_assignments_cache(instance.event_id)

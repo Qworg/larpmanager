@@ -39,6 +39,7 @@ class TestUploadFunctions(BaseTestCase):
 
         # Prepare context for character upload
         context = {
+            "association_id": self.get_association().id,
             "event": event,
             "typ": "character",
             "field_name": "name",
@@ -72,6 +73,7 @@ class TestUploadFunctions(BaseTestCase):
 
         # Prepare context for character upload to child event
         context = {
+            "association_id": self.get_association().id,
             "event": child_event,
             "typ": "character",
             "field_name": "name",
@@ -104,13 +106,14 @@ class TestUploadFunctions(BaseTestCase):
         # Create child event with parent
         child_event = self.create_event(name="Campaign Chapter 1", slug="campaign-ch1", parent=parent_event)
 
-        # Enable campaign character independence for child event
-        EventConfig.objects.create(event=child_event, name="campaign_character_indep", value="True")
+        # Enable campaign character independence on parent (campaign-level config)
+        EventConfig.objects.create(event=parent_event, name="campaign_character_indep", value="True")
 
         member = self.get_member()
 
         # Prepare context for character upload to child event
         context = {
+            "association_id": self.get_association().id,
             "event": child_event,
             "typ": "character",
             "field_name": "name",
@@ -148,6 +151,7 @@ class TestUploadFunctions(BaseTestCase):
 
         # Prepare context for character upload to child event
         context = {
+            "association_id": self.get_association().id,
             "event": child_event,
             "typ": "character",
             "field_name": "name",

@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from django.core.exceptions import ObjectDoesNotExist
@@ -33,12 +34,16 @@ from django.db.models import F
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from larpmanager.accounting.gateway import (
-    get_paypal_form,
-    get_redsys_form,
-    get_satispay_form,
-    get_stripe_form,
-    get_sumup_form,
+from larpmanager.accounting.base import round_decimal
+from larpmanager.accounting.gateway.paypal import get_paypal_form
+from larpmanager.accounting.gateway.redsys import get_redsys_form
+from larpmanager.accounting.gateway.satispay import get_satispay_form
+from larpmanager.accounting.gateway.stripe import get_stripe_form
+from larpmanager.accounting.gateway.sumup import get_sumup_form
+from larpmanager.accounting.member import (
+    get_membership_fee_for_reg,
+    membership_fee_pending_config_name,
+    set_membership_fee_pending,
 )
 from larpmanager.cache.config import get_association_config, get_event_config
 from larpmanager.cache.feature import get_association_features
@@ -66,7 +71,9 @@ from larpmanager.models.form import (
     RegistrationAnswer,
     RegistrationChoice,
     RegistrationQuestion,
+    RegistrationQuestionApplicable,
 )
+from larpmanager.models.member import MemberConfig
 from larpmanager.models.registration import Registration
 from larpmanager.models.utils import generate_id
 from larpmanager.utils.core.base import fetch_payment_details, update_payment_details
@@ -74,8 +81,6 @@ from larpmanager.utils.services.einvoice import process_payment
 from larpmanager.utils.users.member import assign_badge
 
 if TYPE_CHECKING:
-    from decimal import Decimal
-
     from django.forms import Form
     from django.http import HttpRequest
 
@@ -84,7 +89,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Payment fee constants
-MAX_PAYMENT_FEE_PERCENTAGE = 100  # Maximum allowed payment fee percentage
+MAX_PAYMENT_FEE_PERCENTAGE = Decimal(100)  # Maximum allowed payment fee percentage
 
 
 def get_payment_fee(association_id: int, slug: str) -> float:
@@ -111,18 +116,7 @@ def get_payment_fee(association_id: int, slug: str) -> float:
 
 
 def unique_invoice_cod(length: int = 16) -> str:
-    """Generate a unique invoice code.
-
-    Args:
-        length (int): Length of the generated code, defaults to 16
-
-    Returns:
-        str: Unique invoice code
-
-    Raises:
-        Exception: If unable to generate unique code after 5 attempts
-
-    """
+    """Generate a unique invoice code."""
     max_attempts = 5
     for _attempt_number in range(max_attempts):
         invoice_code = generate_id(length)
@@ -158,13 +152,29 @@ def set_data_invoice(
 
     # Handle registration payment type
     if invoice.typ == PaymentType.REGISTRATION:
+        registration = context["registration"]
         invoice.causal = _("Registration fee %(number)d of %(user)s per %(event)s") % {
             "user": member_real_display_name,
-            "event": str(context["registration"].run),
-            "number": context["registration"].num_payments,
+            "event": str(registration.run),
+            "number": registration.num_payments,
         }
-        # Apply custom registration reason if applicable
+
+        # Apply custom registration reason if applicable (only for standard causal)
         _custom_reason_reg(context, invoice, member_real_display_name)
+
+        # Check if bundle membership_fee
+        association_id = registration.run.event.association_id
+        membership_fee = get_membership_fee_for_reg(
+            association_id, registration.member_id, registration.run, registration
+        )
+        if membership_fee and set_membership_fee_pending(
+            registration.member_id,
+            association_id,
+            registration.run.start.year,
+            registration.id,
+        ):
+            text = _("Annual membership fee")
+            invoice.causal += f" - {text} {registration.run.start.year}"
 
     # Handle membership payment type
     elif invoice.typ == PaymentType.MEMBERSHIP:
@@ -190,7 +200,7 @@ def set_data_invoice(
         }
 
     # Apply special code prefix if configured for this association
-    if get_association_config(association_id, "payment_special_code", default_value=False, context=context):
+    if get_association_config(association_id, "payment_special_code", context=context):
         invoice.causal = f"{invoice.cod} - {invoice.causal}"
 
 
@@ -241,6 +251,7 @@ def _custom_reason_reg(context: dict, invoice: PaymentInvoice, member_real: Memb
             registration_question = RegistrationQuestion.objects.get(
                 event=context["registration"].run.event,
                 name__iexact=question_name,
+                applicable=RegistrationQuestionApplicable.REGISTRATION,
             )
 
             # Handle single/multiple choice questions
@@ -275,53 +286,43 @@ def _custom_reason_reg(context: dict, invoice: PaymentInvoice, member_real: Memb
 
 
 def round_up_to_two_decimals(value_to_round: float) -> float:
-    """Round number up to two decimal places.
-
-    Args:
-        value_to_round (float): Number to round
-
-    Returns:
-        float: Number rounded up to 2 decimal places
-
-    """
+    """Round number up to two decimal places."""
     return math.ceil(value_to_round * 100) / 100
 
 
 def update_invoice_gross_fee(
     invoice: PaymentInvoice, amount: Decimal, association_id: int, payment_method: PaymentMethod
-) -> float:
-    """Update invoice with gross amount including payment processing fees.
+) -> Decimal:
+    """Update invoice with gross amount including payment processing fees using Decimal arithmetic."""
+    # Ensure initial amount is Decimal and rounded
+    amount = round_decimal(amount)
 
-    Args:
-        invoice: PaymentInvoice instance to update
-        amount (Decimal): Base amount before fees
-        association_id: Association instance ID
-        payment_method (str): Payment method slug
-
-    """
-    # add fee for paymentmethod
-    amount = float(amount)
     payment_fee_percentage = get_payment_fee(association_id, payment_method.slug)
 
     if payment_fee_percentage is not None:
-        if get_association_config(association_id, "payment_fees_user", default_value=False):
-            # Validate payment fee percentage to prevent division by zero
-            if payment_fee_percentage >= MAX_PAYMENT_FEE_PERCENTAGE:
-                logger.error(
-                    "Invalid payment fee percentage %.2f for association %d (must be < %d)",
-                    payment_fee_percentage,
-                    association_id,
-                    MAX_PAYMENT_FEE_PERCENTAGE,
-                )
-                payment_fee_percentage = 0  # Use 0% fee as fallback
-            else:
-                amount = (amount * MAX_PAYMENT_FEE_PERCENTAGE) / (MAX_PAYMENT_FEE_PERCENTAGE - payment_fee_percentage)
-                amount = round_up_to_two_decimals(amount)
+        fee_pct = Decimal(str(payment_fee_percentage))
 
-        invoice.mc_fee = round_up_to_two_decimals(amount * payment_fee_percentage / MAX_PAYMENT_FEE_PERCENTAGE)
+        if get_association_config(association_id, "payment_fees_user"):
+            if fee_pct >= MAX_PAYMENT_FEE_PERCENTAGE:
+                logger.error(
+                    "Invalid payment fee percentage %s for association %d",
+                    fee_pct,
+                    association_id,
+                )
+                fee_pct = Decimal(0)
+            else:
+                # Calculate gross amount so that net equals the original amount after fee deduction
+                amount = (amount * MAX_PAYMENT_FEE_PERCENTAGE) / (MAX_PAYMENT_FEE_PERCENTAGE - fee_pct)
+                amount = round_decimal(amount)
+
+        # Calculate fee based on the final gross amount
+        invoice.mc_fee = round_decimal(amount * fee_pct / MAX_PAYMENT_FEE_PERCENTAGE)
+    else:
+        invoice.mc_fee = Decimal("0.00")
 
     invoice.mc_gross = amount
     invoice.save()
+
     return amount
 
 
@@ -347,11 +348,9 @@ def _prepare_gateway_form(
     if payment_method_slug in {"wire", "paypal_nf"}:
         # Wire transfer or non-financial PayPal forms
         context["wire_form"] = WireInvoiceSubmitForm(require_receipt=require_receipt)
-        context["wire_form"].set_initial("cod", invoice.cod)
     elif payment_method_slug == "any":
         # Generic payment method form
         context["any_form"] = AnyInvoiceSubmitForm()
-        context["any_form"].set_initial("cod", invoice.cod)
     elif payment_method_slug == "paypal":
         # PayPal gateway integration
         get_paypal_form(request, context, invoice, payment_amount)
@@ -414,8 +413,13 @@ def get_payment_form(
     invoice: PaymentInvoice | None = None
     if invoice_key is not None:
         try:
-            invoice = PaymentInvoice.objects.get(key=invoice_key, status=PaymentStatus.CREATED)
-        except PaymentInvoice.DoesNotExist as e:
+            invoice = PaymentInvoice.objects.get(
+                key=invoice_key,
+                status=PaymentStatus.CREATED,
+                member=context["member"],
+                association_id=association_id,
+            )
+        except ObjectDoesNotExist as e:
             # Invoice not found or invalid, will create new one
             logger.debug("Invoice %s not found or invalid: %s", invoice_key, e)
 
@@ -442,13 +446,45 @@ def get_payment_form(
     context["invoice"] = invoice
 
     # Check if receipt is required for manual payments (applies to all payment types)
-    require_receipt: bool = get_association_config(association_id, "payment_require_receipt", default_value=False)
+    require_receipt: bool = get_association_config(association_id, "payment_require_receipt")
     context["require_receipt"] = require_receipt
 
     # Prepare gateway-specific forms based on selected payment method
     _prepare_gateway_form(
         request, context, invoice, payment_amount, payment_method_slug, require_receipt=require_receipt
     )
+
+
+def auto_process_single_method(
+    request: HttpRequest,
+    form_class: type,
+    payment_type: str,
+    context: dict,
+    amount: Decimal,
+    invoice_key: str | None = None,
+    extra_kwargs: dict | None = None,
+) -> bool:
+    """Auto-process payment when exactly one payment method is available.
+
+    Skips the method-selection form by pre-filling it server-side and calling
+    get_payment_form directly. Only applies to GET requests with a fixed amount.
+
+    Returns:
+        True if auto-processing was triggered (context["invoice"] will be set).
+    """
+    if request.method != "GET":
+        return False
+    if len(context.get("methods", {})) != 1:
+        return False
+    single_method = next(iter(context["methods"]))
+    kwargs: dict = {"context": context}
+    if extra_kwargs:
+        kwargs.update(extra_kwargs)
+    form = form_class({"amount": str(amount), "method": single_method}, **kwargs)
+    if form.is_valid():
+        get_payment_form(request, form, payment_type, context, invoice_key)
+        return True
+    return False
 
 
 def payment_received(invoice: PaymentInvoice) -> bool:
@@ -484,8 +520,14 @@ def payment_received(invoice: PaymentInvoice) -> bool:
 
 def _process_collection(features: dict, invoice: PaymentInvoice) -> None:
     """Process collection item creation for an invoice if it doesn't exist."""
-    # Check if collection item already exists for this invoice
-    if not AccountingItemCollection.objects.filter(inv=invoice).exists():
+    # Use atomic transaction with lock to prevent race conditions
+    with transaction.atomic():
+        invoice = PaymentInvoice.objects.select_for_update().get(pk=invoice.pk)
+
+        # Check does not exists already
+        if AccountingItemCollection.objects.filter(inv=invoice).exists():
+            return
+
         # Create new collection item from invoice data
         collection_item = AccountingItemCollection()
         collection_item.member_id = invoice.member_id
@@ -502,15 +544,20 @@ def _process_collection(features: dict, invoice: PaymentInvoice) -> None:
 
 def _process_donate(features: dict, invoice: PaymentInvoice) -> None:
     """Create donation accounting item and assign badge if enabled."""
-    # Check if donation accounting item already exists for this invoice
-    if not AccountingItemDonation.objects.filter(inv=invoice).exists():
+    # Use atomic transaction with lock to prevent race conditions
+    with transaction.atomic():
+        invoice = PaymentInvoice.objects.select_for_update().get(pk=invoice.pk)
+
+        # Check does not exists already
+        if AccountingItemDonation.objects.filter(inv=invoice).exists():
+            return
+
         # Create and populate new donation accounting item
         accounting_item = AccountingItemDonation()
         accounting_item.member_id = invoice.member_id
         accounting_item.inv = invoice
         accounting_item.value = invoice.mc_gross
         accounting_item.association_id = invoice.association_id
-        accounting_item.inv = invoice
         accounting_item.descr = invoice.causal
         accounting_item.save()
 
@@ -521,8 +568,14 @@ def _process_donate(features: dict, invoice: PaymentInvoice) -> None:
 
 def _process_membership(invoice: PaymentInvoice) -> None:
     """Create membership accounting item if not already exists for the invoice."""
-    # Check if membership item already exists for this invoice
-    if not AccountingItemMembership.objects.filter(inv=invoice).exists():
+    # Use atomic transaction with lock to prevent race conditions
+    with transaction.atomic():
+        invoice = PaymentInvoice.objects.select_for_update().get(pk=invoice.pk)
+
+        # Check does not exists already
+        if AccountingItemMembership.objects.filter(inv=invoice).exists():
+            return
+
         # Create and populate new membership accounting item
         accounting_item = AccountingItemMembership()
         accounting_item.year = timezone.now().year
@@ -534,15 +587,17 @@ def _process_membership(invoice: PaymentInvoice) -> None:
 
 
 def _process_payment(invoice: PaymentInvoice) -> None:
-    """Process a payment from an invoice and create accounting entries.
+    """Process a payment from an invoice and create accounting entries."""
+    # Use atomic transaction with lock to prevent race conditions
+    with transaction.atomic():
+        invoice = PaymentInvoice.objects.select_for_update().get(pk=invoice.pk)
 
-    Args:
-        invoice: Invoice object to process payment for
+        # Check does not exists already
+        if AccountingItemPayment.objects.filter(inv=invoice).exists():
+            return
 
-    """
-    if not AccountingItemPayment.objects.filter(inv=invoice).exists():
         try:
-            registration = Registration.objects.get(pk=invoice.idx)
+            registration = Registration.objects.select_related("run", "run__event").get(pk=invoice.idx)
         except ObjectDoesNotExist:
             logger.exception("Registration not found for invoice %s with idx %s", invoice.pk, invoice.idx)
             return
@@ -554,14 +609,63 @@ def _process_payment(invoice: PaymentInvoice) -> None:
         accounting_item.inv = invoice
         accounting_item.value = invoice.mc_gross
         accounting_item.association_id = invoice.association_id
+
+        check_bundled_membership_fee(accounting_item, invoice, registration)
+
         accounting_item.save()
 
         Registration.objects.filter(pk=registration.pk).update(num_payments=F("num_payments") + 1)
         registration.refresh_from_db()
 
-        # e-invoice emission
         if "e-invoice" in get_association_features(invoice.association_id):
             process_payment(invoice.id)
+
+
+def check_bundled_membership_fee(
+    accounting_item: AccountingItemPayment, invoice: PaymentInvoice, registration: Registration
+) -> None:
+    """Handle the payment of registration fee bundled with membership fee.
+
+    If the invoice reserved a bundled membership fee, split it out now: reduce the registration payment by the
+    membership amount and create the membership fee payment.
+    """
+    association_id = invoice.association_id
+    event_year = registration.run.start.year
+    config_name = membership_fee_pending_config_name(association_id, event_year)
+    pending_config = (
+        MemberConfig.objects.select_for_update()
+        .filter(
+            member_id=invoice.member_id,
+            name=config_name,
+            deleted__isnull=True,
+            value=str(registration.id),
+        )
+        .first()
+    )
+    if not pending_config:
+        return
+
+    membership_fee = get_membership_fee_for_reg(association_id, invoice.member_id, registration.run, registration)
+    if not membership_fee:
+        return
+
+    if invoice.mc_gross < membership_fee:
+        return
+
+    # Reduce the payment for the registration fee
+    accounting_item.value = invoice.mc_gross - membership_fee
+
+    # Create the membership fee payment
+    AccountingItemMembership.objects.get_or_create(
+        member_id=registration.member_id,
+        association_id=association_id,
+        year=event_year,
+        deleted=None,
+        defaults={"value": membership_fee},
+    )
+
+    # Delete pending config
+    pending_config.delete()
 
 
 def _process_fee(fee_percentage: float, invoice: PaymentInvoice) -> None:
@@ -576,28 +680,36 @@ def _process_fee(fee_percentage: float, invoice: PaymentInvoice) -> None:
         invoice: Invoice object containing payment details
 
     """
-    # Create new accounting transaction for the processing fee
-    accounting_transaction = AccountingItemTransaction()
-    accounting_transaction.member_id = invoice.member_id
-    accounting_transaction.inv = invoice
+    # Use atomic transaction to prevent race conditions
+    with transaction.atomic():
+        invoice = PaymentInvoice.objects.select_for_update().get(pk=invoice.pk)
 
-    # Calculate fee amount as percentage of gross invoice value
-    accounting_transaction.value = (float(invoice.mc_gross) * fee_percentage) / 100
-    accounting_transaction.association_id = invoice.association_id
+        # Check if fee transaction already exists
+        if AccountingItemTransaction.objects.filter(inv=invoice, user_burden__isnull=False).exists():
+            return
 
-    # Check if payment fees should be charged to user instead of organization
-    if get_association_config(invoice.association_id, "payment_fees_user", default_value=False):
-        accounting_transaction.user_burden = True
-    accounting_transaction.save()
+        # Create new accounting transaction for the processing fee
+        accounting_transaction = AccountingItemTransaction()
+        accounting_transaction.member_id = invoice.member_id
+        accounting_transaction.inv = invoice
 
-    # For registration payments, link the transaction to the registration
-    if invoice.typ == PaymentType.REGISTRATION:
-        try:
-            registration = Registration.objects.get(pk=invoice.idx)
-            accounting_transaction.registration = registration
-            accounting_transaction.save()
-        except ObjectDoesNotExist:
-            logger.exception("Registration not found for invoice %s with idx %s", invoice.pk, invoice.idx)
+        # Calculate fee amount as percentage of gross invoice value
+        accounting_transaction.value = (float(invoice.mc_gross) * fee_percentage) / 100
+        accounting_transaction.association_id = invoice.association_id
+
+        # Check if payment fees should be charged to user instead of organization
+        if get_association_config(invoice.association_id, "payment_fees_user"):
+            accounting_transaction.user_burden = True
+        accounting_transaction.save()
+
+        # For registration payments, link the transaction to the registration
+        if invoice.typ == PaymentType.REGISTRATION:
+            try:
+                registration = Registration.objects.get(pk=invoice.idx)
+                accounting_transaction.registration = registration
+                accounting_transaction.save()
+            except ObjectDoesNotExist:
+                logger.exception("Registration not found for invoice %s with idx %s", invoice.pk, invoice.idx)
 
 
 def process_payment_invoice_status_change(invoice: PaymentInvoice) -> None:
@@ -636,19 +748,35 @@ def process_refund_request_status_change(refund_request: HttpRequest) -> None:
     Side effects:
         Creates accounting item when refund status changes to PAYED
 
+    Note:
+        Uses idempotency check to prevent duplicate accounting entries
+        if signal fires multiple times.
+
     """
     if not refund_request.pk:
         return
 
     try:
         previous_refund_request = RefundRequest.objects.get(pk=refund_request.pk)
-    except RefundRequest.DoesNotExist:
+    except ObjectDoesNotExist:
         return
 
     if previous_refund_request.status == RefundStatus.PAYED:
         return
 
     if refund_request.status != RefundStatus.PAYED:
+        return
+
+    # Check if accounting item already exists for this refund (idempotency)
+    existing_item = AccountingItemOther.objects.filter(
+        member_id=refund_request.member_id,
+        value=refund_request.value,
+        oth=OtherChoices.REFUND,
+        association_id=refund_request.association_id,
+        descr=f"Delivered refund of {refund_request.value:.2f}",
+    ).exists()
+
+    if existing_item:
         return
 
     accounting_item = AccountingItemOther()
@@ -681,35 +809,61 @@ def process_collection_status_change(collection: Collection) -> None:
     Note:
         Function returns early if collection has no primary key or if the
         previous status was already PAYED to prevent duplicate credits.
+        Uses database-level locking to prevent race conditions.
 
     """
     # Early return if collection hasn't been saved to database yet
     if not collection.pk:
         return
 
-    # Attempt to fetch the previous state of the collection
+    # Use atomic transaction to prevent race conditions
+    with transaction.atomic():
+        # Attempt to fetch the previous state of the collection with row lock
+        try:
+            previous_collection = Collection.objects.select_for_update().get(pk=collection.pk)
+        except ObjectDoesNotExist:
+            # If we can't fetch previous state, safely return to avoid errors
+            return
+
+        # Skip processing if collection was already marked as PAYED
+        if previous_collection.status == CollectionStatus.PAYED:
+            return
+
+        # Only proceed if current status is PAYED (status change occurred)
+        if collection.status != CollectionStatus.PAYED:
+            return
+
+        # Skip credit assignment if no member is associated with the collection
+        if not collection.member_id:
+            return
+
+        # Create accounting credit item for the newly paid collection
+        accounting_item = AccountingItemOther()
+        accounting_item.association_id = collection.association_id
+        accounting_item.member_id = collection.member_id
+        accounting_item.run_id = collection.run_id
+        accounting_item.value = collection.total
+
+        # Set the accounting item type to credit and add descriptive text
+        accounting_item.oth = OtherChoices.CREDIT
+        accounting_item.descr = f"Collection of {collection.organizer}"
+        accounting_item.save()
+
+
+def cleanup_membership_fee_reservation(instance: PaymentInvoice) -> None:
+    """Remove membership fee reservation when a registration invoice is deleted."""
+    if instance.typ != PaymentType.REGISTRATION:
+        return
     try:
-        previous_collection = Collection.objects.get(pk=collection.pk)
-    except Collection.DoesNotExist:
-        # If we can't fetch previous state, safely return to avoid errors
+        registration = Registration.objects.select_related("run", "run__event").get(pk=instance.idx)
+    except Registration.DoesNotExist:
         return
-
-    # Skip processing if collection was already marked as PAYED
-    if previous_collection.status == CollectionStatus.PAYED:
-        return
-
-    # Only proceed if current status is PAYED (status change occurred)
-    if collection.status != CollectionStatus.PAYED:
-        return
-
-    # Create accounting credit item for the newly paid collection
-    accounting_item = AccountingItemOther()
-    accounting_item.association_id = collection.association_id
-    accounting_item.member_id = collection.member_id
-    accounting_item.run_id = collection.run_id
-    accounting_item.value = collection.total
-
-    # Set the accounting item type to credit and add descriptive text
-    accounting_item.oth = OtherChoices.CREDIT
-    accounting_item.descr = f"Collection of {collection.organizer}"
-    accounting_item.save()
+    year = registration.run.start.year
+    association_id = registration.run.event.association_id
+    config_name = membership_fee_pending_config_name(association_id, year)
+    _deleted_count, _ignored = MemberConfig.objects.filter(
+        member_id=instance.member_id,
+        name=config_name,
+        deleted__isnull=True,
+        value=str(registration.id),
+    ).delete()

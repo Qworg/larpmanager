@@ -19,6 +19,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 from __future__ import annotations
 
+import re
 import secrets
 import uuid
 from pathlib import Path
@@ -34,12 +35,14 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
+from django_otp import user_has_device
 
 from larpmanager.cache.config import save_single_config
 from larpmanager.forms.member import MyAuthForm
 from larpmanager.utils.core.base import get_context
 from larpmanager.utils.core.common import welcome_user
 from larpmanager.utils.larpmanager.query import query_index
+from larpmanager.utils.larpmanager.versions import LATEST_AVAILABLE_VERSION
 from larpmanager.utils.services.miscellanea import check_centauri
 from larpmanager.views.larpmanager import lm_home
 from larpmanager.views.user.event import calendar
@@ -48,56 +51,41 @@ if TYPE_CHECKING:
     from django.forms import Form
 
 
-class MyLoginView(LoginView):
+class AssocVersionMixin:
+    """Injects effective_version into template context for unauthenticated views."""
+
+    def get_context_data(self, **kwargs: Any) -> dict:
+        """Inject effective_version and the parent template for unauthenticated views."""
+        context = super().get_context_data(**kwargs)
+        context["effective_version"] = self.request.association.get("assoc_version", LATEST_AVAILABLE_VERSION)
+        # On the main site (association id 0) there is no org chrome/topbar: render
+        # these forms inside the landing layout instead of the org base template.
+        if self.request.association["id"] == 0:
+            context["parent_template"] = "larpmanager/landing/form_base.html"
+        else:
+            context["parent_template"] = "base.html"
+        return context
+
+
+class MyLoginView(AssocVersionMixin, LoginView):
     """View for MyLogin."""
 
     template_name = "registration/login.html"
     authentication_form = MyAuthForm
 
     def form_valid(self, authentication_form: Form) -> HttpResponse:
-        """Handle valid login form submission.
-
-        Processes a successfully validated authentication form by welcoming the user
-        and delegating to the parent class for standard login handling.
-
-        Args:
-            authentication_form (AuthenticationForm): Valid authentication form containing user credentials
-                and authentication state.
-
-        Returns:
-            HttpResponse: HTTP response after successful login processing, typically
-                a redirect to the next page or default landing page.
-
-        Note:
-            This method is called only after form validation has passed. The welcome_user
-            function handles user greeting logic and session setup.
-
-        """
-        # Welcome the authenticated user and set up session state
-        welcome_user(self.request, authentication_form.get_user())
-
-        # Delegate to parent class for standard login flow completion
+        """Handle valid login form submission."""
+        user = authentication_form.get_user()
+        if user_has_device(user):
+            self.request.session["otp_pending_user_id"] = user.pk
+            self.request.session["otp_next_url"] = self.get_success_url()
+            return redirect("otp_verify")
+        welcome_user(self.request, user)
         return super().form_valid(authentication_form)
 
 
 def home(request: HttpRequest, lang: str | None = None) -> HttpResponse:
-    """Handle home page routing based on association.
-
-    Routes users to appropriate home page view depending on their association ID.
-    For association ID 0, shows the main landing page. Otherwise, checks for
-    Centauri-specific handling or displays the calendar view.
-
-    Args:
-        request: HTTP request object containing user and association data
-        lang: Optional language code for localization, defaults to None
-
-    Returns:
-        HttpResponse: Rendered home page, calendar view, or Centauri-specific response
-
-    Note:
-        Association ID 0 is reserved for the main/default organization.
-
-    """
+    """Handle home page routing based on association."""
     # Check if this is the default/main association (ID 0)
     if request.association["id"] == 0:
         return lm_home(request)
@@ -108,37 +96,14 @@ def home(request: HttpRequest, lang: str | None = None) -> HttpResponse:
 
 
 def error_404(request: HttpRequest, exception: Exception) -> HttpResponse:
-    """Handle 404 errors with custom template.
-
-    Renders a custom 404 error page when a requested resource is not found.
-    The exception details are passed to the template context for debugging
-    purposes in development environments.
-
-    Args:
-        request (HttpRequest): The HTTP request object that triggered the 404 error.
-        exception (Exception): The exception instance that caused the 404 error,
-                              typically a Http404 exception.
-
-    Returns:
-        HttpResponse: A rendered HTTP response containing the 404 error page
-                     with the exception context.
-
-    """
+    """Handle 404 errors with custom template."""
     # Render the custom 404 template with exception context
     # The 'exe' variable provides exception details to the template
     return render(request, "404.html", {"exe": exception})
 
 
 def error_500(request: HttpRequest) -> Any:
-    """Handle 500 errors with custom template.
-
-    Args:
-        request: HTTP request object
-
-    Returns:
-        HttpResponse: Rendered 500 error page
-
-    """
+    """Handle 500 errors with custom template."""
     return render(request, "500.html")
 
 
@@ -166,6 +131,12 @@ def after_login(request: HttpRequest, subdomain: str, path: str = "") -> HttpRes
     if not user.is_authenticated:
         return redirect("/login/")
 
+    # In dev/test there is a single host serving every association: switch
+    # association via session instead of building a (non-resolvable) subdomain URL
+    if getattr(request, "enviro", None) in ("dev", "test"):
+        request.session["debug_slug"] = subdomain
+        return redirect(f"/{path}")
+
     # Generate secure random token for cross-subdomain authentication
     token = secrets.token_urlsafe(32)
 
@@ -175,27 +146,20 @@ def after_login(request: HttpRequest, subdomain: str, path: str = "") -> HttpRes
 
     # Build redirect URL with subdomain and token
     base_domain = get_base_domain(request)
-    return redirect(f"https://{subdomain}.{base_domain}/{path}?token={token}")
+    return redirect(f"{request.scheme}://{subdomain}.{base_domain}/{path}?token={token}")
 
 
 def get_base_domain(request: HttpRequest) -> str:
-    """Extract the base domain from the request host.
-
-    Args:
-        request: Django HTTP request object.
-
-    Returns:
-        Base domain (e.g., 'example.com' from 'subdomain.example.com').
-
-    """
+    """Extract the base domain from the request host."""
     host = request.get_host()
-    host_parts = host.split(".")
+    host_without_port, _, port = host.partition(":")
+    host_parts = host_without_port.split(".")
 
     # Use last 2 parts for base domain (domain.tld)
     minimum_parts_for_base_domain = 2
-    if len(host_parts) >= minimum_parts_for_base_domain:
-        return ".".join(host_parts[-2:])
-    return host
+    base_domain = ".".join(host_parts[-2:]) if len(host_parts) >= minimum_parts_for_base_domain else host_without_port
+
+    return f"{base_domain}:{port}" if port else base_domain
 
 
 @require_POST
@@ -204,20 +168,19 @@ def tutorial_query(request: HttpRequest) -> HttpResponse:
     return query_index(request)
 
 
-def _validate_upload_file(file: Any, file_ext: str, *, is_superuser: bool) -> str | None:
+def _validate_upload_file(file: Any, file_ext: str) -> str | None:
     """Validate uploaded file size, extension, and MIME type.
 
     Args:
         file: Uploaded file object
         file_ext: File extension (lowercase with dot)
-        is_superuser: Whether user is a superuser
 
     Returns:
         Error message if validation fails, None if successful
 
     """
-    # Validate file size (skip for superusers)
-    if not is_superuser and file.size > settings.MAX_UPLOAD_SIZE:
+    # Validate file size
+    if file.size > settings.MAX_UPLOAD_SIZE:
         max_size_mb = settings.MAX_UPLOAD_SIZE / (1024 * 1024)
         return f"File size exceeds maximum allowed size of {max_size_mb}MB"
 
@@ -254,7 +217,7 @@ def upload_media(request: HttpRequest) -> JsonResponse:
     - Generates unique filenames to prevent overwriting
     - Stores files in user-specific subdirectories
 
-    Note: Superusers bypass rate limiting and size restrictions for administrative tasks.
+    Note: Superusers bypass rate limiting and total storage limits for administrative tasks.
 
     Args:
         request: HTTP request containing file upload data
@@ -306,7 +269,7 @@ def upload_media(request: HttpRequest) -> JsonResponse:
     file_ext = file.name[file.name.rfind(".") :].lower() if "." in file.name else ""
 
     # Validate file (size, extension, MIME type)
-    error = _validate_upload_file(file, file_ext, is_superuser=is_superuser)
+    error = _validate_upload_file(file, file_ext)
     if error:
         return JsonResponse({"error": error}, status=400)
 
@@ -318,6 +281,11 @@ def upload_media(request: HttpRequest) -> JsonResponse:
     path = default_storage.save(f"tinymce_uploads/{request.association['id']}/{user_id}/{filename}", file)
 
     return JsonResponse({"location": default_storage.url(path)})
+
+
+# Member-config keys are UI flags (slug-shaped); constrain to a safe charset/length
+_MEMBER_CONFIG_NAME_RE = re.compile(r"[a-z0-9_-]{1,60}")
+_MEMBER_CONFIG_VALUE_MAX = 200
 
 
 @require_POST
@@ -346,13 +314,13 @@ def set_member_config(request: HttpRequest) -> JsonResponse:
     """
     # Extract and validate configuration name parameter
     config_name = request.POST.get("name", "").lower()
-    if not config_name:
-        return JsonResponse({"res": "ko", "msg": "empty name"})
+    if not config_name or not _MEMBER_CONFIG_NAME_RE.fullmatch(config_name):
+        return JsonResponse({"res": "ko", "msg": "invalid name"})
 
     # Extract and validate configuration value parameter
     value = request.POST.get("value", "").lower()
-    if not value:
-        return JsonResponse({"res": "ko", "msg": "empty value"})
+    if not value or len(value) > _MEMBER_CONFIG_VALUE_MAX:
+        return JsonResponse({"res": "ko", "msg": "invalid value"})
 
     # Convert string boolean values to actual boolean types
     if value == "true":

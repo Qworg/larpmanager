@@ -191,13 +191,13 @@ Optional registration field allowing participants to add a voluntary contributio
 
 ### Payment Feature
 
-Comprehensive payment management system supporting multiple gateways (PayPal, Stripe, Redsys, Satispay, SumUp). Tracks payment invoices with statuses (Created, Submitted, Confirmed, Checked), transaction fees, and payment methods. Event organizers can view and confirm pending payments via orga_payments/orga_invoices, while organization executives manage all payments through exe_payments/exe_invoices. Includes verification workflow, gross/net calculations, and detailed payment history. Links payments to registrations, memberships, donations, or collections.
+Comprehensive payment management system supporting multiple gateways (PayPal, Stripe, Redsys, Satispay, SumUp). Tracks payment invoices with statuses (Created, Submitted, Confirmed, Checked), transaction fees, and payment methods. Event organizers can view and confirm pending payments via orga_payments, while organization executives manage all payments through exe_payments (and exe_donations, exe_collections, exe_membership for the other invoice types). Includes verification workflow, gross/net calculations, and detailed payment history. Links payments to registrations, memberships, donations, or collections.
 
 ### PDF Generation Feature
 
 Generates professional PDF exports for characters, factions, and event materials. Provides bulk PDF generation with configurable options, individual character sheets (full and friendly versions), relationship sheets, faction sheets, handouts, character gallery, and profile pages. Supports batch regeneration for future event runs, PDF preview/test modes, and ZIP download of multiple PDFs. Organizers configure PDF settings per event including layout, fonts, and included sections. Essential for preparing printed materials for in-person LARP events.
 
-### Player Editor Feature
+### Character Creation Feature
 
 Player-driven character creation and editing system enabling participants to build characters freely within organizer-defined constraints. Supports custom forms, character sheets, element fields, relationships, and ability selections. Organizers configure editing permissions, approval requirements, visibility rules, and external access tokens. Integrates with experience points (PX) system for ability purchases. Provides full character sheet access with contextual data based on permissions.
 
@@ -221,7 +221,7 @@ Tracks writing workflow status using customizable progress steps. Organizers def
 
 The Prologue feature allows organizers to create introductory texts for each act that appear in character sheets. Using `orga_prologue_types`, organizers first define prologue types (e.g., "Act 1", "Act 2"). Then via `orga_prologues`, they create prologue content linked to a type and assign it to characters through a many-to-many relationship. When participants view their character sheet, prologues are displayed ordered by type number, with a warning not to read ahead. The system validates that at least one prologue type exists before allowing prologue creation.
 
-### Publication Feature
+### Promotion Feature
 
 Makes upcoming events visible to external sites through public API endpoints. Organizations enable publication of their event calendar data for aggregation on third-party platforms or event discovery services. Uses PublisherApiKey for secure API access with IP tracking and logging.
 

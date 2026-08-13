@@ -4,13 +4,13 @@
     {% trans "Newsletter" %} - {% trans "Organization" %}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows email lists of users, divided by their expressed preferences regarding newsletter communications" %}
+    {% trans "View newsletter subscriber email lists segmented by language and communication preference" %}
 {% endblock info %}
 {% block content %}
     {% for key, value in lst.items %}
         <hr />
         <h2>{{ key }}</h2>
-        <h4>{% trans "All comunications" %}</h4>
+        <h4>{% trans "All communications" %}</h4>
         <p>
             {% for el in value.a %}
                 {% include "elements/comma.html" with separator="," %}
@@ -24,7 +24,7 @@
                 {{ el }}
             {% endfor %}
         </p>
-        <h4>{% trans "No comunications" %}</h4>
+        <h4>{% trans "No communications" %}</h4>
         <p>
             {% for el in value.n %}
                 {% include "elements/comma.html" with separator="," %}

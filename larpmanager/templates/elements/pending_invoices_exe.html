@@ -1,0 +1,47 @@
+{% load i18n show_tags %}
+{% if pending_invoices %}
+    <div class="alert alert-warning">
+        <h4>{% trans "Payments pending approval" %}</h4>
+        <table class="go_datatable">
+            <thead>
+                <tr>
+                    <th></th>
+                    <th></th>
+                    <th>{% trans "Member" %}</th>
+                    <th>{% trans "Method" %}</th>
+                    <th>{% trans "Amount" %}</th>
+                    <th>{% trans "Reference" %}</th>
+                    <th>{% trans "Details" %}</th>
+                    <th>{% trans "Date" %}</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for inv in pending_invoices %}
+                    <tr>
+                        <td></td>
+                        <td>
+                            <a href="{% url 'exe_invoices_confirm' inv.uuid %}"
+                               class="frame-confirm">
+                                <i class="fa-solid fa-check"></i>
+                                {% trans "Confirm" %}
+                            </a>
+                        </td>
+                        <td>{{ inv.member }}</td>
+                        <td>{{ inv.method }}</td>
+                        <td>{{ inv.mc_gross | format_decimal }}</td>
+                        <td>{{ inv.causal }}</td>
+                        <td>{{ inv.get_details | safe }}</td>
+                        <td>{{ inv.created | date:"d/m/Y" }}</td>
+                        <td>
+                            <a href="{% url 'exe_invoices_delete' inv.uuid %}"
+                               qtip="{% trans "Delete" %}"
+                               class="only_new_v18"><i class="fas fa-trash"></i></a>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <hr />
+{% endif %}

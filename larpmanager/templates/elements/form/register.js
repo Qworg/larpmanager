@@ -134,8 +134,18 @@ $(document).ready(function(){
         // check additionals
         const additionals = $("#id_additionals");
         if (additionals.length && additionals.val()) {
-            const addTickets = additionals.val();
-            sum += price_map["id_ticket"] * addTickets;
+            const addTickets = parseInt(additionals.val());
+            let ticketUnitPrice = price_map["id_ticket"];
+            if (ticketUnitPrice === undefined) {
+                // ticket may use radio buttons (v20+) instead of select
+                const checkedTicket = $('input[name="ticket"]:checked');
+                if (checkedTicket.length) {
+                    ticketUnitPrice = get_price(checkedTicket.closest('label').text());
+                }
+            }
+            if (ticketUnitPrice) {
+                sum += ticketUnitPrice * addTickets;
+            }
         }
 
         $('input:checked').each(function () {
@@ -149,6 +159,10 @@ $(document).ready(function(){
         $('.discount_ac').each(function(index, value) {
            sum -= parseInt($(this).html());
         });
+
+        if (window['texts']['mem_amount']) {
+            sum += window['texts']['mem_amount'];
+        }
 
         total = sum;
 
@@ -172,6 +186,9 @@ $(document).ready(function(){
 
         if (total > 0)
             tx += "<tr class='riep'><td>" + window['texts']['upd'] + ": <b>" + total + "{{ currency_symbol }}</b>.";
+
+        if (window['texts']['mem'] && window['texts']['mem_amount'])
+            tx += " (" + window['texts']['mem'] + " <b>" + window['texts']['mem_amount'] + "{{ currency_symbol }}</b>)";
 
         if (tot_payed > 0)
             tx += " " + "" + window['texts']['alr'] + ": <b>" + tot_payed + "{{ currency_symbol }}</b>.";
@@ -285,8 +302,9 @@ function check_mandatory() {
 
 
 function check_tickets_map() {
-    // get selected ticket
+    // get selected ticket (select or radio group)
     var sel = $('#id_ticket').val();
+    if (!sel) sel = $('input[name="ticket"]:checked').val();
     if( !sel ) sel = 0;
 
     $.each(tickets_map, function(index, value) {
@@ -298,6 +316,8 @@ function check_tickets_map() {
             el.parent().parent().show();
             el.prop('disabled', false);
             el.parent().parent().removeClass('not-required');
+            // restore required attribute if it was originally required
+            if (el.data('was-required')) el.prop('required', true);
         } else {
             // hide the question
             el.parent().parent().hide();
@@ -310,6 +330,9 @@ function check_tickets_map() {
                 else non.prop('selected', true);
                 el.prop('disabled', true);
             }
+            // remove required to prevent browser native validation on hidden fields
+            if (el.prop('required')) el.data('was-required', true);
+            el.prop('required', false);
 
             el.parent().parent().addClass('not-required');
         }

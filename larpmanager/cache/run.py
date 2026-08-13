@@ -28,7 +28,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Count
 
 from larpmanager.cache.button import get_event_button_cache
-from larpmanager.cache.config import get_event_config, save_single_config
+from larpmanager.cache.config import get_event_config, reset_event_parent_cache, save_single_config
 from larpmanager.cache.feature import get_event_features
 from larpmanager.models.event import Event, Run
 from larpmanager.models.form import _get_writing_mapping
@@ -97,23 +97,13 @@ def init_cache_run(association_id: int, event_slug: str) -> int | None:
 
 
 def on_run_pre_save_invalidate_cache(instance: Run) -> None:
-    """Handle run pre-save cache invalidation.
-
-    Args:
-        instance: Run instance being saved
-
-    """
+    """Handle run pre-save cache invalidation."""
     if instance.pk:
         reset_cache_run(instance.event.association_id, instance.get_slug())
 
 
 def on_event_pre_save_invalidate_cache(instance: Event) -> None:
-    """Handle event pre-save cache invalidation.
-
-    Args:
-        instance: Event instance being saved
-
-    """
+    """Handle event pre-save cache invalidation."""
     if instance.pk:
         for run in instance.runs.all():
             reset_cache_run(instance.association_id, run.get_slug())
@@ -170,7 +160,7 @@ def init_cache_config_run(run: Run) -> dict:
             - limitations: Whether to show limitations
             - user_character_max: Maximum characters per user
             - cover_orig: Original cover setting
-            - px_user: User experience points setting
+            - exp_user: User experience points setting
             - show_* keys: Display configuration for character, faction, quest, trait
             - show_addit: Additional display configuration
 
@@ -186,31 +176,31 @@ def init_cache_config_run(run: Run) -> dict:
         "buttons": get_event_button_cache(event_id),
     }
     configs = [
-        ("limitations", "show_limitations", event_id, False),
-        ("user_character_max", "user_character_max", event_id, 0),
-        ("cover_orig", "cover_orig", event_id, False),
-        ("px_user", "px_user", parent_id, False),
+        ("limitations", "show_limitations", event_id),
+        ("user_character_max", "user_character_max", event_id),
+        ("cover_orig", "cover_orig", event_id),
+        ("exp_user", "exp_user", parent_id),
     ]
-    for context_key, config_key, event_id, default in configs:
-        context[context_key] = get_event_config(event_id, config_key, default_value=default, context=context)
+    for context_key, config_key, lookup_event_id in configs:
+        context[context_key] = get_event_config(lookup_event_id, config_key, context=context)
 
     # Process writing system configurations for enabled features
     mapping = _get_writing_mapping()
-    for config_name in ["character", "faction", "quest", "trait"]:
+    for config_name in ["character", "faction", "guild", "quest", "trait"]:
         # Skip if this writing feature is not enabled for the event
         if mapping[config_name] not in event_features:
             continue
 
         # Parse and convert list configuration to dictionary lookup
         config_display_dict = {}
-        config_value = run.get_config("show_" + config_name, default_value="[]")
+        config_value = run.get_config("show_" + config_name)
         for element in ast.literal_eval(config_value):
             config_display_dict[element] = 1
         context["show_" + config_name] = config_display_dict
 
     # Process additional display configurations
     additional_display_dict = {}
-    additional_config_value = run.get_config("show_addit", default_value="[]")
+    additional_config_value = run.get_config("show_addit")
     for element in ast.literal_eval(additional_config_value):
         additional_display_dict[element] = 1
     context["show_addit"] = additional_display_dict
@@ -219,26 +209,18 @@ def init_cache_config_run(run: Run) -> dict:
 
 
 def on_run_post_save_reset_config_cache(instance: Run) -> None:
-    """Handle run post-save cache reset.
-
-    Args:
-        instance: Run instance that was saved
-
-    """
+    """Handle run post-save cache reset."""
     if instance.pk:
         reset_cache_config_run(instance)
 
 
 def on_event_post_save_reset_config_cache(instance: Event) -> None:
-    """Handle event post-save cache reset.
-
-    Args:
-        instance: Event instance that was saved
-
-    """
+    """Handle event post-save cache reset."""
     if instance.pk:
         for run in instance.runs.all():
             reset_cache_config_run(run)
+
+        reset_event_parent_cache(instance.pk)
 
 
 def update_visible_factions(event: Event) -> None:

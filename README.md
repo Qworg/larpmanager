@@ -2,7 +2,7 @@
 
 LarpManager is a free platform to manage live-action roleplaying (LARP) events.
 
-If you don’t want to self-host, you can use the free hosted instance at:
+If you don't want to self-host, you can use the free hosted instance at:
 https://larpmanager.com
 
 ---
@@ -25,10 +25,10 @@ https://larpmanager.com
 
 LarpManager is distributed under a **dual license** model:
 
-- **Open Source (AGPLv3)** — Free to use under the terms of the AGPLv3 license.
+- **Open Source (AGPLv3)**: Free to use under the terms of the AGPLv3 license.
   If you host your own instance, you must publish any modifications and include a visible link to [larpmanager.com](https://larpmanager.com) on every page of the interface.
 
-- **Commercial License** — Allows private modifications and removes the attribution requirement.
+- **Commercial License**: Allows private modifications and removes the attribution requirement.
   For details or licensing inquiries, contact [commercial@larpmanager.com](mailto:commercial@larpmanager.com).
 
 Refer to the `LICENSE` file for full terms.
@@ -54,6 +54,8 @@ Now create a super user:
 ```
 docker exec -it larpmanager python manage.py createsuperuser
 ```
+
+> **Security recommendation**: It is strongly recommended to enable two-factor authentication (TOTP) for all superuser and staff accounts on the Django admin backend (`/admin/`). After your first login, go to **Home / OTP TOTP devices** in the admin panel and configure a TOTP device using an authenticator app (e.g. Google Authenticator, Authy, Bitwarden). Once a device is enrolled, the next admin login will require OTP verification.
 
 Go to `http://127.0.0.1:8264/admin/larpmanager/association/`, and create your Organization. Put as values only:
 - Name: you should get it;
@@ -176,6 +178,88 @@ sudo systemctl enable docker
 
 ---
 
+## Portainer deployment
+
+[Portainer](https://www.portainer.io/) lets you deploy and manage the stack through a web UI instead of the CLI.
+
+### Prerequisites
+
+Portainer must already be installed and running. If not, follow the
+[official install guide](https://docs.portainer.io/start/install-ce/server/docker/linux).
+
+### Deploy the stack
+
+1. In Portainer, go to **Stacks -> Add stack**
+2. Name it `larpmanager`
+3. Choose **Repository** and point it to your local clone of this repo, or use **Web editor** and paste the contents of `docker-compose.yml`
+4. Scroll down to **Environment variables** and add the values listed in `.env.example` (see [Environment variables](#environment-variables) for descriptions)
+5. Click **Deploy the stack**
+
+Portainer pulls images, builds the app container, and starts all services.
+
+### First-time setup
+
+Once the stack is running, open a console into the app container:
+
+1. Portainer -> **Containers** -> click `larpmanager` -> **Console** -> **Connect**
+2. Run:
+
+```
+python manage.py createsuperuser
+```
+
+3. Browse to `http://your-server-ip:8264/admin/larpmanager/association/` and create your organization (Name, URL identifier `def`, Logo, Main mail -- leave everything else empty).
+
+### Verify everything is working
+
+- **App responds**: browse to `http://your-server-ip:8264/` -- you should see the LarpManager login page
+- **Admin works**: browse to `http://your-server-ip:8264/admin/` and log in with the superuser you created
+- **Static files load**: CSS and images render correctly (served by nginx via the `static_data` volume)
+- **Media uploads work**: upload a logo in the association admin; it should save without errors
+
+### Expose on a specific IP or change the port
+
+By default nginx binds port 8264 on all interfaces (`0.0.0.0`). To restrict to a specific IP, edit the `nginx` ports line in the stack editor:
+
+```yaml
+nginx:
+  ports:
+    - "192.168.1.50:8264:80"   # only this IP accepts connections
+```
+
+Replace `192.168.1.50` with your server's LAN or public IP. To use a different host port, change the first number (e.g. `"80:80"`).
+
+### Use a reverse proxy for a domain name
+
+To serve on a domain with standard ports (80/443), run a reverse proxy as a separate Portainer stack (nginx, Traefik, Caddy, etc.). Example minimal nginx config:
+
+```nginx
+server {
+    listen 80;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://localhost:8264;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+With this in place, remove the `ports` section from the `nginx` service in the LarpManager stack so it is no longer exposed directly.
+
+### Day-to-day operations via Portainer
+
+| Task | How |
+|------|-----|
+| View logs | Containers -> `larpmanager` -> Logs |
+| Run management commands | Containers -> `larpmanager` -> Console |
+| Update to latest code | Pull repo on host, then Console: `scripts/deploy.sh` |
+| Daily automation | Console: `python manage.py automate` (schedule via host cron or Portainer scheduled jobs) |
+| Backup data | Volumes -> download `pgdata` and `media_data` |
+
+---
+
 ## Local Setup
 
 The typical, recommended setup is to have:
@@ -194,25 +278,30 @@ For a Debian-like system: install the following packages:
 # On Ubuntu 24.04 LTS
 sudo apt install python3.12 python3.12-venv python3.12-dev python3-pip redis-server git \
   postgresql postgresql-contrib libpq-dev nodejs build-essential libxmlsec1-dev \
-  libxmlsec1-openssl libavif16 libcairo2-dev pkg-config
+  libxmlsec1-openssl libcairo2-dev pkg-config
 
 # On Ubuntu 22.04 or older (requires deadsnakes PPA for Python 3.12)
 sudo add-apt-repository ppa:deadsnakes/ppa
 sudo apt update
 sudo apt install python3.12 python3.12-venv python3.12-dev python3-pip redis-server git \
   postgresql postgresql-contrib libpq-dev nodejs build-essential libxmlsec1-dev \
-  libxmlsec1-openssl libavif16 libcairo2-dev pkg-config
+  libxmlsec1-openssl libcairo2-dev pkg-config
+```
+
+Install uv (fast Python package manager):
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 Create and activate a virtual environment:
 ```bash
-python3.12 -m venv venv
-source venv/bin/activate
+uv venv
+source .venv/bin/activate
 ```
 
 Install Python dependencies:
 ```bash
-pip install -r requirements.txt
+uv pip install -r pyproject.toml
 ```
 
 Install and activate LFS to handle big files:
@@ -305,7 +394,7 @@ Thanks in advance for contributing! Here's the steps:
 
 2. Install and activate `pre-commit`:
    ```bash
-   pip install pre-commit
+   uv pip install pre-commit
    pre-commit install
    ```
 
@@ -359,7 +448,7 @@ Thanks in advance for contributing! Here's the steps:
 ### Guidelines
 
 Pull Requests should include **only the minimal changes necessary** to achieve their goal.
-Avoid non-essential changes such as refactoring, renaming, or reformatting — **unless explicitly approved beforehand**.
+Avoid non-essential changes such as refactoring, renaming, or reformatting, **unless explicitly approved beforehand**.
 
 This helps keep code reviews focused, reduces merge conflicts, and maintains a clean commit history.
 If you believe a refactor is needed, please open an issue or start a discussion first to get approval.

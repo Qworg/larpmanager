@@ -23,19 +23,25 @@ import logging
 from datetime import timedelta
 from typing import Any
 
+import jwt
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
-from django.http import Http404, HttpRequest, HttpResponse, HttpResponseRedirect
+from django.http import Http404, HttpRequest, HttpResponse, HttpResponseForbidden, HttpResponseRedirect
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+from larpmanager.cache.association_text import get_association_text
+from larpmanager.cache.config import get_association_config
 from larpmanager.forms.miscellanea import (
     HelpQuestionForm,
     ShuttleServiceEditForm,
     ShuttleServiceForm,
 )
+from larpmanager.models.access import RoleInvite
+from larpmanager.models.association import AssociationTextType
+from larpmanager.models.member import MembershipStatus, get_user_membership
 from larpmanager.models.miscellanea import (
     Album,
     AlbumUpload,
@@ -161,17 +167,7 @@ def help_attachment(request: HttpRequest, attachment_uuid: str) -> HttpResponseR
 
 
 def handout_ext(request: HttpRequest, event_slug: str, code: str) -> HttpResponse:
-    """Generate and return a PDF for a specific event handout.
-
-    Args:
-        request: HTTP request object
-        event_slug: Event slug identifier
-        code: Handout code identifier
-
-    Returns:
-        PDF file response with the handout content
-
-    """
+    """Generate and return a PDF for a specific event handout."""
     # Retrieve event/run context and fetch handout by code
     context = get_event_context(request, event_slug)
     context["handout"] = get_object_or_404(Handout, event=context["event"], cod=code)
@@ -332,7 +328,7 @@ def workshop_answer(request: HttpRequest, event_slug: str, module_uuid: str) -> 
     # Check if user has already completed this workshop module
     completed = [el.pk for el in context["member"].workshops.select_related().all()]
     if context["workshop"].pk in completed:
-        messages.success(request, _("Workshop already done!"))
+        messages.success(request, _("You have already completed this workshop module."))
         return redirect("workshops", event_slug=context["run"].get_slug())
 
     # Build list of questions for the current workshop module
@@ -462,3 +458,97 @@ def shuttle_edit(request: HttpRequest, shuttle_uuid: Any) -> Any:
         "larpmanager/general/writing.html",
         {"form": form, "name": _("Modify shuttle request")},
     )
+
+
+_ALLOWED_ALGORITHMS = {"HS256", "HS384", "HS512"}
+_SSO_TOKEN_TTL_SECONDS = 300
+
+
+@login_required
+def app_integration_redirect(request: HttpRequest) -> HttpResponse:
+    """Generate a signed JWT and redirect to the configured external application.
+
+    Reads the shared secret, algorithm, and redirect URL from the association config,
+    builds a short-lived JWT containing the user's identity, and redirects to the
+    external application as ``<redirect_url>?token=<jwt>``.
+    """
+    context = get_context(request)
+    check_association_feature(request, context, "app_integration")
+
+    association_id = context["association_id"]
+
+    secret = get_association_config(association_id, "app_integration_secret")
+    redirect_url = get_association_config(association_id, "app_integration_redirect_url")
+    algorithm = get_association_config(association_id, "app_integration_algorithm")
+
+    if not secret or not redirect_url:
+        return HttpResponseForbidden("App integration is not fully configured.")
+
+    if algorithm not in _ALLOWED_ALGORITHMS:
+        algorithm = "HS256"
+
+    now = timezone.now()
+    payload = {
+        "sub": request.user.email,
+        "email": request.user.email,
+        "name": str(request.user.member.display_member),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(seconds=_SSO_TOKEN_TTL_SECONDS)).timestamp()),
+    }
+
+    token = jwt.encode(payload, secret, algorithm=algorithm)
+
+    separator = "&" if "?" in redirect_url else "?"
+    return redirect(f"{redirect_url}{separator}token={token}")
+
+
+@login_required
+def role_invite_redeem(request: HttpRequest, token: str) -> HttpResponse:
+    """Allow a logged-in user to redeem a role invitation."""
+    invite = get_object_or_404(RoleInvite, token=token, deleted__isnull=True)
+
+    if invite.redeemed_by:
+        messages.error(request, _("This invitation has already been redeemed."))
+        return redirect("home")
+
+    if invite.created < timezone.now() - timedelta(days=7):
+        messages.error(request, _("This invitation has expired."))
+        return redirect("home")
+
+    role = invite.role()
+    member = request.user.member
+
+    # Bind the invite to its intended recipient
+    if invite.email and member.email.lower() != invite.email.lower():
+        messages.error(request, _("This invitation was sent to a different email address."))
+        return redirect("home")
+
+    membership = get_user_membership(member, invite.association_id)
+    needs_consent = membership.status == MembershipStatus.EMPTY
+
+    if request.method == "POST":
+        if needs_consent and not request.POST.get("data_sharing_consent"):
+            messages.error(request, _("You must consent to data sharing to accept this invitation."))
+        else:
+            if invite.event_role:
+                invite.event_role.members.add(member)
+            else:
+                invite.association_role.members.add(member)
+            invite.redeemed_by = member
+            invite.redeemed_at = timezone.now()
+            invite.save()
+            messages.success(request, _("You have been added to the role: %(role)s") % {"role": role.name})
+            if invite.event:
+                return redirect("manage", event_slug=invite.event.slug)
+            return redirect("manage")
+
+    context = get_context(request)
+    context["invite"] = invite
+    context["role"] = role
+    context["needs_consent"] = needs_consent
+    if needs_consent:
+        context["privacy_text"] = get_association_text(
+            invite.association_id, AssociationTextType.PRIVACY, member.language
+        )
+
+    return render(request, "larpmanager/manage/role_invite_redeem.html", context)

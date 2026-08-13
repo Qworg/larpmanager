@@ -19,13 +19,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 
 from django.urls import path
+from django.views.generic.base import RedirectView
 
 from larpmanager.views import larpmanager as views_lm
 
 urlpatterns = [
     path(
+        "get-started/",
+        views_lm.get_started,
+        name="get_started",
+    ),
+    path(
         "join/",
-        views_lm.join,
+        RedirectView.as_view(pattern_name="get_started", permanent=True),
         name="join",
     ),
     path(
@@ -65,7 +71,7 @@ urlpatterns = [
     ),
     path(
         "demo/",
-        views_lm.demo,
+        RedirectView.as_view(pattern_name="get_started", permanent=True),
         name="demo",
     ),
     path(
@@ -89,12 +95,17 @@ urlpatterns = [
         name="lm_list",
     ),
     path(
+        "lm/newsletter/",
+        views_lm.lm_newsletter,
+        name="lm_newsletter",
+    ),
+    path(
         "lm/payments/",
         views_lm.lm_payments,
         name="lm_payments",
     ),
     path(
-        "lm/payments/<str:run_uuid>",
+        "lm/payments/<str:run_uuid>/",
         views_lm.lm_payments_confirm,
         name="lm_payments_confirm",
     ),
@@ -114,12 +125,12 @@ urlpatterns = [
         name="lm_reset",
     ),
     path(
-        "redirect/<path:path>",
+        "redirect/<path:path>/",
         views_lm.redr,
         name="redr",
     ),
     path(
-        "activate/<slug:feature_slug>/next/<path:path>",
+        "activate/<slug:feature_slug>/next/<path:path>/",
         views_lm.activate_feature_association,
         name="activate_feature_assoc",
     ),
@@ -129,7 +140,7 @@ urlpatterns = [
         name="activate_feature_assoc",
     ),
     path(
-        "<slug:event_slug>/activate/<slug:feature_slug>/next/<path:path>",
+        "<slug:event_slug>/activate/<slug:feature_slug>/next/<path:path>/",
         views_lm.activate_feature_event,
         name="activate_feature_event",
     ),
@@ -144,6 +155,11 @@ urlpatterns = [
         name="toggle_sidebar",
     ),
     path(
+        "demo/hint/dismiss/",
+        views_lm.demo_hint_dismiss,
+        name="demo_hint_dismiss",
+    ),
+    path(
         "discord/",
         views_lm.discord,
         name="discord",
@@ -152,6 +168,11 @@ urlpatterns = [
         "donate/",
         views_lm.donate,
         name="donate",
+    ),
+    path(
+        "assistant/ask/",
+        views_lm.chat_ask,
+        name="chat_ask",
     ),
     path(
         "ticket/",
@@ -169,6 +190,11 @@ urlpatterns = [
         name="debug_mail",
     ),
     path(
+        "debug/send_digests/",
+        views_lm.debug_send_digests,
+        name="debug_send_digests",
+    ),
+    path(
         "debug/",
         views_lm.debug_slug,
         name="debug_slug",
@@ -182,5 +208,25 @@ urlpatterns = [
         "debug/user/<int:member_id>/",
         views_lm.debug_user,
         name="debug_user",
+    ),
+    path(
+        "lm/clean/<slug:association_slug>/",
+        views_lm.lm_clean,
+        name="lm_clean",
+    ),
+    path(
+        "lm/event/delete/<str:run_uuid>/",
+        views_lm.lm_events_delete,
+        name="lm_events_delete",
+    ),
+    path(
+        "lm/event/delete/<str:run_uuid>/wait/",
+        views_lm.lm_events_delete_wait,
+        name="lm_events_delete_wait",
+    ),
+    path(
+        "lm/clean/<slug:association_slug>/wait/",
+        views_lm.lm_clean_wait,
+        name="lm_clean_wait",
     ),
 ]

@@ -3,10 +3,8 @@
 {% block title %}
     {% trans "Inflows" %} - {% trans "Organization" %}
 {% endblock title %}
-{% block info %}
-    {% trans "This page summarizes all revenue items recorded in the system" %}
-{% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
+    {% include "elements/table/header.html" %}
     {% include "elements/paginate.html" %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}

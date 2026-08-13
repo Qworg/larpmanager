@@ -19,6 +19,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings as conf_settings
@@ -26,6 +27,7 @@ from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 
 from larpmanager.cache.feature import get_event_features
+from larpmanager.cache.registration import get_active_registrations, get_registration_tickets
 from larpmanager.models.accounting import (
     AccountingItemPayment,
     PaymentChoices,
@@ -74,25 +76,12 @@ def round_to_nearest_cent(amount: float) -> float:
 
 
 def get_registration_accounting_cache_key(run_id: int) -> str:
-    """Generate cache key for registration accounting data.
-
-    Args:
-        run_id: id of Run instance
-
-    Returns:
-        str: Cache key for registration accounting data
-
-    """
+    """Generate cache key for registration accounting data."""
     return f"registration_accounting_{run_id}"
 
 
 def clear_registration_accounting_cache(run_id: int) -> None:
-    """Reset registration accounting cache for a run.
-
-    Args:
-        run_id: id of Run instance to reset cache for
-
-    """
+    """Reset registration accounting cache for a run."""
     cache_key = get_registration_accounting_cache_key(run_id)
     cache.delete(cache_key)
 
@@ -121,9 +110,8 @@ def _get_accounting_context(run: Run, member_filter: int | None = None) -> tuple
         features = {}
 
     # Get all registration tickets for this event, ordered by price (highest first)
-    registration_tickets_by_id = {}
-    for ticket in RegistrationTicket.objects.filter(event_id=run.event_id).order_by("-price"):
-        registration_tickets_by_id[ticket.id] = ticket
+    all_tickets = sorted(get_registration_tickets(run.event_id), key=lambda t: t["price"], reverse=True)
+    registration_tickets_by_id = {ticket["id"]: ticket for ticket in all_tickets}
 
     # Build cache for token/credit payments if feature is enabled
     payment_cache_by_member = {}
@@ -161,24 +149,7 @@ def _get_accounting_context(run: Run, member_filter: int | None = None) -> tuple
 
 
 def get_special_payment_types(features: dict[str, int]) -> list[str]:
-    """Get list of special payment types based on enabled features.
-
-    Returns payment type choices for tokens and/or credits if the
-    corresponding features are enabled in the provided features dictionary.
-
-    Args:
-        features: Dictionary of enabled feature names mapped to their IDs
-
-    Returns:
-        List of PaymentChoices constants for enabled special payment types.
-        Empty list if neither tokens nor credits features are enabled.
-
-    Example:
-        >>> features = {"tokens": 1, "credits": 2, "payment": 3}
-        >>> get_special_payment_types(features)
-        [PaymentChoices.TOKEN, PaymentChoices.CREDIT]
-
-    """
+    """Get list of special payment types based on enabled features."""
     payment_types = []
     if "tokens" in features:
         payment_types.append(PaymentChoices.TOKEN)
@@ -263,7 +234,9 @@ def refresh_member_accounting_cache(run: Run, member_id: int) -> None:
         return
 
     # Fetch all active registrations for this member in the current run
-    member_registrations = Registration.objects.filter(run=run, member_id=member_id, cancellation_date__isnull=True)
+    member_registrations = Registration.objects.filter(
+        run=run, member_id=member_id, cancellation_date__isnull=True, pending=False
+    )
 
     # Handle case where member has no active registrations
     if not member_registrations.exists():
@@ -303,6 +276,8 @@ def get_registration_accounting_cache(run: Run) -> dict:
 
     Retrieves cached registration accounting data for the given run. If the cache
     is empty or expired, regenerates the data and stores it in cache with a 1-day timeout.
+    Uses a lock-based pattern to prevent cache stampede when multiple requests try to
+    regenerate the cache simultaneously.
 
     Args:
         run (Run): The Run instance to get accounting data for.
@@ -314,14 +289,40 @@ def get_registration_accounting_cache(run: Run) -> dict:
     """
     # Generate the cache key for this specific run
     cache_key = get_registration_accounting_cache_key(run.id)
+    lock_key = f"{cache_key}_lock"
 
     # Attempt to retrieve cached data
     cached_data = cache.get(cache_key)
 
-    # If cache miss, regenerate and store the data
+    # If cache miss, regenerate with lock to prevent stampede
     if cached_data is None:
-        cached_data = update_registration_accounting_cache(run)
-        cache.set(cache_key, cached_data, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
+        # Try to acquire lock with 30-second timeout
+        lock_acquired = cache.add(lock_key, "locked", timeout=30)
+
+        if lock_acquired:
+            # This process acquired the lock - regenerate the cache
+            try:
+                cached_data = update_registration_accounting_cache(run)
+                cache.set(cache_key, cached_data, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
+            finally:
+                # Always release the lock
+                cache.delete(lock_key)
+        else:
+            # Another process is regenerating - retry multiple times
+            max_retries = 10
+            for _attempt in range(max_retries):
+                # Wait briefly for regeneration to complete
+                time.sleep(0.1)
+
+                # Check if cache is now available
+                cached_data = cache.get(cache_key)
+                if cached_data is not None:
+                    break
+
+            # If still no data after retries, regenerate without lock as fallback
+            if cached_data is None:
+                cached_data = update_registration_accounting_cache(run)
+                cache.set(cache_key, cached_data, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
 
     return cached_data
 
@@ -343,8 +344,8 @@ def update_registration_accounting_cache(run: Run) -> dict[int, dict[str, str]]:
     # Get accounting context data (features, tickets, pricing)
     features, registration_tickets, cached_accounting_info_per_registration = _get_accounting_context(run)
 
-    # Filter for active registrations only (exclude cancelled ones)
-    active_registrations = Registration.objects.filter(run=run, cancellation_date__isnull=True)
+    # Filter for active registrations only (exclude cancelled and pending ones)
+    active_registrations = get_active_registrations(run)
     accounting_cache = {}
 
     # Process each registration to calculate accounting data
@@ -409,10 +410,10 @@ def _calculate_registration_accounting(
     if abs(accounting_data["remaining"]) < max_rounding:
         accounting_data["remaining"] = 0
 
-    # Add ticket pricing breakdown if ticket exists
+    # Add ticket pricing
     if registration.ticket_id in reg_tickets:
         ticket = reg_tickets[registration.ticket_id]
-        accounting_data["ticket_price"] = ticket.price
+        accounting_data["ticket_price"] = ticket["price"]
         # Add custom payment amount to base ticket price
         if registration.pay_what:
             accounting_data["ticket_price"] += registration.pay_what

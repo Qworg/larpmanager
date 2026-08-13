@@ -21,6 +21,7 @@
 from datetime import datetime, timedelta
 from typing import Any
 
+from django.conf import settings as conf_settings
 from django.db.models import Count
 from django.utils import timezone
 
@@ -34,15 +35,7 @@ from larpmanager.models.registration import Registration, TicketTier
 
 
 def get_users_data(member_ids: Any) -> Any:
-    """Get user display names and emails for deadline notifications.
-
-    Args:
-        member_ids (list): List of member IDs
-
-    Returns:
-        list: List of (display_name, email) tuples
-
-    """
+    """Get user display names and emails for deadline notifications."""
     return [
         (str(member), member.email)
         for member in Member.objects.filter(pk__in=member_ids)
@@ -52,16 +45,7 @@ def get_users_data(member_ids: Any) -> Any:
 
 
 def get_membership_fee_year(association_id: int, year: Any = None) -> set:
-    """Get set of member IDs who paid membership fee for given year.
-
-    Args:
-        association_id (int): Association ID
-        year (int, optional): Year to check, defaults to current year
-
-    Returns:
-        set: Set of member IDs who paid fee for the year
-
-    """
+    """Get set of member IDs who paid membership fee for given year."""
     if not year:
         year = timezone.now().year
     return set(
@@ -96,7 +80,7 @@ def check_run_deadlines(runs: list[Run]) -> list:
         members_by_run[run.id] = []
 
     # Query active registrations
-    registration_query = Registration.objects.filter(run_id__in=run_ids, cancellation_date__isnull=True)
+    registration_query = Registration.objects.filter(run_id__in=run_ids, cancellation_date__isnull=True, pending=False)
     registration_query = registration_query.exclude(ticket__tier=TicketTier.WAITING)
     for registration in registration_query:
         registration_ids.append(registration.id)
@@ -104,7 +88,7 @@ def check_run_deadlines(runs: list[Run]) -> list:
         registrations_by_run[registration.run_id].append(registration)
 
     # Get tolerance setting
-    tolerance = int(get_association_config(runs[0].event.association_id, "deadlines_tolerance", default_value="30"))
+    tolerance = int(get_association_config(runs[0].event.association_id, "deadlines_tolerance"))
 
     # Check membership feature
     association_id = runs[0].event.association_id
@@ -289,9 +273,13 @@ def deadlines_payment(deadline_violations: Any, event_features: Any, registratio
     if "payment" not in event_features:
         return
 
+    # Skip alert setting if quota is negligible
+    if registration.quota <= conf_settings.MAX_ROUNDING_TOLERANCE:
+        return
+
     if registration.deadline < -tolerance_days:
         deadline_violations["pay_del"].append(registration.member_id)
-    elif registration.deadline < 0:
+    elif registration.deadline <= 0:
         deadline_violations["pay"].append(registration.member_id)
 
 
@@ -312,7 +300,7 @@ def deadlines_casting(collect: Any, features: Any, player_ids: Any, run: Any) ->
     if "casting" not in features:
         return
 
-    casting_characters_required = get_event_config(run.event_id, "casting_characters", default_value=1)
+    casting_characters_required = get_event_config(run.event_id, "casting_characters")
     # members that already have a character
     members_with_characters = (
         Registration.objects.filter(run=run)

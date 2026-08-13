@@ -5,16 +5,17 @@
 {% if edit_uuid %}
 var edit_uuid = '{{ edit_uuid }}';
 {% else %}
-var edit_uuid = "0";
+var edit_uuid = "";
 {% endif %}
 var type = '{{ type }}';
 
 var timeout = 15 * 1000;
 var post_url = '{{ request.path }}';
+var hasNetworkError = false;
 
 function submitForm(auto) {
     return new Promise(function(resolve, reject) {
-        if (edit_uuid == "0") {
+        if (!edit_uuid) {
             $.toast({
                 text: 'Not available for new elements',
                 showHideTransition: 'slide',
@@ -32,7 +33,7 @@ function submitForm(auto) {
         }
 
         var formData = $('form').serialize() + "&ajax=1";
-        if (edit_uuid && edit_uuid != "0") {
+        if (edit_uuid) {
             formData += "&edit_uuid=" + edit_uuid + "&type=" + type + "&token=" + token;
         }
 
@@ -56,7 +57,17 @@ function submitForm(auto) {
                 console.log('Response is not valid JSON, treating as successful save');
             }
 
-            if (!auto) {
+            if (hasNetworkError) {
+                hasNetworkError = false;
+                $.toast({
+                    text: 'Saved!',
+                    showHideTransition: 'slide',
+                    icon: 'success',
+                    position: 'top-center',
+                    textAlign: 'center',
+                    hideAfter: 1000
+                });
+            } else if (!auto) {
                 $.toast({
                     text: 'Saved!',
                     showHideTransition: 'slide',
@@ -83,7 +94,8 @@ function submitForm(auto) {
                 resolve(true);
             }
         }).fail(function(xhr) {
-            // console.log('Auto-save failed:', xhr.status, xhr.statusText, xhr.responseText);
+            console.log('Auto-save failed:', xhr.status, xhr.statusText);
+            hasNetworkError = true;
             $.toast({
                 text: 'Network or server error',
                 showHideTransition: 'slide',
@@ -123,7 +135,7 @@ function setUpAutoSave(key) {
 
 window.addEventListener('DOMContentLoaded', function() {
     {% if auto_save %}
-    if (edit_uuid && edit_uuid != "0") {
+    if (edit_uuid) {
         $(function() {
             submitForm(true);
         });
@@ -139,7 +151,7 @@ window.addEventListener('DOMContentLoaded', function() {
 
     {% for question in form.questions %}
         {% if question.typ == 'e' %}
-            setUpAutoSave('id_q{{ question.id }}');
+            setUpAutoSave('id_que_{{ question.uuid }}');
         {% elif question.typ == 'text' %}
             setUpAutoSave('id_text');
         {% elif question.typ == 'teaser' %}

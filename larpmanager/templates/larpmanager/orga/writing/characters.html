@@ -3,15 +3,12 @@
 {% block title %}
     {% trans "Characters" %} - {{ event.name }}
 {% endblock title %}
-{% block info %}
-    {% trans "This page shows the characters of the event" %}
-{% endblock info %}
 {% block nav_fields %}
     {% if user_character_max %}
         <a href="#" class="table_toggle" tog='player'>{% trans "Player" %}</a>
     {% endif %}
-    {% if features.campaign and event.parent %}
-        <a href="#" class="table_toggle" tog='attended'>{% trans "Attended" %}</a>
+    {% if features.campaign and event.parent and not campaign_split_registration %}
+        <a href="#" class="table_toggle" tog='attended'>{% trans "Attending" %}</a>
     {% endif %}
     {% if features.campaign %}
         <a href="#" class="table_toggle" tog='active'>{% trans "Active" %}</a>
@@ -19,8 +16,8 @@
     {% if user_character_approval %}
         <a href="#" class="table_toggle" tog='status'>{% trans "Status" %}</a>
     {% endif %}
-    {% if features.px %}
-        <a href="#" class="table_toggle" tog='px'>{% trans "XP" %}</a>
+    {% if features.experience %}
+        <a href="#" class="table_toggle" tog='px'>{% trans "Experience" %}</a>
     {% endif %}
     {% include "elements/writing/questions_nav.html" %}
     {% if features.plot %}
@@ -43,8 +40,8 @@
     {% if user_character_max %}
         <th class="player">{% trans "Player" %}</th>
     {% endif %}
-    {% if features.campaign and event.parent %}
-        <th class="attended">{% trans "Attended" %}</th>
+    {% if features.campaign and event.parent and not campaign_split_registration %}
+        <th class="attended">{% trans "Attending" %}</th>
     {% endif %}
     {% if features.campaign %}
         <th class="active">{% trans "Active" %}</th>
@@ -52,145 +49,226 @@
     {% if user_character_approval %}
         <th class="status">{% trans "Status" %}</th>
     {% endif %}
-    {% if features.px %}
-        <th class="px">{% trans "XP tot" %}</th>
-        <th class="px">{% trans "XP used" %}</th>
-        <th class="px">{% trans "XP avail" %}</th>
+    {% if features.experience %}
+        {% for sys in exp_systems %}
+            <th class="px">{% blocktrans with name=sys.name %}{{ name }} total{% endblocktrans %}</th>
+            <th class="px">{% blocktrans with name=sys.name %}{{ name }} used{% endblocktrans %}</th>
+            <th class="px">{% blocktrans with name=sys.name %}{{ name }} available{% endblocktrans %}</th>
+        {% endfor %}
     {% endif %}
     {% include "elements/writing/questions_header.html" %}
     {% if features.plot %}
         <th class="plots">{% trans "Plots" %}</th>
-        <th class="stats">
+        <th class="stats stats-plots">
             <i class="fa fa-hashtag"></i> {% trans "Plots" %}
         </th>
         {% if writing_unimportant %}
-            <th class="stats">
+            <th class="stats stats-plots">
                 <i class="fa fa-hashtag"></i> {% trans "Important" %}
             </th>
         {% endif %}
     {% endif %}
     {% if features.prologue %}
         <th class="prologues">{% trans "Prologues" %}</th>
-        <th class="stats">
+        <th class="stats stats-prologues">
             <i class="fa fa-hashtag"></i> {% trans "Prologues" %}
         </th>
     {% endif %}
     {% if features.relationships %}
         <th class="relationship_list">{% trans "Relationships" %}</th>
-        <th class="stats">
+        <th class="stats stats-relationship_list">
             <i class="fa fa-hashtag"></i> {% trans "Relationships" %}
         </th>
         {% if writing_unimportant %}
-            <th class="stats">
+            <th class="stats stats-relationship_list">
                 <i class="fa fa-hashtag"></i> {% trans "Important" %}
             </th>
+        {% endif %}
+        {% if writing_relationship_tags %}
+            {% for tag in relationship_tags %}
+                <th class="stats stats-relationship_list">
+                    <i class="fa fa-hashtag"></i> {{ tag.name }}
+                </th>
+            {% endfor %}
         {% endif %}
     {% endif %}
     {% if features.speedlarp %}
         <th class="speedlarp">{% trans "Speedlarp" %}</th>
-        <th class="stats">
+        <th class="stats stats-speedlarp">
             <i class="fa fa-hashtag"></i> {% trans "Speedlarp" %}
         </th>
     {% endif %}
+    {% if not features.relationships %}
+        <th class="stats stats-always">
+            <i class="fa fa-hashtag"></i> {% trans "Connections" %}
+        </th>
+    {% endif %}
+    <th></th>
 {% endblock thead %}
-{% block tbody %}
-    {% for el in list %}
-        <tr id="{{ el.uuid }}">
-            <td>
-                <a href="{% url 'orga_characters_edit' run.get_slug el.uuid %}"
-                   qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
-            </td>
-            <td class="editable" question_uuid="{{ name_que_uuid }}">{{ el }}</td>
-            <td>
-                <a href="{% url 'orga_characters_view' run.get_slug el.uuid %}"
-                   qtip="{% trans "Read" %}"><i class="fa-solid fa-book-open"></i></a>
-                <a href="{% url 'orga_characters_versions' run.get_slug el.uuid %}"
-                   qtip="{% trans "Versions" %}"><i class="fas fa-file-alt"></i></a>
-                <a href="{% url 'character' run.get_slug el.uuid %}"
-                   qtip="{% trans "Gallery" %}"><i class="fa-solid fa-eye"></i></a>
-                {% if writing_external_access %}
-                    <a href="{% url 'character_external' run.get_slug el.access_token %}"
-                       qtip="{% trans "External access" %}"><i class="fa-solid fa-key"></i></a>
-                {% endif %}
-                {% if features.print_pdf %}
-                    <a href="{% url 'orga_characters_friendly_pdf' run.get_slug el.uuid %}"
-                       download
-                       qtip="PDF"><i class="fa-solid fa-file-pdf"></i></a>
-                {% endif %}
-            </td>
-            {% if user_character_max %}<td class="player">{{ el.player.show_nick }}</td>{% endif %}
-            {% if features.campaign and event.parent %}
-                <td class="attended">
-                    {% if el.has_registration %}<i class="fa fa-check"></i>{% endif %}
-                </td>
-            {% endif %}
-            {% if features.campaign %}
-                <td class="active">
-                    {% if el.addit.inactive != "True" %}<i class="fa fa-check"></i>{% endif %}
-                </td>
-            {% endif %}
-            {% if user_character_approval %}<td class="status">{{ el.get_status_display }}</td>{% endif %}
-            {% if features.px %}
-                <td class="px">{{ el.addit | get:'px_tot' }}</td>
-                <td class="px">{{ el.addit | get:'px_used' }}</td>
-                <td class="px">{{ el.addit | get:'px_avail' }}</td>
-            {% endif %}
-            {% include "elements/writing/questions_body.html" %}
-            {% if features.plot %}
-                <td class="plots dot_links">
-                    {% for p in el.plot_rels.list %}
-                        {% include "elements/comma.html" %}
-                        <a href="{% url 'orga_plots_edit' run.get_slug p.0 %}">{{ p.1 }}</a>
-                    {% endfor %}
-                </td>
-                <td class="stats">{{ el.plot_rels.count }}</td>
-                {% if writing_unimportant %}<td class="stats">{{ el.plot_rels.important }}</td>{% endif %}
-            {% endif %}
-            {% if features.prologue %}
-                <td class="prologues dot_links">
-                    {% for p in el.prologue_rels.list %}
-                        {% include "elements/comma.html" %}
-                        <a href="{% url 'orga_prologues_edit' run.get_slug p.0 %}">{{ p.1 }}</a>
-                    {% endfor %}
-                </td>
-                <td class="stats">{{ el.prologue_rels.count }}</td>
-            {% endif %}
-            {% if features.relationships %}
-                <td class="relationship_list dot_links">
-                    {% for rel in el.relationships_rels.list %}
-                        {% include "elements/comma.html" %}
-                        <a href="{% url 'orga_characters_edit' run.get_slug rel.0 %}">{{ rel.1 }}</a>
-                    {% endfor %}
-                </td>
-                <td class="stats">{{ el.relationships_rels.count }}</td>
-                {% if writing_unimportant %}<td class="stats">{{ el.relationships_rels.important }}</td>{% endif %}
-            {% endif %}
-            {% if features.speedlarp %}
-                <td class="speedlarp dot_links">
-                    {% for p in el.speedlarp_rels.list %}
-                        {% include "elements/comma.html" %}
-                        <a href="{% url 'orga_speedlarps_edit' run.get_slug p.0 %}">{{ p.1 }}</a>
-                    {% endfor %}
-                </td>
-                <td class="stats">{{ el.speedlarp_rels.count }}</td>
-            {% endif %}
-        </tr>
-    {% endfor %}
-{% endblock tbody %}
-{% block additional %}
-    {% if form_questions %}
-        <br />
-        <p id="show">
-            <b>{% trans "Load list" %}</b>
-        </p>
-        <div class="fields">
-            {% for key, que in form_questions.items %}
-                {% if que.typ == 's' or que.typ == 'm' %}
-                    <a href="#" class="load_email_que" key="{{ key }}">{{ que.name | truncatechars:25 }}</a>
-                    <a href="#" class="my_toggle hide" tog='email_que_{{ key }}'>hidden</a>
-                {% endif %}
+{% block tr_content %}
+    <td>
+        <a href="{% url 'orga_characters_edit' run.get_slug el.uuid %}"
+           qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
+    </td>
+    <td class="editable" question_uuid="{{ name_que_uuid }}">
+        {% if writing_number %}#{{ el.number }}{% endif %}
+        {{ el.name }}
+    </td>
+    <td>
+        <a href="{% url 'orga_characters_view' run.get_slug el.uuid %}"
+           qtip="{% trans "Read" %}"><i class="fa-solid fa-book-open"></i></a>
+        <a href="{% url 'orga_characters_versions' run.get_slug el.uuid %}"
+           qtip="{% trans "Versions" %}"><i class="fas fa-file-alt"></i></a>
+        <a href="{% url 'character' run.get_slug el.uuid %}"
+           qtip="{% trans "Gallery" %}"><i class="fa-solid fa-eye"></i></a>
+        {% if writing_external_access %}
+            <a href="{% url 'character_external' run.get_slug el.access_token %}"
+               qtip="{% trans "External access" %}"><i class="fa-solid fa-key"></i></a>
+        {% endif %}
+        {% if features.print_pdf %}
+            <a href="{% url 'orga_characters_friendly_pdf' run.get_slug el.uuid %}"
+               download
+               qtip="PDF"><i class="fa-solid fa-file-pdf"></i></a>
+        {% endif %}
+    </td>
+    {% if user_character_max %}<td class="player">{{ el.player_display }}</td>{% endif %}
+    {% if features.campaign and event.parent and not campaign_split_registration %}
+        <td class="attended">
+            {% if el.has_registration %}<i class="fa fa-check"></i>{% endif %}
+        </td>
+    {% endif %}
+    {% if features.campaign %}
+        <td class="active">
+            {% if el.addit.inactive != "True" %}<i class="fa fa-check"></i>{% endif %}
+        </td>
+    {% endif %}
+    {% if user_character_approval %}<td class="status">{{ el.get_status_display }}</td>{% endif %}
+    {% if features.experience %}
+        {% if exp_systems %}
+            {% for sys in exp_systems %}
+                <td class="px">{{ el.addit|get:sys.tot_key }}</td>
+                <td class="px">{{ el.addit|get:sys.used_key }}</td>
+                <td class="px">{{ el.addit|get:sys.avail_key }}</td>
             {% endfor %}
+        {% else %}
+            <td class="px">{{ el.addit | get:'exp_tot' }}</td>
+            <td class="px">{{ el.addit | get:'exp_used' }}</td>
+            <td class="px">{{ el.addit | get:'exp_avail' }}</td>
+        {% endif %}
+    {% endif %}
+    {% include "elements/writing/questions_body.html" %}
+    {% if features.plot %}
+        <td class="plots dot_links">
+            {% for p in el.plot_rels.list %}
+                {% include "elements/comma.html" %}
+                <a href="{% url 'orga_plots_edit' run.get_slug p.0 %}">{{ p.1 }}</a>
+            {% endfor %}
+        </td>
+        <td class="stats">{{ el.plot_rels.count }}</td>
+        {% if writing_unimportant %}<td class="stats">{{ el.plot_rels.important }}</td>{% endif %}
+    {% endif %}
+    {% if features.prologue %}
+        <td class="prologues dot_links">
+            {% for p in el.prologue_rels.list %}
+                {% include "elements/comma.html" %}
+                <a href="{% url 'orga_prologues_edit' run.get_slug p.0 %}">{{ p.1 }}</a>
+            {% endfor %}
+        </td>
+        <td class="stats">{{ el.prologue_rels.count }}</td>
+    {% endif %}
+    {% if features.relationships %}
+        <td class="relationship_list dot_links">
+            {% for rel in el.relationships_rels.list %}
+                {% include "elements/comma.html" %}
+                <a href="{% url 'orga_characters_edit' run.get_slug rel.0 %}">{{ rel.1 }}</a>
+            {% endfor %}
+        </td>
+        <td class="stats">{{ el.relationships_rels.count }}</td>
+        {% if writing_unimportant %}<td class="stats">{{ el.relationships_rels.important }}</td>{% endif %}
+        {% if writing_relationship_tags %}
+            {% for tag in relationship_tags %}
+                <td class="stats">{{ el.relationship_tag_counts|get:tag.uuid|default:0 }}</td>
+            {% endfor %}
+        {% endif %}
+    {% endif %}
+    {% if features.speedlarp %}
+        <td class="speedlarp dot_links">
+            {% for p in el.speedlarp_rels.list %}
+                {% include "elements/comma.html" %}
+                <a href="{% url 'orga_speedlarps_edit' run.get_slug p.0 %}">{{ p.1 }}</a>
+            {% endfor %}
+        </td>
+        <td class="stats">{{ el.speedlarp_rels.count }}</td>
+    {% endif %}
+    {% if not features.relationships %}<td class="stats">{{ el.addit.text_links|default:"0" }}</td>{% endif %}
+    <td>
+        <a href="{% url 'orga_characters_delete' run.get_slug el.uuid %}"
+           qtip="{% trans "Delete" %}"
+           class="only_new_v18"><i class="fas fa-trash"></i></a>
+    </td>
+{% endblock tr_content %}
+{% block additional %}
+    {% if user_character_approval and character_status_choices or form_questions %}
+        <br />
+        <div class="fields load_list">
+            {% if user_character_approval and character_status_choices %}
+                <a href="#" class="my_toggle" tog='char_status'>{% trans "Status" %}</a>
+            {% endif %}
+            {% if form_questions %}
+                {% for key, que in form_questions.items %}
+                    {% if que.typ == 's' or que.typ == 'm' %}
+                        <a href="#" class="load_email_que" key="{{ key }}">{{ que.name | truncatechars:25 }}</a>
+                        <a href="#" class="my_toggle hide" tog='email_que_{{ key }}'>hidden</a>
+                    {% endif %}
+                {% endfor %}
+            {% endif %}
         </div>
+    {% endif %}
+    {% if user_character_approval and character_status_choices %}
+        <div class="char_status hide">
+            <br />
+            <h4>{% trans "Status" %}</h4>
+            <table>
+                <thead>
+                    <tr>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Count" %}</th>
+                        <th>{% trans "Characters" %}</th>
+                        <th>{% trans "Players" %}</th>
+                        <th>{% trans "Emails" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for status_val, status_label in character_status_choices %}
+                        <tr>
+                            <td>{{ status_label }}</td>
+                            <td>{{ character_status_counts|get:status_val|default:"0" }}</td>
+                            <td>
+                                {% for el in list %}
+                                    {% if el.status == status_val and el.player %}
+                                        {% if writing_number %}#{{ el.number }}{% endif %}
+                                        {{ el }}
+                                        {% if el.title %}- {{ el.title }}{% endif %}
+                                    {% endif %}
+                                {% endfor %}
+                            </td>
+                            <td>
+                                {% for el in list %}
+                                    {% if el.status == status_val and el.player %}{{ el.player_display }}{% endif %}
+                                {% endfor %}
+                            </td>
+                            <td>
+                                {% for el in list %}
+                                    {% if el.status == status_val and el.player %}{{ el.player.email }}{% endif %}
+                                {% endfor %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% endif %}
+    {% if form_questions %}
         {% for key, que in form_questions.items %}
             {% if que.typ == 's' or que.typ == 'm' %}
                 <div class="email_que_{{ key }} hide">
@@ -199,10 +277,11 @@
                     <table>
                         <thead>
                             <tr>
-                                <th>Option</th>
-                                <th>Count</th>
-                                <th>Emails</th>
-                                <th>Names</th>
+                                <th>{% trans "Option" %}</th>
+                                <th>{% trans "Count" %}</th>
+                                <th>{% trans "Characters" %}</th>
+                                <th>{% trans "Players" %}</th>
+                                <th>{% trans "Emails" %}</th>
                             </tr>
                         </thead>
                         <tbody>

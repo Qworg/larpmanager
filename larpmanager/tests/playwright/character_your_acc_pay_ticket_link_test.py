@@ -30,7 +30,22 @@ from typing import Any
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, expect_normalized, go_to, login_orga, submit_confirm
+from larpmanager.tests.utils import (
+    _select2_search_and_pick,
+    _wait_lm_ready,
+    char_dual_pick,
+    click_and_wait_question,
+    expand_options,
+    expect_normalized,
+    fill_date,
+    get_modal_iframe,
+    go_to,
+    login_orga,
+    save_modal,
+    sidebar,
+    submit_confirm,
+    submit_register,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -52,21 +67,22 @@ def test_character_your_accounting_pay_ticket_link(pw_page: Any) -> None:
 
 
 def check_direct_ticket_link(page: Any, live_server: Any) -> None:
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     # Setup NPC ticket
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Tickets ").click()
+    page.get_by_role("link", name=re.compile(r"^Tickets ")).click()
     page.locator("#id_ticket_npc").check()
     submit_confirm(page)
 
     # Create ticket
     page.get_by_role("link", name="Tickets").first.click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_tier").select_option("n")
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("Staff")
-    page.locator("#id_visible").uncheck()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_tier").select_option("n")
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("Staff")
+    edit_iframe.locator("#id_visible").uncheck()
+    save_modal(page, edit_iframe)
 
     # Test 1: Direct ticket link bypasses "registration not yet open"
     ticket_link_bypasses_not_open(page, live_server)
@@ -81,38 +97,31 @@ def check_direct_ticket_link(page: Any, live_server: Any) -> None:
 def ticket_link_bypasses_not_visible(live_server, page):
     # Test signup (shouldn't be visible)
     go_to(page, live_server, "/test/")
-    page.get_by_role("link", name="Registration is open!").click()
-    page.get_by_label("Ticket (*)").click()
-    expect(page.get_by_label("Ticket (*)")).to_have_value("u1")
-    expect(page.get_by_label("Ticket (*)")).to_match_aria_snapshot(
-        '- combobox "Ticket (*)":\n  - option "Standard" [selected]'
-    )
+    page.get_by_role("link", name=re.compile(r"Registrations? (is|are) open")).first.click()
+
+    page.locator('label[for="id_ticket_0"]').click()
+    expect(page.locator("#id_ticket_0")).to_be_checked()
 
     # Test direct link
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     page.get_by_role("link", name="Tickets").first.click()
+    _wait_lm_ready(page)
     with page.expect_popup() as popup_info:
         page.locator('[id="u2"]').get_by_role("link", name="Signup link").click()
     new_page = popup_info.value
-    expect(new_page.get_by_label("Ticket (*)")).to_have_value("u2")
-    new_page.get_by_role("button", name="Continue").click()
-    submit_confirm(new_page)
+    expect(new_page.locator("#id_ticket_1")).to_be_checked()
+    submit_register(new_page)
     go_to(page, live_server, "/test/")
-    expect_normalized(page, page.locator("#one"), "Registration confirmed (Staff)")
+    expect_normalized(page, page.locator("#one"), "Your registration for this event has been confirmed (Staff)")
 
 
 def ticket_link_bypasses_not_open(page: Any, live_server: Any) -> None:
     """Test that direct ticket link works when registration is not yet open."""
-    # Set registration to open in the future
-    go_to(page, live_server, "/test/manage")
-    page.get_by_role("link", name="Features").first.click()
-    page.get_by_role("checkbox", name="Opening date").check()
-    submit_confirm(page)
 
     page.get_by_role("link", name="Event").first.click()
-    page.locator("#id_form2-registration_open").fill("2099-12-31")
-    just_wait(page)
-    page.locator("#id_form2-registration_open").click()
+    expand_options(page)
+    page.locator('label[for="id_form2-registration_status_3"]').click()
+    fill_date(page, "#id_form2-registration_open", "2099-12-31")
     submit_confirm(page)
 
     # Verify normal registration is blocked
@@ -120,53 +129,49 @@ def ticket_link_bypasses_not_open(page: Any, live_server: Any) -> None:
     expect_normalized(page, page.locator("body"), "The registrations to the event Test Larp are not yet open!")
 
     # Get direct ticket link and verify it still works
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     page.get_by_role("link", name="Tickets").first.click()
 
     # Navigate to direct ticket link - should work despite registration not open
+    _wait_lm_ready(page)
     with page.expect_popup() as popup_info:
         page.locator('[id="u2"]').get_by_role("link", name="Signup link").click()
     new_page = popup_info.value
+
     # Should show registration form, not "not open" message
-    expect(new_page.get_by_label("Ticket (*)")).to_have_value("u2")
-    expect(new_page.get_by_label("Ticket (*)")).to_be_visible()
+    expect(new_page.locator('#id_ticket_1')).to_be_checked()
+    expect(new_page.get_by_text("Ticket (*)")).to_be_visible()
     new_page.close()
 
     # Reset registration open date
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     page.get_by_role("link", name="Event").first.click()
-    page.locator("#id_form2-registration_open").fill("")
-    just_wait(page)
-    page.locator("#id_form2-registration_open").click()
+    expand_options(page)
+    page.locator('label[for="id_form2-registration_status_1"]').click()
     submit_confirm(page)
 
-    go_to(page, live_server, "/test/manage")
-    page.get_by_role("link", name="Features").first.click()
-    page.get_by_role("checkbox", name="Opening date").uncheck()
-    submit_confirm(page)
 
 
 def ticket_link_bypasses_external_link(page: Any, live_server: Any) -> None:
     """Test that NPC/Staff ticket links bypass external registration link redirect."""
-    # Enable external registration link feature
-    go_to(page, live_server, "/test/manage")
-    page.get_by_role("link", name="Features").first.click()
-    page.get_by_role("checkbox", name="External registration").check()
-    submit_confirm(page)
 
     # Set an external registration link
-    page.get_by_role("link", name="Event").click()
-    page.locator("#id_form1-register_link").click()
-    page.locator("#id_form1-register_link").fill("https://google.com")
+    go_to(page, live_server, "/test/manage/")
+    page.get_by_role("link", name="Event").first.click()
+    expand_options(page)
+    page.locator('label[for="id_form2-registration_status_2"]').click()
+    page.locator("#id_form2-register_link").click()
+    page.locator("#id_form2-register_link").fill("https://google.com")
     submit_confirm(page)
 
-    # Verify normal registration redirects to external link
-    go_to(page, live_server, "/test/register/")
+    # Verify normal registration redirects to external link (normal go_to to avoid lm check)
+    page.goto(live_server + "/test/register/")
+
     # Should be redirected to external site (we can't follow, so just check we're not on our site)
     expect(page).to_have_url(re.compile(r"google\.com"))
 
     # Go back and test direct ticket link
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
     page.get_by_role("link", name="Tickets").first.click()
 
     # Navigate to direct NPC ticket link - should bypass external redirect
@@ -174,71 +179,73 @@ def ticket_link_bypasses_external_link(page: Any, live_server: Any) -> None:
         page.locator('[id="u2"]').get_by_role("link", name="Signup link").click()
     new_page = popup_info.value
     # Should show registration form, not redirect to external site
-    expect(new_page.get_by_label("Ticket (*)")).to_have_value("u2")
-    expect(new_page.get_by_label("Ticket (*)")).to_be_visible()
+    expect(new_page.locator('#id_ticket_1')).to_be_checked()
+    expect(new_page.get_by_text("Ticket (*)")).to_be_visible()
     # Verify we're still on our domain
     expect(new_page).to_have_url(re.compile(r"(localhost|127\.0\.0\.1|testserver)"))
     new_page.close()
 
     # Clean up: disable external registration link
-    page.get_by_role("link", name="Event").click()
-    page.locator("#id_form1-register_link").fill("")
-    submit_confirm(page)
-
-    go_to(page, live_server, "/test/manage")
-    page.get_by_role("link", name="Features").first.click()
-    page.get_by_role("checkbox", name="External registration").uncheck()
+    go_to(page, live_server, "/test/manage/")
+    page.get_by_role("link", name="Event").first.click()
+    expand_options(page)
+    page.locator('label[for="id_form2-registration_status_1"]').click()
     submit_confirm(page)
 
 
 def check_character_your_link(page: Any, live_server: Any) -> None:
     # Test character your link
-    go_to(page, live_server, "/test/manage")
-    page.get_by_role("link", name="Features").first.click()
+    go_to(page, live_server, "/test/manage/")
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Characters").check()
     submit_confirm(page)
-    page.get_by_role("link", name="Registrations").click()
-    page.get_by_role("link", name="").click()
-    page.get_by_role("cell", name="Show available characters").click()
-    page.get_by_text("Please enter 2 or more").click()
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("te")
-    page.locator(".select2-results__option").first.click()
-    submit_confirm(page)
+    sidebar(page, "Registrations")
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    _select2_search_and_pick(edit_iframe.get_by_role("searchbox"), edit_iframe, "te")
+    save_modal(page, edit_iframe)
+
+    # Checkout member data
+    page.locator(".fa-eye").click()
+    page.locator("#lm-modal-content").wait_for(state="visible")
+    expect_normalized(page, page.locator("#lm-modal-content"), "Admin Test Email: orga@test.it")
+
 
     # Go to your character, check result
     go_to(page, live_server, "/test/character/your")
-    expect_normalized(page, page.locator("#banner"), "Test Character - Test Larp")
+    expect_normalized(page, page.locator("body"), "Test Character - Test Larp")
     expect_normalized(page, page.locator("#one"), "Player: Admin Test Presentation Test Teaser Text Test Text")
 
 
 def check_accounting_pay_link(page: Any, live_server: Any) -> None:
     # Test acc pay link
-    go_to(page, live_server, "/test/manage")
+    go_to(page, live_server, "/test/manage/")
 
     # Set ticket price
     page.get_by_role("link", name="Tickets").first.click()
-    page.locator('[id="u2"]').get_by_role("link", name="").click()
-    page.locator("#id_price").click()
-    page.locator("#id_price").press("Home")
-    page.locator("#id_price").fill("100.00")
-    submit_confirm(page)
+    page.locator('[id="u2"]').locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_price").click()
+    edit_iframe.locator("#id_price").press("Home")
+    edit_iframe.locator("#id_price").fill("100.00")
+    save_modal(page, edit_iframe)
 
     go_to(page, live_server, "/test/")
-    page.get_by_role("link", name="please fill in your profile.").click()
+    page.get_by_role("link", name="Fill in the missing information in your profile").click()
     page.get_by_role("checkbox", name="Authorisation").check()
     submit_confirm(page)
-    page.get_by_role("link", name="Registration confirmed (Staff)").click()
-    page.get_by_role("button", name="Continue").click()
-    submit_confirm(page)
+    go_to(page, live_server, "/test/")
+    expect_normalized(page, page.locator("#one"), "Your registration for this event has been confirmed (Staff)")
+    go_to(page, live_server, "/test/register/")
+    submit_register(page)
 
     # set up payments
     go_to(page, live_server, "/manage")
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Payments", exact=True).check()
     submit_confirm(page)
     page.get_by_role("checkbox", name="Wire").check()
-    just_wait(page)
+    page.locator("#id_wire_descr").wait_for(state="visible")
     page.locator("#id_wire_descr").click()
     page.locator("#id_wire_descr").fill("sadsadsa")
     page.locator("#id_wire_fee").click()
@@ -248,17 +255,22 @@ def check_accounting_pay_link(page: Any, live_server: Any) -> None:
     page.locator("#id_wire_iban").click()
     page.locator("#id_wire_iban").fill("dsasadas")
     page.locator("#id_wire_bic").fill("test iban")
+    page.get_by_role("checkbox", name="Freeform").check()
+    page.locator("#id_any_descr").click()
+    page.locator("#id_any_descr").fill("freeeeee")
+    page.locator("#id_any_fee").click()
+    page.locator("#id_any_fee").fill("1")
     submit_confirm(page)
 
     # check payments
     go_to(page, live_server, "/test/")
-    page.get_by_role("link", name="to confirm it proceed with").click()
+    page.get_by_role("link", name=re.compile(r"A payment of 100€ is due within 8 days to confirm your registration")).click()
 
     go_to(page, live_server, "/accounting/pay/test/")
     expect_normalized(page, page.locator("#one"), "Choose the payment method: Wire sadsadsa")
 
     go_to(page, live_server, "/accounting/pay/test/wire/")
-    expect_normalized(page, page.locator("#one"), "You are about to make a payment of: 100 €. Follow the steps below:")
+    expect_normalized(page, page.locator("#one"), "You are about to make a payment of: 100 €.")
 
     go_to(page, live_server, "/accounting/pay/test/paypal/")
     expect_normalized(page, page.locator("#one"), "Choose the payment method: Wire sadsadsa")
@@ -266,122 +278,119 @@ def check_accounting_pay_link(page: Any, live_server: Any) -> None:
 
 def check_factions_indep_campaign(page: Any, live_server: Any) -> None:
     # Add first event factions
-    go_to(page, live_server, "/test/manage")
-    page.get_by_role("link", name="Features").first.click()
+    go_to(page, live_server, "/test/manage/")
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Factions").check()
     submit_confirm(page)
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("primaaa")
-    page.get_by_role("list").click()
-    page.get_by_role("searchbox").fill("tes")
-    page.get_by_role("option", name="#1 Test Character").click()
-    page.get_by_role("checkbox", name="After confirmation, add").check()
-    submit_confirm(page)
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("tranver")
-    page.get_by_role("list").click()
-    page.get_by_role("searchbox").fill("te")
-    page.get_by_role("option", name="#1 Test Character").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("primaaa")
+    char_dual_pick(edit_iframe, "tes", "Test Character")
+    save_modal(page, edit_iframe)
+
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("tranver")
+    char_dual_pick(edit_iframe, "te", "Test Character")
+    save_modal(page, edit_iframe)
 
     # check result
-    page.locator("#one").get_by_role("link", name="Characters").click()
+    click_and_wait_question(page, "Characters")
     expect_normalized(page, page.locator("#one"), "primaaa Primary Test Character tranver Transversal Test Character")
 
     # add second event in campaing
     go_to(page, live_server, "/manage")
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Campaign").check()
     submit_confirm(page)
-    page.get_by_role("link", name="Events").click()
-    page.get_by_role("link", name="New event").click()
-    page.locator("#id_form1-name").click()
-    page.locator("#id_form1-name").fill("second")
-    page.locator("#select2-id_form1-parent-container").click()
-    page.get_by_role("searchbox").fill("te")
-    page.get_by_role("option", name="Test Larp").click()
 
-    page.locator("#id_form2-start").fill("2045-06-11")
-    just_wait(page)
-    page.locator("#id_form2-start").click()
-    page.locator("#id_form2-end").fill("2045-06-13")
-    just_wait(page)
-    page.locator("#id_form2-end").click()
-    submit_confirm(page)
+    sidebar(page, "Events")
+    page.get_by_role("link", name="New event").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_form1-name").click()
+    edit_iframe.locator("#id_form1-name").fill("second")
+    edit_iframe.locator("#select2-id_form1-parent-container").click()
+    edit_iframe.get_by_role("searchbox").fill("te")
+    edit_iframe.get_by_role("option", name="Test Larp").click()
+    fill_date(edit_iframe, "#id_form2-start", "2045-06-11")
+    fill_date(edit_iframe, "#id_form2-end", "2045-06-13")
+    save_modal(page, edit_iframe)
 
     # check we have for now the same factions
-    page.get_by_role("link", name="Features").first.click()
-    page.get_by_role("link", name="Factions").click()
+    sidebar(page, "Factions")
     expect_normalized(page, page.locator("#one"), "primaaa Primary tranver Transversal")
 
     # set independ factions, check
     page.get_by_role("link", name="Configuration").first.click()
-    page.get_by_role("link", name="Campaign ").click()
+    page.get_by_role("link", name=re.compile(r"^Campaign ")).click()
     page.locator("#id_campaign_faction_indep").check()
     submit_confirm(page)
-    page.get_by_role("link", name="Factions").click()
+    sidebar(page, "Factions")
     expect_normalized(page, page.locator("#one"), "No elements are currently available")
 
     # add new factions
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").press("CapsLock")
-    page.locator("#id_name").fill("PRIMAAAA")
-    page.get_by_role("list").click()
-    page.get_by_role("searchbox").fill("TE")
-    page.get_by_role("option", name="#1 Test Character").click()
-    page.get_by_role("checkbox", name="After confirmation, add").check()
-    submit_confirm(page)
-    page.locator("#id_typ").select_option("t")
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("TRANVERSA")
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("TE")
-    page.get_by_role("option", name="#1 Test Character").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").press("CapsLock")
+    edit_iframe.locator("#id_name").fill("PRIMAAAA")
+    char_dual_pick(edit_iframe, "TE", "Test Character")
+    save_modal(page, edit_iframe)
+
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("TRANVERSA")
+    char_dual_pick(edit_iframe, "TE", "Test Character")
+    save_modal(page, edit_iframe)
 
     # check situation in second event
-    page.locator("#one").get_by_role("link", name="Characters").click()
+    click_and_wait_question(page, "Characters")
     expect_normalized(page, page.locator("#one"), "PRIMAAAA Primary Test Character TRANVERSA Transversal Test Character")
-    page.locator("#orga_characters").get_by_role("link", name="Characters").click()
-    page.get_by_role("link", name="Faction", exact=True).click()
-    expect_normalized(page, page.locator("#one"), "#1 Test Character Test Teaser Test Text PRIMAAAA TRANVERSA")
+
+    sidebar(page, "Characters")
+    click_and_wait_question(page, "Faction")
+    expect_normalized(page, page.locator("#one"), "Test Character Test Teaser Test Text PRIMAAAA TRANVERSA")
 
     # check situation in first event
-    go_to(page, live_server, "/test/manage")
-    page.get_by_role("link", name="Factions").click()
-    page.locator("#one").get_by_role("link", name="Characters").click()
+    go_to(page, live_server, "/test/manage/")
+
+    sidebar(page, "Factions")
+    click_and_wait_question(page, "Characters")
     expect_normalized(page, page.locator("#one"), "primaaa Primary Test Character tranver Transversal Test Character")
-    page.locator("#orga_characters").get_by_role("link", name="Characters").click()
-    page.get_by_role("link", name="Faction", exact=True).click()
-    expect_normalized(page, page.locator("#one"), "#1 Test Character Test Teaser Test Text primaaa tranver")
+
+    sidebar(page, "Characters")
+    click_and_wait_question(page, "Faction")
+    expect_normalized(page, page.locator("#one"), "Test Character Test Teaser Test Text primaaa tranver")
 
 
 def accounting_refund(page: Any, live_server: Any) -> None:
     # activate features
     go_to(page, live_server, "/manage")
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Tokens").check()
     page.get_by_role("checkbox", name="Credits").check()
     page.get_by_role("checkbox", name="Refunds").check()
     submit_confirm(page)
 
     # give out credits
-    page.get_by_role("link", name="Credits", exact=True).click()
+    sidebar(page, "Credits")
     page.get_by_role("link", name="New").click()
-    page.locator("#select2-id_member-container").click()
-    page.get_by_role("searchbox").fill("org")
-    page.locator(".select2-results__option").first.click()
-    page.locator("#id_value").click()
-    page.locator("#id_value").fill("300")
-    page.locator("#id_descr").click()
-    page.locator("#id_descr").fill("teer")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#select2-id_member-container").click()
+    _select2_search_and_pick(edit_iframe.get_by_role("searchbox"), edit_iframe, "org")
+    edit_iframe.locator("#id_value").click()
+    edit_iframe.locator("#id_value").fill("300")
+    edit_iframe.locator("#id_descr").click()
+    edit_iframe.locator("#id_descr").fill("teer")
+    save_modal(page, edit_iframe)
 
     # open request
-    page.get_by_role("link", name=" Accounting").click()
+    go_to(page, live_server, "/accounting")
     page.get_by_role("link", name="refund request").click()
     page.get_by_role("textbox", name="Details").click()
     page.get_by_role("textbox", name="Details").fill("asdsadsadsa")
@@ -391,7 +400,9 @@ def accounting_refund(page: Any, live_server: Any) -> None:
     expect_normalized(page, page.locator("#one"), "Requests open: asdsadsadsa (20.00)")
 
     go_to(page, live_server, "/manage")
-    page.locator("#exe_refunds").get_by_role("link", name="Refunds").click()
+    sidebar(page, "Refunds")
     expect_normalized(page, page.locator("#one"), "asdsadsadsa admin test 20 200 request done")
+
     page.get_by_role("link", name="Done").click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#one"), "asdsadsadsa admin test 20 180 delivered")

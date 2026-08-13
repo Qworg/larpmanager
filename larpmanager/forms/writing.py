@@ -21,13 +21,18 @@ from typing import Any, ClassVar
 
 from django import forms
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
+from larpmanager.cache.question import get_cached_writing_questions
 from larpmanager.forms.base import BaseForm, BaseModelForm, BaseRegistrationForm
-from larpmanager.forms.utils import EventCharacterS2Widget, EventCharacterS2WidgetMulti, WritingTinyMCE
-from larpmanager.models.access import get_event_staffers
+from larpmanager.forms.utils import (
+    CharacterDualListWidget,
+    EventCharacterS2Widget,
+    RunStaffS2Widget,
+    WritingTinyMCE,
+)
 from larpmanager.models.casting import Quest, QuestType, Trait
 from larpmanager.models.event import Event, ProgressStep
 from larpmanager.models.form import (
@@ -40,13 +45,19 @@ from larpmanager.models.form import (
 )
 from larpmanager.models.miscellanea import PlayerRelationship
 from larpmanager.models.writing import (
+    Character,
     Faction,
+    Guild,
+    GuildMembership,
+    GuildMembershipStatus,
+    GuildRole,
     Handout,
     HandoutTemplate,
     Plot,
     PlotCharacterRel,
     Prologue,
     PrologueType,
+    RelationshipTag,
     SpeedLarp,
 )
 from larpmanager.utils.core.validators import FileTypeValidator
@@ -57,13 +68,7 @@ class WritingForm(BaseModelForm):
     """Form for Writing."""
 
     def __init__(self, *args: tuple, **kwargs: dict) -> None:
-        """Initialize the form with default show_link configuration.
-
-        Args:
-            *args: Variable length argument list passed to parent class.
-            **kwargs: Arbitrary keyword arguments passed to parent class.
-
-        """
+        """Initialize the form with default show_link configuration."""
         # Initialize parent class with all provided arguments
         super().__init__(*args, **kwargs)
 
@@ -77,24 +82,32 @@ class WritingForm(BaseModelForm):
         """
         question_types = set()
         for question in self.questions:
-            question_types.add(question.typ)
+            question_types.add(question["typ"])
 
         if WritingQuestionType.COVER not in question_types:
             self.delete_field("cover")
 
+        if WritingQuestionType.HIDE not in question_types:
+            self.delete_field("hide")
+
+        if WritingQuestionType.LOCKED not in question_types:
+            self.delete_field("locked")
+
         if WritingQuestionType.ASSIGNED in question_types:
-            staffer_choices = [
-                (member.uuid, member.show_nick()) for member in get_event_staffers(self.params["run"].event)
-            ]
-            self.fields["assigned"].choices = [("", _("--- NOT ASSIGNED ---")), *staffer_choices]
+            self.configure_field_run("assigned", self.params.get("run"))
+            self.fields["assigned"].required = False
         else:
             self.delete_field("assigned")
 
         if WritingQuestionType.PROGRESS in question_types:
-            self.fields["progress"].choices = [
-                (step.uuid, str(step))
-                for step in ProgressStep.objects.filter(event=self.params["run"].event).order_by("order")
-            ]
+            run_event = self.params.get("run").event
+            progress_event = run_event.parent if run_event.parent else run_event
+            self.fields["progress"].queryset = ProgressStep.objects.filter(event=progress_event).order_by("order")
+            self.fields["progress"].to_field_name = "uuid"
+            if self.instance.pk and self.instance.progress_id:
+                progress_step = ProgressStep.objects.filter(pk=self.instance.progress_id).first()
+                if progress_step:
+                    self.initial["progress"] = progress_step.uuid
         else:
             self.delete_field("progress")
 
@@ -109,6 +122,7 @@ class PlayerRelationshipForm(BaseModelForm):
         exclude: ClassVar[list] = ["registration"]
         widgets: ClassVar[dict] = {
             "target": EventCharacterS2Widget,
+            "text": WritingTinyMCE(),
         }
         labels: ClassVar[dict] = {"target": _("Character")}
 
@@ -117,7 +131,7 @@ class PlayerRelationshipForm(BaseModelForm):
         super().__init__(*args, **kwargs)
 
         # Configure target field widget with event from run params
-        self.configure_field_event("target", self.params["run"].event)
+        self.configure_field_event("target", self.params.get("run").event)
         self.fields["target"].required = True
 
     def clean(self) -> dict:
@@ -139,16 +153,16 @@ class PlayerRelationshipForm(BaseModelForm):
         # Check if user is trying to create relationship with themselves
         character_id = _get_character_cache_id(self.params)
         if self.cleaned_data["target"].id == character_id:
-            self.add_error("target", _("You cannot create a relationship towards yourself") + "!")
+            self.add_error("target", _("You cannot create a relationship with yourself!"))
 
         # Check for existing relationships with same target and registration
         try:
             rel = PlayerRelationship.objects.get(
-                registration=self.params["registration"], target=self.cleaned_data["target"]
+                registration=self.params.get("registration"), target=self.cleaned_data["target"]
             )
             # Allow editing existing relationship, but prevent duplicates
             if rel.id != self.instance.id:
-                self.add_error("target", _("Already existing relationship") + "!")
+                self.add_error("target", _("Already existing relationship!"))
         except ObjectDoesNotExist:
             # No existing relationship found - this is valid
             pass
@@ -156,20 +170,12 @@ class PlayerRelationshipForm(BaseModelForm):
         return cleaned_data
 
     def save(self, commit: bool = True) -> Any:  # noqa: FBT001, FBT002, ARG002
-        """Save the form instance, setting registration if new.
-
-        Args:
-            commit: Whether to save the instance to the database.
-
-        Returns:
-            The saved instance.
-
-        """
+        """Save the form instance, setting registration if new."""
         instance = super().save(commit=False)
 
         # Set registration for new instances
         if not instance.pk:
-            instance.registration = self.params["registration"]
+            instance.registration = self.params.get("registration")
 
         instance.save()
 
@@ -192,15 +198,7 @@ class UploadElementsForm(BaseForm):
     second = forms.FileField(validators=[validator], required=False)
 
     def __init__(self, *args: Any, only_one: bool = False, **kwargs: Any) -> None:
-        """Initialize form, optionally removing the 'second' field.
-
-        Args:
-            *args: Positional arguments passed to parent class.
-            only_one: If True, removes 'second' field if present.
-            **kwargs: Keyword arguments passed to parent class.
-
-        """
-        only_one = kwargs.pop("only_one", False)
+        """Initialize form, optionally removing the 'second' field."""
         super().__init__(*args, **kwargs)
 
         # Remove 'second' field when only_one is True
@@ -219,13 +217,7 @@ class BaseWritingForm(BaseRegistrationForm):
     instance_key = "element_id"
 
     def __init__(self, *args: tuple, **kwargs: dict) -> None:
-        """Initialize form with applicable questions configuration.
-
-        Args:
-            *args: Variable length argument list passed to parent class.
-            **kwargs: Arbitrary keyword arguments passed to parent class.
-
-        """
+        """Initialize form with applicable questions configuration."""
         # Initialize parent class with all provided arguments
         super().__init__(*args, **kwargs)
 
@@ -234,11 +226,9 @@ class BaseWritingForm(BaseRegistrationForm):
         self.applicable = QuestionApplicable.get_applicable(self._meta.model._meta.model_name)  # noqa: SLF001  # Django model metadata
 
     def _init_questions(self, event: Event) -> None:
-        """Initialize questions filtered by applicable type."""
-        super()._init_questions(event)
-        # Filter questions to only include those matching this form's applicable type
-        # noinspection PyProtectedMember
-        self.questions = self.questions.filter(applicable=self.applicable)
+        """Initialize questions filtered by applicable type using cache."""
+        self.params.get("features", [])
+        self.questions = get_cached_writing_questions(event, self.applicable)
 
     def get_options_query(self, event: Event) -> Any:
         """Get annotated queryset of options with ticket mappings."""
@@ -249,7 +239,7 @@ class BaseWritingForm(BaseRegistrationForm):
 
     def get_option_key_count(self, option: Any) -> str:
         """Return cache key for tracking option character count."""
-        return f"option_char_{option.id}"
+        return f"option_char_{option['id']}"
 
     def save(self, commit: bool = True) -> Any:  # noqa: FBT001, FBT002, ARG002
         """Save the form and handle registration questions if present.
@@ -275,14 +265,16 @@ class BaseWritingForm(BaseRegistrationForm):
         return instance
 
 
-class PlotForm(WritingForm, BaseWritingForm):
+class OrgaPlotForm(WritingForm, BaseWritingForm):
     """Form for Plot."""
 
     load_templates: ClassVar[list] = ["plot"]
 
-    load_js: ClassVar[list] = ["characters-choices", "plot-roles"]
+    load_js: ClassVar[list] = ["plot-roles"]
 
     page_title = _("Plot")
+
+    page_info = _("Manage all plots for this event")
 
     class Meta:
         model = Plot
@@ -290,7 +282,10 @@ class PlotForm(WritingForm, BaseWritingForm):
         exclude = ("number", "temp", "hide", "order")
 
         widgets: ClassVar[dict] = {
-            "characters": EventCharacterS2WidgetMulti,
+            "teaser": WritingTinyMCE(),
+            "text": WritingTinyMCE(),
+            "characters": CharacterDualListWidget,
+            "assigned": RunStaffS2Widget,
         }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -314,6 +309,7 @@ class PlotForm(WritingForm, BaseWritingForm):
                     "character__number",
                     "character__name",
                     "text",
+                    "character__uuid",
                 ),
             )
             self.init_characters = [ch[0] for ch in plot_characters_data]
@@ -346,7 +342,7 @@ class PlotForm(WritingForm, BaseWritingForm):
 
                 self.show_link.append(id_field)
                 self.add_char_finder.append(id_field)
-                reverse_args = [self.params["run"].get_slug(), ch[0]]
+                reverse_args = [self.params.get("run").get_slug(), ch[4]]
                 self.field_link[id_field] = reverse("orga_characters_edit", args=reverse_args)
 
     def _save_multi(self, field: str, instance: Plot) -> None:  # noqa: ARG002
@@ -391,22 +387,25 @@ class PlotForm(WritingForm, BaseWritingForm):
         return instance
 
 
-class FactionForm(WritingForm, BaseWritingForm):
+class OrgaFactionForm(WritingForm, BaseWritingForm):
     """Form for Faction."""
 
     load_templates: ClassVar[list] = ["faction"]
 
-    load_js: ClassVar[list] = ["characters-choices"]
-
     page_title = _("Faction")
+
+    page_info = _("Manage all character factions for this event")
 
     class Meta:
         model = Faction
 
-        exclude = ("number", "temp", "hide", "order")
+        exclude = ("number", "temp", "order")
 
         widgets: ClassVar[dict] = {
-            "characters": EventCharacterS2WidgetMulti,
+            "teaser": WritingTinyMCE(),
+            "text": WritingTinyMCE(),
+            "characters": CharacterDualListWidget,
+            "assigned": RunStaffS2Widget,
         }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -418,45 +417,230 @@ class FactionForm(WritingForm, BaseWritingForm):
         self.reorder_field("characters")
 
         # Handle selectable field based on user_character feature
-        if "user_character" not in self.params["features"]:
+        if "user_character" not in self.params.get("features"):
             self.delete_field("selectable")
         else:
             self.reorder_field("selectable")
 
+        # Handle color field based on ensemble feature
+        if "ensemble" not in self.params.get("features"):
+            self.delete_field("color")
+        else:
+            self.reorder_field("color")
+
         self._init_special_fields()
 
         # Configure faction type help text with descriptions
-        help_texts = {
-            _("Primary"): _("main grouping / affiliation for characters"),
-            _("Transversal"): _("secondary grouping across primary factions"),
-            _("Secret"): _("hidden faction visible only to assigned characters"),
-        }
-        self.fields["typ"].help_text = ", ".join([f"<b>{key}</b>: {value}" for key, value in help_texts.items()])
+        help_texts = [
+            _("<b>%(type)s</b>: main grouping / affiliation for characters") % {"type": _("Primary")},
+            _("<b>%(type)s</b>: secondary grouping within the primary faction structure") % {"type": _("Transversal")},
+            _("<b>%(type)s</b>: hidden faction visible only to assigned characters") % {"type": _("Secret")},
+        ]
+        self.fields["typ"].help_text = ", ".join(help_texts)
 
 
-class QuestTypeForm(WritingForm):
-    """Form for QuestType."""
+class OrgaGuildForm(WritingForm, BaseWritingForm):
+    """Form for Guild (organizer side, full control)."""
 
-    page_title = _("Quest type")
+    load_templates: ClassVar[list] = ["guild"]
+
+    page_title = _("Guild")
+
+    page_info = _("Manage all guilds of the event")
+
+    admins = forms.ModelMultipleChoiceField(
+        queryset=Character.objects.none(),
+        required=False,
+        label=_("Admins"),
+        help_text=_("Members that can manage the guild: they must be among the members"),
+        widget=CharacterDualListWidget,
+    )
 
     class Meta:
-        model = QuestType
-        fields: ClassVar[list] = ["name", "teaser", "event"]
+        model = Guild
+
+        exclude = ("number", "temp", "order")
+
+        widgets: ClassVar[dict] = {
+            "teaser": WritingTinyMCE(),
+            "text": WritingTinyMCE(),
+            "characters": CharacterDualListWidget,
+            "assigned": RunStaffS2Widget,
+        }
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize guild form with character membership and dynamic fields."""
+        super().__init__(*args, **kwargs)
+
+        self.init_orga_fields()
+        self.reorder_field("characters")
+        self.configure_field_event("admins", self.params.get("event"))
+        self.reorder_field("admins")
+
+        # Handle color field based on ensemble feature
+        if "ensemble" not in self.params.get("features"):
+            self.delete_field("color")
+        else:
+            self.reorder_field("color")
+
+        self.chars_id = set()
+
+        if self.instance.pk:
+            accepted = self.instance.memberships.filter(status=GuildMembershipStatus.ACCEPTED)
+            self.init_characters = list(accepted.values_list("character_id", flat=True))
+            self.init_admins = list(accepted.filter(role=GuildRole.ADMIN).values_list("character_id", flat=True))
+        else:
+            self.init_characters = []
+            self.init_admins = []
+
+        self.initial["characters"] = self.init_characters
+        self.initial["admins"] = self.init_admins
+
+        self._init_special_fields()
+
+    def clean_admins(self) -> Any:
+        """Ensure the selected admins are also members of the guild."""
+        admins = self.cleaned_data.get("admins")
+        characters = self.cleaned_data.get("characters")
+        if admins and characters is not None:
+            member_ids = set(characters.values_list("pk", flat=True))
+            missing = [str(char) for char in admins if char.pk not in member_ids]
+            if missing:
+                msg = _("These characters are not members of the guild: %(names)s") % {"names": ", ".join(missing)}
+                raise ValidationError(msg)
+        return admins
+
+    def _save_multi(self, field: str, instance: Guild) -> None:
+        """Delete guild memberships for unselected characters; admins are saved with the roles."""
+        if field == "admins":
+            return
+
+        if field != "characters":
+            super()._save_multi(field, instance)
+            return
+
+        self.chars_id = set(self.cleaned_data["characters"].values_list("pk", flat=True))
+
+        GuildMembership.objects.filter(
+            guild_id=instance.pk,
+            status=GuildMembershipStatus.ACCEPTED,
+        ).exclude(character_id__in=self.chars_id).delete()
+
+    def save(self, commit: bool = True) -> Guild:  # noqa: FBT001, FBT002
+        """Save the guild instance and update its accepted memberships."""
+        instance = super().save(commit=commit)
+
+        if not commit:
+            return instance
+
+        existing = dict(
+            GuildMembership.objects.filter(guild_id=instance.pk, character_id__in=self.chars_id).values_list(
+                "character_id", "status"
+            ),
+        )
+
+        to_create = [
+            GuildMembership(
+                guild_id=instance.pk,
+                character_id=ch_id,
+                status=GuildMembershipStatus.ACCEPTED,
+                role=GuildRole.MEMBER,
+            )
+            for ch_id in self.chars_id
+            if ch_id not in existing
+        ]
+        if to_create:
+            GuildMembership.objects.bulk_create(to_create)
+
+        stale_ids = [ch_id for ch_id, status in existing.items() if status != GuildMembershipStatus.ACCEPTED]
+        if stale_ids:
+            GuildMembership.objects.filter(guild_id=instance.pk, character_id__in=stale_ids).update(
+                status=GuildMembershipStatus.ACCEPTED,
+            )
+
+        self._save_admins(instance)
+
+        return instance
+
+    def _save_admins(self, instance: Guild) -> None:
+        """Align guild roles with the admins selected in the form."""
+        admin_ids = {char.pk for char in self.cleaned_data.get("admins", [])} & self.chars_id
+
+        memberships = GuildMembership.objects.filter(guild_id=instance.pk, character_id__in=self.chars_id)
+        memberships.filter(character_id__in=admin_ids).exclude(role=GuildRole.ADMIN).update(role=GuildRole.ADMIN)
+        memberships.exclude(character_id__in=admin_ids).exclude(role=GuildRole.MEMBER).update(role=GuildRole.MEMBER)
+
+
+class GuildForm(WritingForm, BaseWritingForm):
+    """Form for Guild (player side, restricted to guild admins)."""
+
+    orga = False
+
+    page_title = _("Guild")
+
+    class Meta:
+        model = Guild
+
+        fields: ClassVar[list] = ["name", "teaser", "text", "cover"]
 
         widgets: ClassVar[dict] = {
             "teaser": WritingTinyMCE(),
             "text": WritingTinyMCE(),
         }
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize player guild form with custom question fields."""
+        super().__init__(*args, **kwargs)
 
-class QuestForm(WritingForm, BaseWritingForm):
+        self._init_custom_fields()
+
+    def _init_custom_fields(self) -> None:
+        """Add custom WritingQuestion fields applicable to guilds, gated by QuestionStatus."""
+        event = self.params["event"]
+        if not self.instance.pk:
+            self.instance.event = event
+        self._init_registration_question(self.instance, event)
+
+        fields_default = {"name", "teaser", "text", "cover"}
+        fields_custom = set()
+
+        for question in self.questions:
+            field_key = self._init_field(question, is_organizer=self.orga)
+            if not field_key:
+                continue
+            fields_custom.add(field_key)
+
+        all_fields = set(self.fields.keys()) - fields_default
+        for field_label in all_fields - fields_custom:
+            self.delete_field(field_label)
+
+
+class OrgaQuestTypeForm(WritingForm):
+    """Form for QuestType."""
+
+    page_title = _("Quest type")
+
+    page_info = _("Manage all quest types for this event")
+
+    class Meta:
+        model = QuestType
+        fields: ClassVar[list] = ["name", "teaser", "event"]
+
+        widgets: ClassVar[dict] = {"teaser": WritingTinyMCE(), "text": WritingTinyMCE(), "assigned": RunStaffS2Widget}
+
+
+class OrgaQuestForm(WritingForm, BaseWritingForm):
     """Form for Quest."""
 
     page_title = _("Quest")
 
+    page_info = _("Manage all quests for the event")
+
     class Meta:
         model = Quest
         exclude = ("number", "temp", "hide", "order")
+
+        widgets: ClassVar[dict] = {"teaser": WritingTinyMCE(), "text": WritingTinyMCE(), "assigned": RunStaffS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the form with organization fields and quest type choices."""
@@ -467,20 +651,24 @@ class QuestForm(WritingForm, BaseWritingForm):
         self._init_special_fields()
 
         # Populate quest type choices from event elements
-        que = self.params["run"].event.get_elements(QuestType)
+        que = self.params.get("run").event.get_elements(QuestType)
         self.fields["typ"].choices = [(m.uuid, m.name) for m in que]
 
 
-class TraitForm(WritingForm, BaseWritingForm):
+class OrgaTraitForm(WritingForm, BaseWritingForm):
     """Form for Trait."""
 
     page_title = _("Trait")
+
+    page_info = _("Manage all traits linked to quests, with their writing questions")
 
     load_templates: ClassVar[list] = ["trait"]
 
     class Meta:
         model = Trait
         exclude = ("number", "temp", "hide", "order", "traits")
+
+        widgets: ClassVar[dict] = {"teaser": WritingTinyMCE(), "text": WritingTinyMCE(), "assigned": RunStaffS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize form and configure quest field choices."""
@@ -491,36 +679,38 @@ class TraitForm(WritingForm, BaseWritingForm):
         self._init_special_fields()
 
         # Populate quest choices from event elements
-        que = self.params["run"].event.get_elements(Quest)
+        que = self.params.get("run").event.get_elements(Quest)
         self.fields["quest"].choices = [(m.uuid, m.name) for m in que]
 
 
-class HandoutForm(WritingForm):
+class OrgaHandoutForm(WritingForm):
     """Form for Handout."""
 
     page_title = _("Handout")
+
+    page_info = _("Manage character handouts for this event")
 
     class Meta:
         model = Handout
         fields: ClassVar[list] = ["template", "name", "text", "event"]
 
-        widgets: ClassVar[dict] = {
-            "text": WritingTinyMCE(),
-        }
+        widgets: ClassVar[dict] = {"text": WritingTinyMCE(), "assigned": RunStaffS2Widget}
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize form and populate template choices from run's handout templates."""
         super().__init__(*args, **kwargs)
 
         # Retrieve handout templates for the associated run's event
-        que = self.params["run"].event.get_elements(HandoutTemplate)
+        que = self.params.get("run").event.get_elements(HandoutTemplate)
 
         # Populate template field choices with template IDs and names
         self.fields["template"].choices = [(m.uuid, m.name) for m in que]
 
 
-class HandoutTemplateForm(WritingForm):
+class OrgaHandoutTemplateForm(WritingForm):
     """Form for HandoutTemplate."""
+
+    page_info = _("Manage handout templates used to generate character handouts")
 
     load_templates: ClassVar[list] = ["handout-template"]
 
@@ -529,26 +719,29 @@ class HandoutTemplateForm(WritingForm):
         exclude: ClassVar[list] = ["number"]
 
         widgets: ClassVar[dict] = {
-            "template": forms.FileInput(attrs={"accept": "application/vnd.oasis.opendocument.text"})
+            "template": forms.FileInput(attrs={"accept": "application/vnd.oasis.opendocument.text"}),
+            "assigned": RunStaffS2Widget,
         }
 
 
-class PrologueTypeForm(WritingForm):
+class OrgaPrologueTypeForm(WritingForm):
     """Form for PrologueType."""
 
     page_title = _("Prologue type")
+
+    page_info = _("Manage prologue types for this event")
 
     class Meta:
         model = PrologueType
         fields: ClassVar[list] = ["name", "event"]
 
 
-class PrologueForm(WritingForm, BaseWritingForm):
+class OrgaPrologueForm(WritingForm, BaseWritingForm):
     """Form for Prologue."""
 
     page_title = _("Prologue")
 
-    load_js: ClassVar[list] = ["characters-choices"]
+    page_info = _("Manage all prologues for this event")
 
     class Meta:
         model = Prologue
@@ -556,7 +749,9 @@ class PrologueForm(WritingForm, BaseWritingForm):
         exclude = ("number", "teaser", "temp", "hide")
 
         widgets: ClassVar[dict] = {
-            "characters": EventCharacterS2WidgetMulti,
+            "text": WritingTinyMCE(),
+            "characters": CharacterDualListWidget,
+            "assigned": RunStaffS2Widget,
         }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -564,7 +759,7 @@ class PrologueForm(WritingForm, BaseWritingForm):
         super().__init__(*args, **kwargs)
 
         # Populate prologue type choices from event elements
-        que = self.params["run"].event.get_elements(PrologueType)
+        que = self.params.get("run").event.get_elements(PrologueType)
         self.fields["typ"].choices = [(m.uuid, m.name) for m in que]
 
         # Initialize organization-specific fields and reorder characters
@@ -573,22 +768,35 @@ class PrologueForm(WritingForm, BaseWritingForm):
         self._init_special_fields()
 
 
-class SpeedLarpForm(WritingForm):
+class OrgaSpeedLarpForm(WritingForm):
     """Form for SpeedLarp."""
 
     page_title = _("Speed larp")
 
-    load_js: ClassVar[list] = ["characters-choices"]
+    page_info = _("Manage speed larps for this event")
 
     class Meta:
         model = SpeedLarp
         exclude = ("teaser", "temp", "hide")
 
         widgets: ClassVar[dict] = {
-            "characters": EventCharacterS2WidgetMulti,
+            "characters": CharacterDualListWidget,
             "text": WritingTinyMCE(),
+            "assigned": RunStaffS2Widget,
         }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize writing element form."""
         super().__init__(*args, **kwargs)
+
+
+class OrgaRelationshipTagForm(BaseModelForm):
+    """Form for RelationshipTag."""
+
+    page_title = _("Relationship tags")
+
+    page_info = _("Manage the tags that can be applied to character relationships")
+
+    class Meta:
+        model = RelationshipTag
+        exclude = ("number", "order")

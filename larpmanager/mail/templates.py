@@ -1,0 +1,441 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from django.conf import settings as conf_settings
+from django.contrib.sites.shortcuts import get_current_site
+from django.core import signing
+from django.utils.html import escape
+from django.utils.translation import gettext_lazy as _
+
+from larpmanager.cache.config import get_association_config
+from larpmanager.cache.feature import get_event_features
+from larpmanager.models.association import Association, get_url, hdr
+from larpmanager.models.member import Membership, get_user_membership
+from larpmanager.utils.users.registration import get_registration_options
+
+if TYPE_CHECKING:
+    from larpmanager.models.accounting import AccountingItemExpense, AccountingItemOther, AccountingItemPayment
+    from larpmanager.models.event import Run
+    from larpmanager.models.registration import Registration
+
+
+def format_decimal_amount(value: float) -> str:
+    """Format decimal value for display: integers without decimals, decimals with max 2 places."""
+    if value % 1 == 0:
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def get_token_credit_name(association_id: int) -> tuple[str, str]:
+    """Get token and credit names from association configuration."""
+    # Create configuration holder for caching retrieved values
+    association_config_cache = {}
+
+    # Retrieve custom token and credit names from association config
+    tokens_name = get_association_config(association_id, "tokens_name", context=association_config_cache)
+    credits_name = get_association_config(association_id, "credits_name", context=association_config_cache)
+
+    # Apply default translated names if custom names not configured
+    if not tokens_name:
+        tokens_name = _("Tokens")
+    if not credits_name:
+        credits_name = _("Credits")
+
+    return tokens_name, credits_name
+
+
+def get_payment_info(association_id: int, payment_url: str) -> str:
+    """Return an HTML block linking to payment details page, with instructions on how to proceed."""
+    association = Association.objects.only("slug", "key").prefetch_related("payment_methods").get(pk=association_id)
+    active_slugs = {m.slug for m in association.payment_methods.all()}
+
+    require_receipt: bool = get_association_config(association_id, "payment_require_receipt")
+
+    text = "<br /><br />"
+    if len(active_slugs) > 1:
+        text += (
+            _(
+                "You can select your preferred payment method and view the details "
+                "<a href='%(url)s'>on the payment page</a>."
+            )
+            % {"url": payment_url}
+            + " "
+        )
+
+        if "wire" in active_slugs:
+            text += "<br /><br />" + _get_wire_payment_info(payment_url, require_receipt=require_receipt)
+
+    elif "wire" in active_slugs:
+        text += _get_wire_payment_info(payment_url, require_receipt=require_receipt)
+
+    else:
+        text += (
+            _("You can view all required details <a href='%(url)s'>on the payment page</a>.") % {"url": payment_url}
+            + " "
+        )
+
+    text += "<br /><br />" + _("Please contact support if you encounter any issues or require assistance.")
+
+    return text
+
+
+def _get_wire_payment_info(payment_url: str, *, require_receipt: bool) -> str:
+    """Return info on how to pay by wire."""
+    wire_url = payment_url.rstrip("/") + "/wire"
+    text = (
+        _(
+            "For bank transfers, visit the <a href='%(url)s'>payment page</a> to view details "
+            "(including IBAN and payment reference)."
+        )
+        % {"url": wire_url}
+        + " "
+    )
+    text += "<br /><br />"
+    if require_receipt:
+        text += "<i>" + _("Please upload your payment receipt to that page once the transfer is complete.")
+    else:
+        text += "<i>" + _("Please mark the payment as completed on that page once the transfer is done.")
+    text += " " + _("This step is required to process and register your payment.") + "</i>"
+    return text
+
+
+def get_registration_new_organizer_email(instance: Registration, email_context: dict) -> tuple[str, str]:
+    """Generate email subject and body for new registration organizer notification."""
+    email_subject = hdr(instance.run.event) + _("Registration for %(event)s by %(user)s") % email_context
+    email_body = _("The user has confirmed their registration for this event.")
+    email_body += registration_options(instance)
+    return email_subject, email_body
+
+
+def get_registration_update_organizer_email(instance: Registration, email_context: dict) -> tuple[str, str]:
+    """Generate email subject and body for registration update organizer notification."""
+    email_subject = hdr(instance.run.event) + _("Registration updated for %(event)s by %(user)s") % email_context
+    email_body = _("The user has updated their registration details for this event.")
+    email_body += registration_options(instance)
+    return email_subject, email_body
+
+
+def get_registration_cancel_organizer_email(instance: Registration, email_context: dict) -> tuple[str, str]:
+    """Generate email subject and body for registration cancellation organizer notification."""
+    email_subject = hdr(instance.run.event) + _("Registration canceled for %(event)s by %(user)s") % email_context
+    email_body = _("The registration for this event has been canceled.")
+    return email_subject, email_body
+
+
+def get_registration_request_new_organizer_email(instance: Registration, email_context: dict) -> tuple[str, str]:
+    """Generate email subject and body for new signup request organizer notification."""
+    email_subject = hdr(instance.run.event) + _("Registration request for %(event)s by %(user)s") % email_context
+    email_body = _("The user has submitted a request to register for this event.")
+    return email_subject, email_body
+
+
+def get_expense_mail(instance: AccountingItemExpense) -> tuple[str, str]:
+    """Generate email subject and body for expense reimbursement requests."""
+    # Generate email subject with event context
+    email_subject = hdr(instance) + _("Reimbursement request for %(event)s") % {"event": instance.run}
+
+    # Create initial body with staff member and event information
+    email_body = _("Staff member %(user)s submitted a new reimbursement request for %(event)s.") % {
+        "user": instance.member,
+        "event": instance.run,
+    }
+
+    # Add expense amount and reason details
+    email_body += "<br /><br />" + _("Amount: %(amount).2f. Description: '%(reason)s'.") % {
+        "amount": instance.value,
+        "reason": instance.descr,
+    }
+
+    # Add document download link if available
+    if instance.invoice:
+        document_download_url = get_url(instance.download(), instance)
+        email_body += f"<br /><br /><a href='{document_download_url}'>" + _("Download document") + "</a>"
+
+    # Add approval prompt and confirmation link
+    email_body += "<br /><br />" + _("Did you check and is it correct?")
+    approval_url = f"{instance.run.get_slug()}/manage/expenses/approve/{instance.pk}"
+    email_body += f" <a href='{approval_url}'>" + _("Approve request") + "</a>"
+
+    return email_subject, email_body
+
+
+def get_pay_token_email(instance: AccountingItemPayment, run: Run, tokens_name: str) -> tuple[str, str]:
+    """Generate email content for token payment notifications."""
+    # Generate localized subject line with event and token information
+    subject = hdr(instance) + _("Use of %(tokens)s for %(event)s") % {
+        "tokens": tokens_name,
+        "event": run,
+    }
+
+    # Create localized body message with token amount and currency
+    body = _("%(amount)s %(tokens)s were redeemed for participation in this event.") % {
+        "amount": format_decimal_amount(instance.value),
+        "tokens": tokens_name,
+    }
+
+    return subject, body
+
+
+def get_pay_credit_email(credits_name: str, instance: AccountingItemPayment, run: Run) -> tuple[str, str]:
+    """Generate email content for credit payment notifications."""
+    # Generate email subject with event header and credit usage message
+    email_subject = hdr(instance) + _("Use of %(credits)s for %(event)s") % {
+        "credits": credits_name,
+        "event": run,
+    }
+
+    # Create email body describing the credit transaction amount
+    email_body = _("%(amount)s %(credits)s were applied to participation in this event.") % {
+        "amount": format_decimal_amount(instance.value),
+        "credits": credits_name,
+    }
+
+    # Return both subject and body as tuple
+    return email_subject, email_body
+
+
+def get_pay_money_email(curr_sym: str, instance: AccountingItemPayment, run: Run) -> tuple[str, str]:
+    """Generate email content for money payment notifications."""
+    # Generate email subject with event information
+    subject = hdr(instance) + _("Payment received for %(event)s") % {"event": run}
+
+    # Create email body with payment amount and currency details
+    body = _("A payment of <b>%(amount).2f %(currency)s</b> was recorded for this event.") % {
+        "amount": instance.value,
+        "currency": curr_sym,
+    }
+
+    # Return subject and body as tuple for email composition
+    return subject, body
+
+
+def get_assignment_email(credits_name: str, instance: AccountingItemOther) -> tuple[str, str]:
+    """Generate email subject and body for assignment notification."""
+    if instance.run:
+        subject = hdr(instance) + _("%(elements)s received for %(event)s") % {
+            "elements": credits_name,
+            "event": instance.run,
+        }
+    else:
+        subject = hdr(instance) + _("%(elements)s received") % {
+            "elements": credits_name,
+        }
+
+    body = _("You have received %(amount).2f %(elements)s for '%(reason)s'.") % {
+        "amount": instance.value,
+        "elements": credits_name,
+        "reason": instance.descr,
+    }
+
+    return subject, body
+
+
+def get_notify_refund_email(p: AccountingItemOther) -> tuple[str, str]:
+    """Generate email subject and body for refund request notification."""
+    # Generate email subject with header prefix and requesting user
+    subj = hdr(p) + _("Refund request from %(user)s") % {"user": p.member}
+
+    # Format email body with payment details and refund amount
+    body = _("Details: %(details)s (Amount: <b>%(amount).2f</b>)") % {"details": p.details, "amount": p.value}
+
+    return subj, body
+
+
+def get_invoice_email(invoice: Any) -> tuple[str, str]:
+    """Generate email subject and body for invoice payment verification."""
+    # Start building the email body with verification prompt
+    body = _("Please verify the following payment details:")
+
+    # Add payment reason and amount details
+    body += "<br /><br />" + _("Payment reference") + f": <b>{invoice.causal}</b>"
+    body += "<br /><br />" + _("Amount") + f": <b>{invoice.mc_gross:.2f}</b>"
+
+    # Include download link if invoice document exists
+    if invoice.invoice:
+        download_url = get_url(invoice.download(), invoice)
+        body += f"<br /><br /><a href='{download_url}'>" + _("Download document") + "</a>"
+    # Show additional text for 'any' payment method
+    elif invoice.method and invoice.method.slug == "any":
+        body += f"<br /><br /><i>{invoice.text}</i>"
+
+    # Add confirmation prompt and link
+    body += "<br /><br />" + _("Did you check and is it correct?")
+    confirmation_url = get_url("accounting/confirm", invoice)
+    body += f" <a href='{confirmation_url}/{invoice.cod}'>" + _("Confirm payment") + "</a>"
+
+    # Process causal for subject line (remove prefix if hyphen present)
+    subject_causal = invoice.causal
+    if "-" in subject_causal:
+        subject_causal = subject_causal.split("-", 1)[1].strip()
+
+    # Generate final subject with header and payment description
+    subject = hdr(invoice) + _("Payment verification required:") + " " + subject_causal
+    return subject, body
+
+
+def registration_options(registration_instance: Any) -> str:
+    """Generate email content for registration options.
+
+    Creates formatted text showing selected tickets and registration choices,
+    including payment information, totals, and selected registration options
+    for email notifications.
+
+    Args:
+        registration_instance: Registration instance containing ticket, member, and payment data
+
+    Returns:
+        str: HTML formatted string with registration details for email content
+
+    """
+    email_body = ""
+
+    # Add ticket information if selected
+    if registration_instance.ticket:
+        email_body += "<br /><br />" + _("Selected ticket") + f": <b>{registration_instance.ticket.name}</b>"
+        if registration_instance.ticket.description:
+            email_body += f" - {escape(registration_instance.ticket.description)}"
+
+    # Get user membership and event features for permission checks
+    get_user_membership(registration_instance.member, registration_instance.run.event.association_id)
+    event_features = get_event_features(registration_instance.run.event_id)
+
+    # Get currency symbol for formatting monetary amounts
+    currency_symbol = registration_instance.run.event.association.get_currency_symbol()
+
+    # Display total registration fee if greater than zero
+    if registration_instance.tot_iscr > 0:
+        email_body += "<br /><br />" + _("Total registration fee: <b>%(amount).2f %(currency)s</b>.") % {
+            "amount": registration_instance.tot_iscr,
+            "currency": currency_symbol,
+        }
+
+    # Display payments already received if any
+    if registration_instance.tot_payed > 0:
+        email_body += "<br /><br />" + _("Payments received to date: <b>%(amount).2f %(currency)s</b>.") % {
+            "amount": registration_instance.tot_payed,
+            "currency": currency_symbol,
+        }
+
+    # Add payment information if payment feature enabled and quota/alert conditions met
+    if "payment" in event_features and registration_instance.quota > 0 and registration_instance.alert:
+        email_body += registration_payments(registration_instance, currency_symbol)
+
+    # Add selected registration options if any exist
+    selected_options = get_registration_options(registration_instance)
+    if selected_options:
+        email_body += "<br /><br />" + _("Selected options:")
+        for option_name, option_value in selected_options:
+            email_body += f"<br />{escape(option_name)} - {escape(option_value)}"
+
+    return email_body
+
+
+def registration_payments(instance: Registration, currency: str) -> str:
+    """Generate payment information HTML for registration emails.
+
+    This function creates localized HTML content for registration payment notifications,
+    including payment amounts, deadlines, and payment links. The content varies based
+    on whether a payment deadline is set.
+
+    Args:
+        instance: Registration instance containing payment details and associated run/event data.
+                 Must have attributes: quota, deadline, run (with event and get_slug method).
+        currency: Currency symbol or code to display with the payment amount (e.g., '€', 'USD').
+
+    Returns:
+        Localized HTML string containing payment information with formatted amount,
+        deadline details, and a link to the payment page. Format depends on deadline value.
+
+    Note:
+        - If deadline > 0: Shows specific deadline in days with warning about cancellation
+        - If deadline <= 0: Shows immediate payment required message
+
+    """
+    # Build the payment URL using the event and run slug
+    full_payment_url = get_url("accounting/pay", instance.run.event)
+    payment_url = f"{full_payment_url}/{instance.run.get_slug()}"
+
+    # Prepare template data for localization
+    template_data = {
+        "amount": instance.quota,
+        "currency": currency,
+        "deadline": instance.deadline,
+    }
+
+    body = "<br /><br />"
+    if instance.deadline > 0:
+        # Handle case where payment has a specific deadline in days
+        body += (
+            _("A minimum payment of <b>%(amount).2f %(currency)s</b> is required within %(deadline)d days.")
+            % template_data
+        )
+        body += " " + _("Please make sure to send your payment on time, or we might have to cancel your spot.")
+    else:
+        # Handle immediate payment requirement (no specific deadline)
+        body += (
+            _("<i>Payment overdue</i>: Submit payment of <b>%(amount).2f %(currency)s</b> immediately.") % template_data
+        )
+        body += " " + _("Please make sure to send your payment on time, or we might have to cancel your spot.")
+
+    body += get_payment_info(instance.run.event.association_id, payment_url)
+    return body
+
+
+def get_help_email(help_question: Any) -> Any:
+    """Generate subject and body for help question notification."""
+    subject = hdr(help_question) + _("New support request from %(user)s") % {"user": help_question.member}
+    email_body = _("A support request was submitted by %(user)s:") % {"user": help_question.member}
+    email_body += "<br /><br />" + escape(help_question.text)
+    return subject, email_body
+
+
+REGISTRATION_SALT = getattr(conf_settings, "REGISTRATION_SALT", "registration")
+
+
+def get_activation_key(user: Any) -> Any:
+    """Generate the activation key which will be emailed to the user."""
+    """
+    Generate the activation key which will be emailed to the user.
+    """
+    return signing.dumps(obj=user.get_username(), salt=REGISTRATION_SALT)
+
+
+def get_email_context(activation_key: Any, request: Any) -> Any:
+    """Build the template context used for the activation email.
+
+    Args:
+        activation_key (str): Generated activation key
+        request: Django HTTP request object
+
+    Returns:
+        dict: Context dictionary for activation email template
+
+    """
+    """
+    Build the template context used for the activation email.
+    """
+    scheme = "https" if request.is_secure() else "http"
+    return {
+        "scheme": scheme,
+        "activation_key": activation_key,
+        "expiration_days": conf_settings.ACCOUNT_ACTIVATION_DAYS,
+        "site": get_current_site(request),
+    }
+
+
+def get_password_reminder_email(membership: Membership) -> tuple[str, str]:
+    """Generate subject and body for password reset reminder."""
+    member = membership.member
+    reset_url = get_password_reset_url(membership)
+    subject = _("Password reset request for %(user)s") % {"user": member}
+    body = _("User initiated a password reset but did not complete it. Give them this link: %(url)s") % {
+        "url": reset_url,
+    }
+    return subject, body
+
+
+def get_password_reset_url(membership: Membership) -> str:
+    """Get password reset url."""
+    reset_token_parts = membership.password_reset.split("#")
+    return get_url(f"reset/{reset_token_parts[0]}/{reset_token_parts[1]}/", membership.association)

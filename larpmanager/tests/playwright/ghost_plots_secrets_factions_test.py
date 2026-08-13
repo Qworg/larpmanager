@@ -29,12 +29,19 @@ from typing import Any
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import (just_wait,
+from larpmanager.tests.utils import (
+    _wait_lm_ready,
+    char_dual_pick,
+    click_and_wait_question,
     expect_normalized,
     fill_tinymce,
+    get_modal_iframe,
     go_to,
     login_orga,
-    login_user, submit_confirm,
+    login_user,
+    save_modal,
+    sidebar,
+    submit_confirm, topbar,
 )
 
 pytestmark = pytest.mark.e2e
@@ -47,7 +54,7 @@ def test_ghost_plots_secret_factions(pw_page: Any) -> None:
     go_to(page, live_server, "test/manage")
 
     # activate features
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Characters").check()
     page.get_by_role("checkbox", name="Plots").check()
     page.get_by_role("checkbox", name="Factions").check()
@@ -57,116 +64,102 @@ def test_ghost_plots_secret_factions(pw_page: Any) -> None:
     # create ability and give them to player
     page.get_by_role("link", name="Ability type").click()
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("www")
-    submit_confirm(page)
-    page.get_by_role("link", name="Ability", exact=True).click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("www")
+    save_modal(page, edit_iframe)
+    sidebar(page, "Abilities")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("ggggg")
-    submit_confirm(page)
-    page.get_by_role("link", name="Delivery").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("ggggg")
+    save_modal(page, edit_iframe)
+    sidebar(page, "Awards")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("eeee2")
-    page.locator("#id_amount").click()
-    page.locator("#id_amount").fill("2")
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("te")
-    page.locator(".select2-results__option").first.click()
-    submit_confirm(page)
-    page.get_by_role("link", name="Ability", exact=True).click()
-    page.get_by_role("link", name="").click()
-    page.locator("#id_cost").click()
-    page.locator("#id_cost").fill("1")
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("te")
-    page.locator(".select2-results__option").first.click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("eeee2")
+    edit_iframe.locator("#id_amount").click()
+    edit_iframe.locator("#id_amount").fill("2")
+    char_dual_pick(edit_iframe, "te", "Test Character")
+    save_modal(page, edit_iframe)
+    sidebar(page, "Abilities")
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_cost").click()
+    edit_iframe.locator("#id_cost").fill("1")
+    char_dual_pick(edit_iframe, "te", "Test Character")
+    save_modal(page, edit_iframe)
 
     # create plots, assign them to player
-    page.get_by_role("link", name="Plots").click()
+    sidebar(page, "Plots")
+
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("first")
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("first")
+    char_dual_pick(edit_iframe, "te", "Test Character")
+    fill_tinymce(edit_iframe, "ch_1", "prisdsa")
+    save_modal(page, edit_iframe)
 
-    # set char role
-    searchbox = page.get_by_role("searchbox")
-    searchbox.click()
-    searchbox.fill("te")
-    # Wait for the option to appear and click it
-    option = page.get_by_role("option", name="#1 Test Character")
-    option.wait_for(state="visible")
-    option.click()
-    page.wait_for_timeout(5000)
-    fill_tinymce(page, "ch_1", "prisdsa")
-    page.locator("#main_form div").filter(has_text="After confirmation, add").click()
-    submit_confirm(page)
-
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("qweeerr")
-    # set char role
-    searchbox = page.get_by_role("searchbox")
-    searchbox.click()
-    searchbox.fill("te")
-    # Wait for the option to appear and click it
-    option = page.get_by_role("option", name="#1 Test Character")
-    option.wait_for(state="visible")
-    option.click()
-    page.wait_for_timeout(5000)
-    fill_tinymce(page, "ch_1", "poelea s")
-    submit_confirm(page)
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("qweeerr")
+    char_dual_pick(edit_iframe, "te", "Test Character")
+    fill_tinymce(edit_iframe, "ch_1", "poelea s")
+    save_modal(page, edit_iframe)
 
     # add factions, one visible, one not
-    page.get_by_role("link", name="Factions").click()
-    page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("eefqq")
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("tes")
-    page.locator(".select2-results__option").first.click()
-    page.get_by_role("checkbox", name="After confirmation, add").check()
-    submit_confirm(page)
+    sidebar(page, "Factions")
 
-    page.locator("#id_typ").select_option("g")
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("gggerwe")
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("ted")
-    page.get_by_text("No results found").click()
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("tes")
-    page.locator(".select2-results__option").first.click()
-    submit_confirm(page)
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("eefqq")
+    char_dual_pick(edit_iframe, "tes", "Test Character")
+    save_modal(page, edit_iframe)
+
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("g")
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("gggerwe")
+    char_dual_pick(edit_iframe, "tes", "Test Character")
+    save_modal(page, edit_iframe)
 
     # add new field
-    page.locator("#orga_character_form").get_by_role("link", name="Form").click()
+    sidebar(page, "Sheet")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")
-    page.get_by_role("cell", name="Question name (keep it short)").click()
-    page.locator("#id_name").fill("teeeeest")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")
+    edit_iframe.get_by_role("cell", name="Question name (keep it short)").click()
+    edit_iframe.locator("#id_name").fill("teeeeest")
+    save_modal(page, edit_iframe)
 
     # check value now
-    page.get_by_role("link", name="Characters").click()
-    page.get_by_role("link", name="XP").click()
-    page.get_by_role("link", name="Faction", exact=True).click()
-    page.get_by_role("link", name="teeeeest").click()
-    page.locator("#one").get_by_role("link", name="Plots").click()
+    sidebar(page, "Characters")
+    click_and_wait_question(page, "Experience")
+    click_and_wait_question(page, "Faction")
+    click_and_wait_question(page, "teeeeest")
+    click_and_wait_question(page, "Plots")
     expect_normalized(page,
         page.locator("#one"),
-        "#1 Test Character 2 1 1 Test Teaser Test Text eefqq gggerwe first qweeerr",
+        "Test Character 2 1 1 Test Teaser Test Text eefqq gggerwe first qweeerr",
     )
 
     # check secret factions
     login_user(page, live_server)
     go_to(page, live_server, "/")
-    page.get_by_role("link", name="Test Larp").click()
+    topbar(page, "Test Larp")
+    sidebar(page, "Gallery")
     page.get_by_role("link", name="Test Character").click()
+    _wait_lm_ready(page)
     expect_normalized(page, page.locator("#wrapper"), "Presentation Test Teaser eefqq")
     expect(page.locator("#wrapper")).not_to_contain_text("gggerwe")
 
     page.get_by_role("link", name="eefqq").click()
+    _wait_lm_ready(page)
     expect_normalized(page,
         page.locator("#one"),
         "Characters Test Character Presentation: Test Teaser Factions: eefqq",
@@ -176,4 +169,4 @@ def test_ghost_plots_secret_factions(pw_page: Any) -> None:
     page.goto(f"{live_server}/test/faction/u2/")
     banner = page.locator("#banner")
     if banner.count() > 0:
-        expect_normalized(page, banner, "404")
+        expect_normalized(page, page.locator("body"), "we couldn't find the page")

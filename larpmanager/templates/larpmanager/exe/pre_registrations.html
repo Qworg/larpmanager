@@ -4,7 +4,7 @@
     {% trans "Pre registrations" %} - {% trans "Organization" %}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows the total number of pre-registrations for each event" %}
+    {% trans "Track pre-registration counts for all events, broken down by preference order or total" %}
 {% endblock info %}
 {% block content %}
     <table id="pre_registrations" class="go_datatable">
@@ -12,27 +12,35 @@
             <tr>
                 <td>{% trans "Name" %}</td>
                 {% if preferences %}
-                    <td>{% trans "First" %}</td>
-                    <td>{% trans "Second" %}</td>
-                    <td>{% trans "Third" %}</td>
-                    <td>{% trans "Fourth" %}</td>
-                    <td>{% trans "Fifth" %}</td>
+                    <td>{% trans "1st choice" %}</td>
+                    <td>{% trans "2nd choice" %}</td>
+                    <td>{% trans "3rd choice" %}</td>
+                    <td>{% trans "4th choice" %}</td>
+                    <td>{% trans "5th choice" %}</td>
                 {% else %}
                     <td>{% trans "Total" %}</td>
                 {% endif %}
             </tr>
         </thead>
-        {% for el in list %}
-            <tr>
-                <td>
-                    <a href="{% url 'orga_pre_registrations' el.slug %}">{{ el }}</a>
-                </td>
-                {% if preferences %}
-                    {% for k, v in el.count.items %}<td>{{ v }}</td>{% endfor %}
-                {% else %}
-                    <td>{{ el.total }}</td>
-                {% endif %}
-            </tr>
-        {% endfor %}
+        <tbody>
+            {% for el in list %}
+                <tr>
+                    <td></td>
+                    <td>
+                        <a href="{% url 'orga_pre_registrations' el.slug %}">{{ el }}</a>
+                    </td>
+                    {% if preferences %}
+                        {% for k, v in el.count.items %}<td>{{ v }}</td>{% endfor %}
+                    {% else %}
+                        <td>{{ el.total }}</td>
+                    {% endif %}
+                </tr>
+            {% endfor %}
+        </tbody>
     </table>
+    {% if not list %}
+        <p class="no-elements-available">
+            {% trans "No pre-registrations found. Pre-registrations will appear here once participants sign up for upcoming events." %}
+        </p>
+    {% endif %}
 {% endblock content %}

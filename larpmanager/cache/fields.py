@@ -42,13 +42,7 @@ def clear_event_fields_cache(event_id: int) -> None:
 
 
 def _ensure_cache_structure(cached_fields: dict, applicable_label: str, section: str) -> None:
-    """Ensure the nested cache structure exists for given applicability and section.
-
-    Args:
-        cached_fields: The cache dictionary to update
-        applicable_label: The applicability label key
-        section: The section name (e.g., 'questions', 'options', 'names', 'ids')
-    """
+    """Ensure the nested cache structure exists for given applicability and section."""
     if applicable_label not in cached_fields:
         cached_fields[applicable_label] = {}
     if section not in cached_fields[applicable_label]:
@@ -160,7 +154,7 @@ def _process_visible_questions(writing_fields_data: dict, *, only_visible: bool)
     return questions, visible_question_uuids, searchable_question_uuids
 
 
-def visible_writing_fields(context: dict, applicable: str, *, only_visible: bool = True) -> None:
+def visible_writing_fields(context: dict, applicable: str, *, only_visible: bool = True) -> dict:
     """Filter and cache visible writing fields based on visibility settings.
 
     This function processes writing fields from the context and filters them based on
@@ -174,23 +168,21 @@ def visible_writing_fields(context: dict, applicable: str, *, only_visible: bool
                      includes all fields regardless of visibility. Defaults to True.
 
     Returns:
-        None: Results are stored directly in the context dictionary under 'questions',
-              'options', and 'searchable' keys.
+        Dict: Dictionary with 'questions', 'options', and 'searchable' keys.
 
     """
     # Get the label key for the applicable question type
     applicable_type_key = QuestionApplicable(applicable).label
 
     # Initialize result containers in context
-    context["questions"] = {}
-    context["options"] = {}
-    context["searchable"] = {}
+    result = {"questions": {}, "options": {}, "searchable": {}}
 
     # Early return if applicable key not found
     if "writing_fields" not in context:
         context["writing_fields"] = get_event_fields_cache(context["event"].id)
+
     if applicable_type_key not in context["writing_fields"]:
-        return
+        return result
 
     # Get the relevant writing fields data
     writing_fields_data = context["writing_fields"][applicable_type_key]
@@ -199,24 +191,27 @@ def visible_writing_fields(context: dict, applicable: str, *, only_visible: bool
     questions, visible_question_uuids, searchable_question_uuids = _process_visible_questions(
         writing_fields_data, only_visible=only_visible
     )
-    context["questions"] = questions
+    result["questions"] = questions
 
     # Process options if they exist, linking them to visible questions
     if "options" in writing_fields_data:
         for option_uuid, option_data in writing_fields_data["options"].items():
+            q_uuid_str = str(option_data.get("question__uuid"))
             # Include options for visible questions
-            if option_data.get("question__uuid") in visible_question_uuids:
-                context["options"][option_uuid] = option_data
+            if q_uuid_str in visible_question_uuids:
+                result["options"][option_uuid] = option_data
 
             # Build searchable options mapping by question UUID
-            if option_data.get("question__uuid") in searchable_question_uuids:
-                if option_data["question__uuid"] not in context["searchable"]:
-                    context["searchable"][option_data["question__uuid"]] = []
-                context["searchable"][option_data["question__uuid"]].append(str(option_data["uuid"]))
+            if q_uuid_str in searchable_question_uuids:
+                if q_uuid_str not in result["searchable"]:
+                    result["searchable"][q_uuid_str] = []
+                result["searchable"][q_uuid_str].append(str(option_data["uuid"]))
 
         # Sort searchable options by their order field
-        for question_uuid in context["searchable"]:
-            context["searchable"][question_uuid] = sorted(
-                context["searchable"][question_uuid],
-                key=lambda opt_uuid: context["options"].get(opt_uuid, {}).get("order", 0),
+        for question_uuid in result["searchable"]:
+            result["searchable"][question_uuid] = sorted(
+                result["searchable"][question_uuid],
+                key=lambda opt_uuid: result["options"].get(opt_uuid, {}).get("order", 0),
             )
+
+    return result

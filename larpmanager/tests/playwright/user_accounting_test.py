@@ -30,7 +30,8 @@ from typing import Any
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, go_to, load_image, login_orga, submit, submit_confirm, expect_normalized
+from larpmanager.tests.utils import go_to, load_image, login_orga, submit, submit_confirm, expect_normalized, \
+    confirm_modal
 
 pytestmark = pytest.mark.e2e
 
@@ -77,6 +78,11 @@ def prepare(page: Any, live_server: Any) -> None:
     page.locator("#id_wire_payee").press("Tab")
     page.locator("#id_wire_iban").fill("test iban")
     page.locator("#id_wire_bic").fill("test iban")
+    page.get_by_role("checkbox", name="Freeform").check()
+    page.locator("#id_any_descr").click()
+    page.locator("#id_any_descr").fill("freeeeee")
+    page.locator("#id_any_fee").click()
+    page.locator("#id_any_fee").fill("1")
     submit_confirm(page)
 
 
@@ -100,10 +106,11 @@ def donation(page: Any, live_server: Any) -> None:
     expect_normalized(page, page.locator("#one"), "test iban")
     submit(page)
 
-    go_to(page, live_server, "/manage/invoices")
+    go_to(page, live_server, "/manage/donations")
     # Check for donation invoice in the table
-    expect(page.get_by_role("row", name="Admin Test Wire donation")).to_be_visible()
-    page.get_by_role("link", name="Confirm").click()
+    expect(page.get_by_role("row", name="Admin Test Wire")).to_be_visible()
+    page.get_by_role("link", name="Confirm").first.click()
+    confirm_modal(page)
 
     go_to(page, live_server, "/accounting")
     expect_normalized(page, page.locator("#one"), "Donations done")
@@ -158,10 +165,11 @@ def membership_fees(page: Any, live_server: Any) -> None:
     expect_normalized(page, page.locator("#one"), "test iban")
     submit(page)
 
-    go_to(page, live_server, "/manage/invoices")
+    go_to(page, live_server, "/manage/membership")
     # Check for membership fee invoice in the table
-    expect(page.get_by_role("row", name="Admin Test Wire membership")).to_be_visible()
-    page.get_by_role("link", name="Confirm").click()
+    expect(page.get_by_role("row", name="Admin Test Wire")).to_be_visible()
+    page.get_by_role("link", name="Confirm").first.click()
+    confirm_modal(page)
 
     go_to(page, live_server, "/accounting")
     expect(page.locator("#one")).not_to_contain_text("Payment membership fee")
@@ -180,6 +188,7 @@ def collections(page: Any, live_server: Any) -> None:
     page.get_by_role("link", name="Link to participate in").click()
     page.locator("#id_amount").click()
     page.locator("#id_amount").fill("20")
+    page.get_by_role("cell", name="Wire", exact=True).click()
     submit(page)
 
     expect_normalized(page, page.locator("#one"), "20")
@@ -190,14 +199,15 @@ def collections(page: Any, live_server: Any) -> None:
     expect_normalized(page, page.locator("#one"), "test iban")
     submit(page)
 
-    go_to(page, live_server, "/manage/invoices")
+    go_to(page, live_server, "/manage/collections")
     expect_normalized(page, page.locator("#one"), "Collected contribution of Admin Test for User")
-    page.get_by_role("link", name="Confirm").click()
+    page.get_by_role("link", name="Confirm").first.click()
+    confirm_modal(page)
 
     go_to(page, live_server, "/accounting")
     page.get_by_role("link", name="Manage it here!").click()
-    page.get_by_role("link", name="Link to close the collection").click()
-    page.get_by_role("link", name="Collection links").click()
+    page.get_by_role("link", name="Close the collection").click()
+    page.get_by_role("link", name="Redeem link").click()
     submit_confirm(page)
 
     go_to(page, live_server, "/accounting")

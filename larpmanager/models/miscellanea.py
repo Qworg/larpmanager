@@ -17,15 +17,15 @@
 # commercial@larpmanager.com
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
+from __future__ import annotations
 
 import random
 import secrets
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q, UniqueConstraint
-from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from imagekit.models import ImageSpecField
@@ -33,13 +33,16 @@ from pilkit.processors import ResizeToFit
 from tinymce.models import HTMLField
 
 from larpmanager.models.association import Association
-from larpmanager.models.base import BaseModel, UuidMixin
-from larpmanager.models.event import Event, Run
-from larpmanager.models.member import Member
+from larpmanager.models.base import BaseModel, OrderMixin, UuidMixin
+from larpmanager.models.event import BaseConceptModel, Event, Run
+from larpmanager.models.member import LogOperationType, Member
 from larpmanager.models.registration import Registration
 from larpmanager.models.utils import UploadToPathAndRename, download, my_uuid, my_uuid_miny, show_thumb
 from larpmanager.models.writing import Character
 from larpmanager.utils.core.validators import FileTypeValidator
+
+if TYPE_CHECKING:
+    from django.http import HttpResponse
 
 
 class HelpQuestion(UuidMixin, BaseModel):
@@ -64,7 +67,7 @@ class HelpQuestion(UuidMixin, BaseModel):
     text = models.TextField(
         max_length=5000,
         verbose_name=_("Text"),
-        help_text=_("Write your question, request or concern here. We will be happy to answer you!"),
+        help_text=_("Write your question, request, or concern here. We will be happy to help!"),
     )
 
     closed = models.BooleanField(default=False)
@@ -301,7 +304,12 @@ class AlbumImage(BaseModel):
         # noinspection PyUnresolvedReferences
         s = self.original.url
         # Split by /media/ and take the third part (after two splits)
-        return "/media/" + s.split("/media/")[2]
+        parts = s.split("/media/")
+        expected_parts = 3
+        if len(parts) >= expected_parts:
+            return "/media/" + parts[2]
+        # Fallback: return the URL as-is if it doesn't have expected structure
+        return s
 
 
 class Competence(BaseModel):
@@ -309,7 +317,7 @@ class Competence(BaseModel):
 
     name = models.CharField(max_length=100, help_text=_("The name of the competence"))
 
-    descr = models.CharField(max_length=5000, help_text=_("A description of the skills / abilities involved"))
+    descr = models.CharField(max_length=5000, help_text=_("A description of the abilities involved"))
 
     association = models.ForeignKey(Association, on_delete=models.CASCADE)
 
@@ -339,7 +347,7 @@ class CompetenceMemberRel(BaseModel):
         unique_together: ClassVar[list] = ["competence", "member", "deleted"]
 
 
-class WorkshopModule(UuidMixin, BaseModel):
+class WorkshopModule(UuidMixin, OrderMixin, BaseModel):
     """Model for managing workshop modules and member participation."""
 
     search = models.CharField(max_length=150, editable=False)
@@ -378,7 +386,7 @@ class WorkshopMemberRel(BaseModel):
         return f"{self.workshop} - {self.member}"
 
 
-class WorkshopQuestion(UuidMixin, BaseModel):
+class WorkshopQuestion(UuidMixin, OrderMixin, BaseModel):
     """Represents WorkshopQuestion model."""
 
     search = models.CharField(max_length=200, editable=False)
@@ -417,7 +425,7 @@ class WorkshopQuestion(UuidMixin, BaseModel):
         ]
 
 
-class WorkshopOption(UuidMixin, BaseModel):
+class WorkshopOption(UuidMixin, OrderMixin, BaseModel):
     """Represents WorkshopOption model."""
 
     search = models.CharField(max_length=500, editable=False)
@@ -437,12 +445,7 @@ class WorkshopOption(UuidMixin, BaseModel):
         return f"{self.question} {self.name} ({self.is_correct})"
 
     def show(self) -> dict[str, Any]:
-        """Return JSON-serializable dict with answer option data.
-
-        Returns:
-            Dictionary with uuid, correctness flag, and name if present.
-
-        """
+        """Return JSON-serializable dict with answer option data."""
         # noinspection PyUnresolvedReferences
         # Build base dict with uuid and correctness status
         js = {"uuid": str(self.uuid), "is_correct": self.is_correct}
@@ -605,31 +608,29 @@ class ShuttleService(UuidMixin, BaseModel):
 
     passengers = models.IntegerField(
         verbose_name=_("Number of passengers"),
-        help_text=_("Indicates how many passengers require transportation"),
+        help_text=_("Number of passengers requiring transportation."),
     )
 
     address = models.TextField(
-        verbose_name=_("Address"),
-        help_text=_("Indicate as precisely as possible where to pick you up"),
+        verbose_name=_("Pickup location"),
+        help_text=_("Provide as precise a location or address as possible for pickup."),
     )
 
     info = models.TextField(
-        verbose_name=_("Informations"),
+        verbose_name=_("Additional details"),
         help_text=_(
-            "Indicates how you can be recognized, if you will be found near some point "
-            "specific, if you have a lot of luggage: any information that might help us help "
-            "you",
+            "Include identifying details (e.g., clothing, luggage, precise meeting point) to help us locate you."
         ),
     )
 
     date = models.DateField(
-        verbose_name=_("Request date"),
-        help_text=_("For which day you will need transportation"),
+        verbose_name=_("Pickup date"),
+        help_text=_("The date transportation is needed."),
     )
 
     time = models.TimeField(
-        verbose_name=_("Request time"),
-        help_text=_("For what time you will need transportation (time zone of the larp location)"),
+        verbose_name=_("Pickup time"),
+        help_text=_("The time transportation is needed (local event time zone)."),
     )
 
     working = models.ForeignKey(
@@ -641,10 +642,8 @@ class ShuttleService(UuidMixin, BaseModel):
     )
 
     notes = models.TextField(
-        verbose_name=_("Note"),
-        help_text=_(
-            "Indicates useful information to passengers, such as color of your car, time estimated time of your arrival",
-        ),
+        verbose_name=_("Passenger instructions"),
+        help_text=_("Information for passengers (such as car color/model, estimated arrival time)."),
         null=True,
     )
 
@@ -686,12 +685,6 @@ class Problem(UuidMixin, BaseModel):
         choices=ProblemSeverity.choices,
         default=ProblemSeverity.GREEN,
         verbose_name=_("Severity"),
-        help_text=_(
-            "Indicate severity: RED (risks ruining the event for more than half of the "
-            "participants), ORANGE (risks ruining the event for more than ten participants),  YELLOW "
-            "(risks ruining the event for a few participants), GREEN (more than  problems, finesses "
-            "to be fixed)",
-        ),
     )
 
     status = models.CharField(
@@ -699,34 +692,26 @@ class Problem(UuidMixin, BaseModel):
         choices=ProblemStatus.choices,
         default=ProblemStatus.OPEN,
         verbose_name=_("Status"),
-        help_text=_(
-            "When putting in WORKING, indicate in the comments the specific actions that  are "
-            "being performed; when putting in CLOSED, indicate showd in the  comments.",
-        ),
         db_index=True,
     )
 
     where = models.TextField(
         verbose_name=_("Where"),
-        help_text=_("Describe exactly at which point it occurs"),
     )
 
     when = models.TextField(
         verbose_name=_("When"),
-        help_text=_("Describe exactly what condition it is in"),
     )
 
     what = models.TextField(
         verbose_name=_("What"),
-        help_text=_("Describe exactly what risks it poses to the event"),
     )
 
     who = models.TextField(
         verbose_name=_("Who"),
-        help_text=_("Describe exactly which participants are involved"),
     )
 
-    assigned = models.CharField(max_length=100, help_text=_("Who takes it upon themselves to solve it"))
+    assigned = models.CharField(max_length=100)
 
     comments = models.TextField(blank=True)
 
@@ -801,28 +786,109 @@ class PlayerRelationship(BaseModel):
         ]
 
 
-class Email(UuidMixin, BaseModel):
-    """Represents Email model."""
+class EmailContent(UuidMixin, BaseModel):
+    """Email content template shared across multiple recipients."""
 
     association = models.ForeignKey(Association, on_delete=models.CASCADE, blank=True, null=True)
 
     run = models.ForeignKey(Run, on_delete=models.CASCADE, blank=True, null=True)
 
-    recipient = models.CharField(max_length=170)
+    subj = models.CharField(max_length=500, verbose_name=_("Subject"))
 
-    subj = models.CharField(max_length=500)
+    body = models.TextField(verbose_name=_("Body"))
 
-    body = models.TextField()
+    reply_to = models.CharField(max_length=170, blank=True, null=True, verbose_name=_("Reply To"))
 
-    reply_to = models.CharField(max_length=170, blank=True, null=True)
+    attachment_path = models.CharField(max_length=500, blank=True, null=True, verbose_name=_("Attachment Path"))
 
-    sent = models.DateTimeField(blank=True, null=True)
+    attachment_name = models.CharField(max_length=500, blank=True, null=True, verbose_name=_("Attachment Name"))
 
-    search = models.CharField(max_length=500, blank=True)
+    search = models.CharField(max_length=500, blank=True, verbose_name=_("Search"))
+
+    class Meta:
+        indexes: ClassVar[list] = [
+            models.Index(fields=["association"], condition=Q(deleted__isnull=True), name="emailcontent_assoc_act"),
+            models.Index(fields=["run"], condition=Q(deleted__isnull=True), name="emailcontent_run_act"),
+        ]
 
     def __str__(self) -> str:
         """Return string representation."""
-        return f"{self.recipient} - {self.subj}"
+        return self.subj
+
+    def recipient_count(self) -> int:
+        """Return the count of recipients for this email content."""
+        return self.recipients.filter(deleted__isnull=True).count()
+
+    def sent_count(self) -> int:
+        """Return the count of sent emails for this email content."""
+        return self.recipients.filter(deleted__isnull=True, sent__isnull=False).count()
+
+
+class EmailRecipient(UuidMixin, BaseModel):
+    """Individual email recipient instance."""
+
+    email_content = models.ForeignKey(
+        EmailContent,
+        on_delete=models.CASCADE,
+        related_name="recipients",
+        verbose_name=_("Email Content"),
+    )
+
+    recipient = models.CharField(max_length=170, verbose_name=_("Recipient"))
+
+    sent = models.DateTimeField(blank=True, null=True, verbose_name=_("Time And Date Of Sending"))
+
+    language_code = models.CharField(max_length=10, blank=True, null=True, verbose_name=_("Language Code"))
+
+    class Meta:
+        indexes: ClassVar[list] = [
+            models.Index(fields=["email_content"], condition=Q(deleted__isnull=True), name="emailrecip_content_act"),
+            models.Index(fields=["sent"], condition=Q(deleted__isnull=True), name="emailrecip_sent_act"),
+            models.Index(fields=["recipient"], condition=Q(deleted__isnull=True), name="emailrecip_recip_act"),
+        ]
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        return f"{self.recipient} - {self.email_content.subj}"
+
+    @property
+    def association(self) -> Association | None:
+        """Return the association from the email content."""
+        return self.email_content.association
+
+    @property
+    def run(self) -> Run | None:
+        """Return the run from the email content."""
+        return self.email_content.run
+
+    @property
+    def association_id(self) -> int | None:
+        """Return the association ID from the email content."""
+        return self.email_content.association_id
+
+    @property
+    def run_id(self) -> int | None:
+        """Return the run ID from the email content."""
+        return self.email_content.run_id
+
+    @property
+    def subj(self) -> str:
+        """Return the subject from the email content."""
+        return self.email_content.subj
+
+    @property
+    def body(self) -> str:
+        """Return the body from the email content."""
+        return self.email_content.body
+
+    @property
+    def reply_to(self) -> str | None:
+        """Return the reply_to from the email content."""
+        return self.email_content.reply_to
+
+
+# Backward compatibility alias - will be removed after migration is complete
+Email = EmailContent
 
 
 class OneTimeContent(UuidMixin, BaseModel):
@@ -912,24 +978,11 @@ class OneTimeContent(UuidMixin, BaseModel):
         super().save(*args, **kwargs)
 
     def generate_token(self, note: Any = "") -> Any:
-        """Generate a new access token for this content.
-
-        Args:
-            note (str): Optional note describing the purpose of this token
-
-        Returns:
-            OneTimeAccessToken: The newly created token
-
-        """
+        """Generate a new access token for this content."""
         return OneTimeAccessToken.objects.create(content=self, note=note)
 
     def get_token_stats(self) -> Any:
-        """Get statistics about tokens for this content.
-
-        Returns:
-            dict: Dictionary with token statistics
-
-        """
+        """Get statistics about tokens for this content."""
         access_tokens = self.access_tokens.all()
         return {
             "total": access_tokens.count(),
@@ -975,7 +1028,7 @@ class OneTimeAccessToken(UuidMixin, BaseModel):
     used_at = models.DateTimeField(
         blank=True,
         null=True,
-        verbose_name=_("Used at"),
+        verbose_name=_("Time And Date Of Use"),
         help_text=_("When this token was used"),
     )
 
@@ -985,7 +1038,7 @@ class OneTimeAccessToken(UuidMixin, BaseModel):
         blank=True,
         null=True,
         related_name="used_onetime_tokens",
-        verbose_name=_("Used by"),
+        verbose_name=_("User"),
         help_text=_("Member who used this token (if authenticated)"),
     )
 
@@ -1019,27 +1072,126 @@ class OneTimeAccessToken(UuidMixin, BaseModel):
             self.token = secrets.token_urlsafe(48)
         super().save(*args, **kwargs)
 
-    def mark_as_used(self, http_request: Any = None, authenticated_member: Any = None) -> None:
-        """Mark this token as used and record access information.
+    def mark_as_used(self, http_request: Any = None, authenticated_member: Any = None) -> bool:
+        """Atomically mark this token as used and record access information.
+
+        Locks the row and re-checks the used flag inside the transaction so a
+        token cannot be consumed more than once by concurrent requests.
 
         Args:
             http_request: Django HttpRequest object to extract metadata
             authenticated_member: Member object if user is authenticated
 
+        Returns:
+            True if this call consumed the token, False if it was already used.
+
         """
-        self.used = True
-        self.used_at = timezone.now()
-        self.used_by = authenticated_member
+        with transaction.atomic():
+            locked = OneTimeAccessToken.objects.select_for_update().get(pk=self.pk)
+            if locked.used:
+                return False
 
-        if http_request:
-            # Extract IP address
-            forwarded_for_header = http_request.META.get("HTTP_X_FORWARDED_FOR")
-            if forwarded_for_header:
-                self.ip_address = forwarded_for_header.split(",")[0].strip()
-            else:
-                self.ip_address = http_request.META.get("REMOTE_ADDR")
+            locked.used = True
+            locked.used_at = timezone.now()
+            locked.used_by = authenticated_member
 
-            # Extract user agent
-            self.user_agent = http_request.META.get("HTTP_USER_AGENT", "")[:500]
+            if http_request:
+                # Extract IP address
+                forwarded_for_header = http_request.META.get("HTTP_X_FORWARDED_FOR")
+                if forwarded_for_header:
+                    locked.ip_address = forwarded_for_header.split(",")[0].strip()
+                else:
+                    locked.ip_address = http_request.META.get("REMOTE_ADDR")
 
-        self.save()
+                # Extract user agent
+                locked.user_agent = http_request.META.get("HTTP_USER_AGENT", "")[:500]
+
+            locked.save()
+
+        # Reflect the persisted state on the in-memory instance
+        self.used = locked.used
+        self.used_at = locked.used_at
+        self.used_by = locked.used_by
+        self.ip_address = locked.ip_address
+        self.user_agent = locked.user_agent
+        return True
+
+
+class Log(BaseModel):
+    """Represents Log model."""
+
+    member = models.ForeignKey(Member, on_delete=models.CASCADE)
+
+    eid = models.IntegerField()
+
+    cls = models.CharField(max_length=100)
+
+    dct = models.TextField()
+
+    operation_type = models.CharField(
+        max_length=10,
+        choices=LogOperationType.choices,
+        default=LogOperationType.UPDATE,
+        db_index=True,
+    )
+
+    element_name = models.CharField(max_length=500, blank=True)
+
+    info = models.CharField(max_length=500, blank=True, null=True)
+
+    association = models.ForeignKey(Association, on_delete=models.CASCADE, blank=True, null=True)
+
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, blank=True, null=True)
+
+    class Meta:
+        """Meta options for Log model."""
+
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["member", "-created"]),  # For widget queries
+            models.Index(fields=["-created"]),  # For general ordering
+        ]
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        return f"{self.cls} {self.eid}"
+
+
+class MilestoneStatus(models.TextChoices):
+    """Status choices for Milestone."""
+
+    TODO = "todo", _("To Do")
+    IN_PROGRESS = "in_progress", _("In Progress")
+    COMPLETED = "completed", _("Completed")
+
+
+class Milestone(UuidMixin, BaseConceptModel):
+    """Track event milestones with status, deadline, and staff assignment."""
+
+    status = models.CharField(
+        max_length=20,
+        choices=MilestoneStatus.choices,
+        default=MilestoneStatus.TODO,
+        verbose_name=_("Status"),
+    )
+
+    description = models.TextField(
+        blank=True,
+        verbose_name=_("Description"),
+    )
+
+    deadline = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name=_("Deadline"),
+    )
+
+    assigned = models.ForeignKey(
+        Member,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        verbose_name=_("Assigned to"),
+    )
+
+    class Meta:
+        indexes: ClassVar[list] = [models.Index(fields=["event", "deadline"])]

@@ -11,7 +11,7 @@ DATABASES = {
         'USER': 'larpmanager',
         'PASSWORD': 'larpmanager',
         "HOST": os.getenv("DB_HOST", "localhost"),
-        'PORT': '5432',
+        'PORT': '5432'
    }
 }
 
@@ -28,6 +28,8 @@ COMPRESS_ENABLED = False
 AUTO_BACKGROUND_TASKS = True
 
 DEBUG = False
+
+DEBUG_UUID = True
 EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
 CELERY_TASK_ALWAYS_EAGER = True
 STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.StaticFilesStorage'
@@ -47,6 +49,8 @@ LOGGING = {
 }
 
 FORMS_URLFIELD_ASSUME_HTTPS = True
+
+TINYMCE_DISABLED = True
 
 ADMINS = [
     ('test', 'test@test.it')

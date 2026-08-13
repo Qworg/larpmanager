@@ -27,15 +27,16 @@ from larpmanager.forms.member import (
     MyPasswordResetForm,
     MyRegistrationFormUniqueEmail,
 )
-from larpmanager.views import auth as views_auth
-from larpmanager.views import base as views_base
+from larpmanager.views import auth as views_auth, base as views_base
 from larpmanager.views.base import MyLoginView
-from larpmanager.views.user import accounting as views_ua
-from larpmanager.views.user import event as views_ue
-from larpmanager.views.user import member as views_um
-from larpmanager.views.user import miscellanea as views_ums
-from larpmanager.views.user import onetime as views_onetime
-from larpmanager.views.user import registration as views_ur
+from larpmanager.views.user import (
+    accounting as views_ua,
+    event as views_ue,
+    member as views_um,
+    miscellanea as views_ums,
+    onetime as views_onetime,
+    registration as views_ur,
+)
 
 urlpatterns = [
     path(
@@ -79,16 +80,6 @@ urlpatterns = [
         name="help_attachment",
     ),
     path(
-        "home/json/",
-        views_ue.home_json,
-        name="home_json",
-    ),
-    path(
-        "home/json/<slug:lang>/",
-        views_ue.home_json,
-        name="home_json",
-    ),
-    path(
         "language/",
         views_um.language,
         name="language",
@@ -97,6 +88,11 @@ urlpatterns = [
         "profile/",
         views_um.profile,
         name="profile",
+    ),
+    path(
+        "profile/upgrade/",
+        views_um.profile_upgrade,
+        name="profile_upgrade",
     ),
     path(
         "profile/upload/",
@@ -117,6 +113,11 @@ urlpatterns = [
         "profile/privacy/rewoke/<slug:slug>/",
         views_um.profile_privacy_rewoke,
         name="profile_privacy_rewoke",
+    ),
+    path(
+        "security",
+        views_um.security,
+        name="security",
     ),
     path(
         "pre_register/",
@@ -176,7 +177,7 @@ urlpatterns = [
     path(
         "chats/",
         views_um.chats,
-        name="chats",
+        name="messages",
     ),
     path(
         "chat/<slug:slug>/",
@@ -189,7 +190,7 @@ urlpatterns = [
         name="vote",
     ),
     path(
-        "unsubscribe/",
+        "unsubscribe/<str:token>/",
         views_um.unsubscribe,
         name="unsubscribe",
     ),
@@ -254,6 +255,11 @@ urlpatterns = [
         name="accounting_cancelled",
     ),
     path(
+        "accounting/payed/",
+        views_ua.accounting_payed,
+        name="accounting_payed",
+    ),
+    path(
         "accounting/payed/<slug:registration_uuid>/",
         views_ua.accounting_payed,
         name="accounting_payed",
@@ -262,16 +268,6 @@ urlpatterns = [
         "accounting/wait/",
         views_ua.accounting_wait,
         name="accounting_wait",
-    ),
-    path(
-        "accounting/webhook/paypal/",
-        views_ua.accounting_webhook_paypal,
-        name="accounting_webhook_paypal",
-    ),
-    path(
-        "accounting/webhook/paypal/<slug:event_slug>/",
-        views_ua.accounting_webhook_paypal,
-        name="accounting_webhook_paypal",
     ),
     path(
         "accounting/webhook/satispay",
@@ -339,7 +335,7 @@ urlpatterns = [
         name="accounting_collection_redeem",
     ),
     path(
-        "accounting/submit/<slug:payment_method>/<path:redirect_path>/",
+        "accounting/submit/<slug:payment_method>/<slug:invoice_uuid>/<path:redirect_path>/",
         views_ua.accounting_submit,
         name="accounting_submit",
     ),
@@ -391,6 +387,7 @@ urlpatterns = [
         name="registration_register",
     ),
     path("login/", MyLoginView.as_view(), name="login"),
+    path("login/otp/", views_um.otp_verify, name="otp_verify"),
     path(
         "logout/",
         auth_views.LogoutView.as_view(next_page=conf_settings.LOGOUT_REDIRECT_URL),
@@ -398,7 +395,7 @@ urlpatterns = [
     ),
     path(
         "password_reset/",
-        auth_views.PasswordResetView.as_view(form_class=MyPasswordResetForm),
+        views_auth.MyPasswordResetView.as_view(form_class=MyPasswordResetForm),
         name="password_reset",
     ),
     path(
@@ -412,7 +409,7 @@ urlpatterns = [
         name="after_login",
     ),
     path(
-        "after_login/<slug:subdomain>/<path:path>",
+        "after_login/<slug:subdomain>/<path:path>/",
         views_base.after_login,
         name="after_login",
     ),
@@ -436,5 +433,25 @@ urlpatterns = [
         "stream/<str:token>/",
         views_onetime.onetime_stream,
         name="onetime_stream",
+    ),
+    path(
+        "integration/redirect/",
+        views_ums.app_integration_redirect,
+        name="app_integration_redirect",
+    ),
+    path(
+        "invite/role/<str:token>/",
+        views_ums.role_invite_redeem,
+        name="role_invite_redeem",
+    ),
+    path(
+        "api/json/",
+        views_ue.api_json,
+        name="api_json",
+    ),
+    path(
+        "api/json/<slug:lang>/",
+        views_ue.api_json,
+        name="api_json",
     ),
 ]

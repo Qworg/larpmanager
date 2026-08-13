@@ -2,15 +2,15 @@
 {% load i18n show_tags %}
 {% block title %}
     {% trans label_typ as name %}
-    {% trans "Form questions" %} - {{ name }} - {{ run }}
+    {{ name }} {% trans "Sheet" %} - {{ run.search | truncatechars:50 }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page summarises the available questions of the character form" %}
+    {{ page_info }}
 {% endblock info %}
 {% block content %}
     {% if available_typ|length > 1 %}
         <p>
-            {% trans "Configure form" %}:
+            {% trans "Configure form:" %}
             {% for nm in available_typ.keys %}
                 {% include "elements/comma.html" %}
                 {% if nm == label_typ %}
@@ -22,10 +22,15 @@
         </p>
         <hr />
     {% endif %}
-    {% include "elements/header/edit.html" %}
-    <table id="character_questions" class="go_datatable writing ordering_arrow">
+    {% include "elements/table/header.html" %}
+    <table id="character_questions"
+           class="go_datatable writing row_reorder"
+           data-reorder-url="{% url 'orga_reorder_items' run.get_slug %}"
+           data-reorder-model="orga_character_form">
         <thead>
             <tr>
+                <th></th>
+                <th class="reorder-handle"></th>
                 <th></th>
                 <th>{% trans "Name" %}</th>
                 <th>{% trans "Description" %}</th>
@@ -34,17 +39,20 @@
                     <th>{% trans "Status" %}</th>
                 {% endif %}
                 <th>{% trans "Visibility" %}</th>
-                {% if approval %}
+                {% if approval and typ == "character" %}
                     <th>{% trans "Modifiable" %}</th>
                 {% endif %}
                 <th>{% trans "Options" %}</th>
-                <th></th>
                 <th></th>
             </tr>
         </thead>
         <tbody>
             {% for el in list %}
                 <tr id="{{ el.uuid }}">
+                    <td></td>
+                    <td class="reorder-handle">
+                        <i class="fa-solid fa-grip-vertical"></i>
+                    </td>
                     <td>
                         <a href="{% url 'orga_writing_form_edit' run.get_slug typ el.uuid %}"
                            qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
@@ -60,29 +68,32 @@
                     <td>
                         {% if el.typ|not_in:"name,teaser,text,factions_list" %}{{ el.get_visibility_display }}{% endif %}
                     </td>
-                    {% if approval %}<td>{{ el.get_editable_display }}</td>{% endif %}
+                    {% if approval and typ == "character" %}
+                        <td>
+                            {% if el.status|not_in:"d" and el.status|not_in:"h" and el.typ|not_in:"c" %}{{ el.get_editable_display }}{% endif %}
+                        </td>
+                    {% endif %}
                     <td>
                         {% for ch in el.options_list %}
                             {% include "elements/comma.html" %}
-                            <a href="{% url 'orga_writing_options_edit' run.get_slug typ ch.uuid %}">{{ ch.name }}</a>
+                            {{ ch.name }}
                         {% endfor %}
                     </td>
                     <td>
-                        {% if not forloop.first %}
-                            <a href="{% url 'orga_writing_form_order' run.get_slug typ el.uuid 0 %}">
-                                <i class="fa-solid fa-arrow-up"></i>
-                            </a>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if not forloop.last %}
-                            <a href="{% url 'orga_writing_form_order' run.get_slug typ el.uuid 1 %}">
-                                <i class="fa-solid fa-arrow-down"></i>
-                            </a>
+                        {% if el.typ|length == 1 %}
+                            <a href="{% url 'orga_writing_form_delete' run.get_slug typ el.uuid %}"
+                               qtip="{% trans "Delete" %}"
+                               class="only_new_v18"><i class="fas fa-trash"></i></a>
                         {% endif %}
                     </td>
                 </tr>
             {% endfor %}
         </tbody>
     </table>
+    {% if not list %}
+        <p class="no-elements-available">
+            {% trans "No form fields defined yet. Add a field to collect information from players on their character sheet." %}
+        </p>
+    {% endif %}
+    {% include "elements/table/footer.html" %}
 {% endblock content %}

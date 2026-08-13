@@ -25,9 +25,8 @@ from unittest.mock import MagicMock, patch
 from larpmanager.tests.unit.base import BaseTestCase
 from larpmanager.utils.services.experience import (
     _apply_modifier_cost,
-    check_available_ability_px,
     get_free_abilities,
-    set_free_abilities,
+    set_free_abilities, check_available_ability_exp,
 )
 
 
@@ -66,17 +65,17 @@ class TestExperienceUtilityFunctions(BaseTestCase):
             self.assertEqual(args[1], "free_abilities")
             self.assertEqual(args[2], "[1, 2, 3]")
 
-    def test_check_available_ability_px_no_prereq(self) -> None:
+    def test_check_available_ability_exp_no_prereq(self) -> None:
         """Test check_available_ability_px with no prerequisites"""
         ability = MagicMock()
         ability.prerequisites.all.return_value = []
         ability.requirements.all.return_value = []
 
-        result = check_available_ability_px(ability, set(), set())
+        result = check_available_ability_exp(ability, set(), set())
 
         self.assertTrue(result)
 
-    def test_check_available_ability_px_prereq_met(self) -> None:
+    def test_check_available_ability_exp_prereq_met(self) -> None:
         """Test check_available_ability_px with prerequisites met"""
         prereq1 = MagicMock()
         prereq1.id = 1
@@ -88,11 +87,11 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.requirements.all.return_value = []
 
         current_abilities = {1, 2, 3}
-        result = check_available_ability_px(ability, current_abilities, set())
+        result = check_available_ability_exp(ability, current_abilities, set())
 
         self.assertTrue(result)
 
-    def test_check_available_ability_px_prereq_not_met(self) -> None:
+    def test_check_available_ability_exp_prereq_not_met(self) -> None:
         """Test check_available_ability_px with prerequisites not met"""
         prereq1 = MagicMock()
         prereq1.id = 1
@@ -104,42 +103,80 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.requirements.all.return_value = []
 
         current_abilities = {1, 2, 3}
-        result = check_available_ability_px(ability, current_abilities, set())
+        result = check_available_ability_exp(ability, current_abilities, set())
 
         # Missing prerequisite 5
         self.assertFalse(result)
 
-    def test_check_available_ability_px_requirements_met(self) -> None:
-        """Test check_available_ability_px with requirements met"""
+    def test_check_available_ability_exp_requirements_met(self) -> None:
+        """Test check_available_ability_px with requirements met (one option per field)"""
         req1 = MagicMock()
         req1.id = 10
+        req1.question_id = 1
         req2 = MagicMock()
         req2.id = 20
+        req2.question_id = 2
 
         ability = MagicMock()
         ability.prerequisites.all.return_value = []
         ability.requirements.all.return_value = [req1, req2]
 
         current_choices = {10, 20, 30}
-        result = check_available_ability_px(ability, set(), current_choices)
+        result = check_available_ability_exp(ability, set(), current_choices)
 
         self.assertTrue(result)
 
-    def test_check_available_ability_px_requirements_not_met(self) -> None:
-        """Test check_available_ability_px with requirements not met"""
+    def test_check_available_ability_exp_requirements_not_met(self) -> None:
+        """Test check_available_ability_px with requirements not met (field 2 unsatisfied)"""
         req1 = MagicMock()
         req1.id = 10
+        req1.question_id = 1
         req2 = MagicMock()
         req2.id = 25
+        req2.question_id = 2
 
         ability = MagicMock()
         ability.prerequisites.all.return_value = []
         ability.requirements.all.return_value = [req1, req2]
 
         current_choices = {10, 20, 30}
-        result = check_available_ability_px(ability, set(), current_choices)
+        result = check_available_ability_exp(ability, set(), current_choices)
 
-        # Missing requirement 25
+        # Field 2 (option 25) not satisfied
+        self.assertFalse(result)
+
+    def test_check_available_ability_exp_or_within_field(self) -> None:
+        """Test OR within a single field: either option satisfies the requirement"""
+        req1 = MagicMock()
+        req1.id = 10
+        req1.question_id = 1
+        req2 = MagicMock()
+        req2.id = 20
+        req2.question_id = 1  # Same field as req1
+
+        ability = MagicMock()
+        ability.prerequisites.all.return_value = []
+        ability.requirements.all.return_value = [req1, req2]
+
+        # Only option 20 selected (not 10), but both are in field 1 -> OR -> satisfied
+        result = check_available_ability_exp(ability, set(), {20, 30})
+        self.assertTrue(result)
+
+    def test_check_available_ability_exp_and_between_fields(self) -> None:
+        """Test AND between fields: all fields must have at least one option selected"""
+        req1 = MagicMock()
+        req1.id = 10
+        req1.question_id = 1
+        req2 = MagicMock()
+        req2.id = 20
+        req2.question_id = 2
+
+        ability = MagicMock()
+        ability.prerequisites.all.return_value = []
+        ability.requirements.all.return_value = [req1, req2]
+
+        # Field 1 satisfied (option 10), field 2 not satisfied -> AND -> not available
+        result = check_available_ability_exp(ability, set(), {10, 30})
         self.assertFalse(result)
 
     def test_apply_modifier_cost_no_modifiers(self) -> None:
@@ -161,7 +198,7 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.cost = 100
 
         # Modifier: cost 50, no prereqs, no reqs
-        mods_by_ability = {1: [(50, set(), set())]}
+        mods_by_ability = {1: [(50, set(), {}, set())]}
 
         _apply_modifier_cost(ability, mods_by_ability, set(), set())
 
@@ -175,7 +212,7 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.cost = 100
 
         # Modifier requires prerequisite ability 5
-        mods_by_ability = {1: [(50, {5}, set())]}
+        mods_by_ability = {1: [(50, {5}, {}, set())]}
         current_abilities = {1, 2, 3}
 
         _apply_modifier_cost(ability, mods_by_ability, current_abilities, set())
@@ -190,7 +227,7 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.cost = 100
 
         # Modifier requires prerequisite ability 5
-        mods_by_ability = {1: [(50, {5}, set())]}
+        mods_by_ability = {1: [(50, {5}, {}, set())]}
         current_abilities = {1, 2, 3, 5}
 
         _apply_modifier_cost(ability, mods_by_ability, current_abilities, set())
@@ -204,8 +241,8 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.id = 1
         ability.cost = 100
 
-        # Modifier requires choice option 10
-        mods_by_ability = {1: [(50, set(), {10})]}
+        # Modifier requires choice option 10 from field (question) 1
+        mods_by_ability = {1: [(50, set(), {1: {10}}, set())]}
         current_choices = {5, 6, 7}
 
         _apply_modifier_cost(ability, mods_by_ability, set(), current_choices)
@@ -219,8 +256,8 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.id = 1
         ability.cost = 100
 
-        # Modifier requires choice option 10
-        mods_by_ability = {1: [(50, set(), {10})]}
+        # Modifier requires choice option 10 from field (question) 1
+        mods_by_ability = {1: [(50, set(), {1: {10}}, set())]}
         current_choices = {5, 6, 7, 10}
 
         _apply_modifier_cost(ability, mods_by_ability, set(), current_choices)
@@ -235,7 +272,7 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.cost = 100
 
         # Multiple modifiers, first one is valid
-        mods_by_ability = {1: [(30, set(), set()), (50, set(), set()), (70, set(), set())]}
+        mods_by_ability = {1: [(30, set(), {}, set()), (50, set(), {}, set()), (70, set(), {}, set())]}
 
         _apply_modifier_cost(ability, mods_by_ability, set(), set())
 
@@ -249,7 +286,7 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.cost = 100
 
         # First modifier has unmet prereq, second is valid
-        mods_by_ability = {1: [(30, {99}, set()), (50, set(), set()), (70, set(), set())]}
+        mods_by_ability = {1: [(30, {99}, {}, set()), (50, set(), {}, set()), (70, set(), {}, set())]}
         current_abilities = {1, 2, 3}
 
         _apply_modifier_cost(ability, mods_by_ability, current_abilities, set())
@@ -263,8 +300,8 @@ class TestExperienceUtilityFunctions(BaseTestCase):
         ability.id = 1
         ability.cost = 100
 
-        # Modifier requires both prereqs and reqs
-        mods_by_ability = {1: [(50, {2, 3}, {10, 20})]}
+        # Modifier requires both prereqs and reqs (options 10 and 20 from different fields)
+        mods_by_ability = {1: [(50, {2, 3}, {1: {10}, 2: {20}}, set())]}
         current_abilities = {1, 2, 3, 4}
         current_choices = {10, 20, 30}
 

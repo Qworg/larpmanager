@@ -24,16 +24,21 @@ from typing import TYPE_CHECKING
 
 from django.conf import settings as conf_settings
 from django.core.cache import cache
+from django.db import transaction
 from django.db.models import Max
 from django.http import Http404
 from django.utils import timezone
 
-from larpmanager.models.member import Badge, Member, Membership, MembershipStatus
-from larpmanager.models.miscellanea import Email
+from larpmanager.models.member import Badge, Member, Membership, MembershipStatus, NotificationQueue
+from larpmanager.models.miscellanea import EmailRecipient
 from larpmanager.utils.core.common import get_object_uuid
 
 if TYPE_CHECKING:
     from django.contrib.auth.models import User
+
+    from larpmanager.models.association import Association
+    from larpmanager.models.event import Run
+
 
 logger = logging.getLogger(__name__)
 
@@ -185,52 +190,40 @@ def assign_badge(member: Member, badge_code: str) -> None:
         logger.exception("Failed to assign badge %s to member %s", badge_code, member)
 
 
-def get_mail(context: dict, email_uuid: str) -> Email:
-    """Retrieve an email object with proper authorization checks.
+def get_mail(context: dict, email_uuid: str) -> EmailRecipient:
+    """Retrieve an email recipient object with proper authorization checks.
 
     Args:
         context: Context dictionary that may contain run information
-        email_uuid: UUID of the email to retrieve
+        email_uuid: UUID of the email recipient to retrieve
 
     Returns:
-        Email: The requested email object if authorized
+        EmailRecipient: The requested email recipient object if authorized
 
     Raises:
         Http404: If email not found, belongs to different association,
                 or belongs to different run when run context is provided
 
     """
-    # Attempt to retrieve the email by primary key
-    email = get_object_uuid(Email, email_uuid)
+    # Attempt to retrieve the email recipient by UUID
+    email_recipient = get_object_uuid(EmailRecipient, email_uuid)
 
     # Verify email belongs to the requesting association
-    if email.association_id != context["association_id"]:
+    if email_recipient.email_content.association_id != context["association_id"]:
         msg = "not your association"
         raise Http404(msg)
 
     # Check run-specific authorization if run context is provided
     run = context.get("run")
-    if run and email.run_id != run.id:
+    if run and email_recipient.email_content.run_id != run.id:
         msg = "not your run"
         raise Http404(msg)
 
-    return email
+    return email_recipient
 
 
 def create_member_profile_for_user(user: User, *, is_newly_created: bool) -> None:
-    """Create member profile and sync email when user is saved.
-
-    This function handles the creation of a Member profile for newly created users
-    and ensures email synchronization between User and Member models.
-
-    Args:
-        user: User instance that was saved
-        is_newly_created: Whether this is a new user (True for new users, False for updates)
-
-    Returns:
-        None
-
-    """
+    """Create member profile and sync email when user is saved."""
     # Create new Member profile for newly registered users
     if is_newly_created:
         Member.objects.create(user=user)
@@ -264,12 +257,13 @@ def process_membership_status_updates(membership: Membership) -> None:
     if membership.status == MembershipStatus.ACCEPTED:
         # Assign next available card number if not already set
         if not membership.card_number:
-            max_card_number = Membership.objects.filter(association=membership.association).aggregate(
-                Max("card_number"),
-            )["card_number__max"]
-            if not max_card_number:
-                max_card_number = 0
-            membership.card_number = max_card_number + 1
+            with transaction.atomic():
+                max_card_number = (
+                    Membership.objects.select_for_update()
+                    .filter(association=membership.association)
+                    .aggregate(Max("card_number"))["card_number__max"]
+                )
+                membership.card_number = (max_card_number or 0) + 1
 
         # Set current date if not already set
         if not membership.date:
@@ -289,3 +283,27 @@ def process_membership_status_updates(membership: Membership) -> None:
 def get_member_uuid(slug: str) -> Member:
     """Retrieves a member by their uuid."""
     return get_object_uuid(Member, slug)
+
+
+def queue_organizer_notification(
+    run: Run,
+    member: Member,
+    notification_type: str,
+    object_id: int | None = None,
+) -> NotificationQueue:
+    """Add notification to queue instead of sending immediately."""
+    return NotificationQueue.objects.create(
+        run=run, member=member, notification_type=notification_type, object_id=object_id
+    )
+
+
+def queue_executive_notification(
+    association: Association,
+    member: Member | None,
+    notification_type: str,
+    object_id: int | None = None,
+) -> NotificationQueue:
+    """Add executive notification to queue instead of sending immediately."""
+    return NotificationQueue.objects.create(
+        association=association, member=member, notification_type=notification_type, object_id=object_id
+    )

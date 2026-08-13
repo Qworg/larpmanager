@@ -31,15 +31,18 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from django.conf import settings as conf_settings
+from django.core.exceptions import ObjectDoesNotExist
 from django.core.files.base import ContentFile
 from django.db import models
+from django.db.models import Sum
 from django.shortcuts import render
-from PIL import Image as PILImage
-from PIL import ImageOps
+from PIL import Image as PILImage, ImageOps
 
 from larpmanager.cache.config import get_association_config
+from larpmanager.models.larpmanager import LarpManagerNewsletter, NewsletterStatus
 from larpmanager.models.member import Badge
-from larpmanager.models.miscellanea import Album, AlbumImage, AlbumUpload, WarehouseItem
+from larpmanager.models.miscellanea import Album, AlbumImage, AlbumUpload, WarehouseItem, WarehouseItemAssignment
+from larpmanager.utils.security import safe_extract_zip
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponse
@@ -165,7 +168,7 @@ def upload_albums_el(alb: models.Model, name: str, main: models.Model, o_path: s
     for directory_id in parent_directories:
         destination_path = destination_path / str(directory_id)
         if not destination_path.exists():
-            destination_path.mkdir(parents=True, exist_ok=True)
+            destination_path.mkdir(mode=0o770, parents=True, exist_ok=True)
 
     # Complete the file path with unique filename
     destination_path = destination_path / unique_filename
@@ -191,13 +194,16 @@ def upload_albums(main: Any, el: Any) -> None:
     Side effects:
         Extracts zip file, creates album structure, uploads all images
 
+    Raises:
+        ZipSecurityError: If ZIP file contains malicious content
+
     """
     cache_subalbums = {}
 
     extraction_path = Path(conf_settings.MEDIA_ROOT) / "zip" / uuid4().hex
 
     with zipfile.ZipFile(el, "r") as zip_file:
-        zip_file.extractall(extraction_path)
+        safe_extract_zip(zip_file, extraction_path)
 
         for filename in zip_file.namelist():
             file_info = zip_file.getinfo(filename)
@@ -210,16 +216,7 @@ def upload_albums(main: Any, el: Any) -> None:
 
 
 def zipdir(path: Any, ziph: Any) -> None:
-    """Recursively add directory contents to zip file.
-
-    Args:
-        path (str): Directory path to compress
-        ziph: Zip file handle to write to
-
-    Side effects:
-        Adds all files in directory tree to zip archive
-
-    """
+    """Recursively add directory contents to zip file."""
     for root, _dirs, files in os.walk(path):
         for file in files:
             file_path = Path(root) / file
@@ -264,14 +261,11 @@ def check_centauri(request: HttpRequest, context: dict) -> HttpResponse | None:
         template_context[config_key] = get_association_config(
             context["association_id"],
             config_key,
-            default_value=None,
             context=template_context,
         )
 
     # Award badge to user if configured for this association
-    badge_code = get_association_config(
-        context["association_id"], "centauri_badge", default_value=None, context=template_context
-    )
+    badge_code = get_association_config(context["association_id"], "centauri_badge", context=template_context)
     if badge_code:
         badge = Badge.objects.filter(cod=badge_code).first()
         if badge:
@@ -323,13 +317,49 @@ def get_warehouse_optionals(context: Any, default_columns: Any) -> None:
     optionals = {}
     has_active_optional = 0
     for field in WarehouseItem.get_optional_fields():
-        optionals[field] = get_association_config(
-            context["association_id"], f"warehouse_{field}", default_value=False, context=context
-        )
+        optionals[field] = get_association_config(context["association_id"], f"warehouse_{field}", context=context)
         if optionals[field]:
             has_active_optional = 1
     context["optionals"] = optionals
     context["no_header_cols"] = json.dumps([column + has_active_optional for column in default_columns])
+
+
+def warehouse_assigned_quantities(items: Any) -> dict[int, int]:
+    """Return the quantity already assigned to any area, per warehouse item id."""
+    return {
+        row["item_id"]: row["total"] or 0
+        for row in WarehouseItemAssignment.objects.filter(item__in=items)
+        .values("item_id")
+        .annotate(total=Sum("quantity"))
+    }
+
+
+def warehouse_available_quantity(item: WarehouseItem, assigned: int | None = None) -> int:
+    """Return the stock of an item not yet assigned to any area, 0 if unlimited."""
+    if item.quantity is None:
+        return 0
+    if assigned is None:
+        assigned = warehouse_assigned_quantities([item]).get(item.id, 0)
+    return max(item.quantity - assigned, 0)
+
+
+def warehouse_add_assignment(item: WarehouseItem, area: Any, event: Any, quantity: int) -> Any:
+    """Add a quantity to the item/area assignment, creating it if missing.
+
+    The lookup matches the unique constraint on (area, item) only: an area may
+    be inherited from a parent campaign event, so the same pair can already be
+    assigned under a different event, and adding the event to the lookup would
+    attempt a duplicate insert.
+    """
+    assignment, created = WarehouseItemAssignment.objects.get_or_create(
+        item=item,
+        area=area,
+        defaults={"quantity": quantity, "event": event},
+    )
+    if not created:
+        assignment.quantity = (assignment.quantity or 0) + quantity
+        assignment.save()
+    return assignment
 
 
 def auto_rotate_vertical_photos(instance: object, sender: type) -> None:
@@ -376,39 +406,38 @@ def auto_rotate_vertical_photos(instance: object, sender: type) -> None:
     file_object = getattr(photo_file, "file", None) or photo_file
     try:
         file_object.seek(0)
-        image = PILImage.open(file_object)
+        with PILImage.open(file_object) as img:
+            # Apply EXIF orientation and get image dimensions
+            oriented_img = ImageOps.exif_transpose(img)
+            width, height = oriented_img.size
+
+            # Skip rotation if image is already landscape or square
+            if height <= width:
+                return
+
+            # Rotate the image 90 degrees clockwise to make it landscape
+            rotated_img = oriented_img.rotate(90, expand=True)
+
+            # Determine the appropriate file format for saving
+            file_format = _get_extension(photo_file, rotated_img)
+
+            # Convert incompatible color modes for JPEG format
+            if file_format == "JPEG" and rotated_img.mode in ("RGBA", "LA", "P"):
+                rotated_img = rotated_img.convert("RGB")
+
+            # Save the rotated image to a BytesIO buffer with optimization
+            with BytesIO() as output_buffer:
+                save_kwargs = {"optimize": True}
+                if file_format == "JPEG":
+                    save_kwargs["quality"] = 88
+                rotated_img.save(output_buffer, format=file_format, **save_kwargs)
+                output_buffer.seek(0)
+
+                # Replace the original photo with the rotated version
+                original_filename = Path(photo_file.name).name or photo_file.name
+                instance.photo = ContentFile(output_buffer.read(), name=original_filename)
     except (OSError, AttributeError):
         return
-
-    # Apply EXIF orientation and get image dimensions
-    image = ImageOps.exif_transpose(image)
-    width, height = image.size
-
-    # Skip rotation if image is already landscape or square
-    if height <= width:
-        return
-
-    # Rotate the image 90 degrees clockwise to make it landscape
-    image = image.rotate(90, expand=True)
-
-    # Determine the appropriate file format for saving
-    file_format = _get_extension(photo_file, image)
-
-    # Convert incompatible color modes for JPEG format
-    if file_format == "JPEG" and image.mode in ("RGBA", "LA", "P"):
-        image = image.convert("RGB")
-
-    # Save the rotated image to a BytesIO buffer with optimization
-    output_buffer = BytesIO()
-    save_kwargs = {"optimize": True}
-    if file_format == "JPEG":
-        save_kwargs["quality"] = 88
-    image.save(output_buffer, format=file_format, **save_kwargs)
-    output_buffer.seek(0)
-
-    # Replace the original photo with the rotated version
-    original_filename = Path(photo_file.name).name or photo_file.name
-    instance.photo = ContentFile(output_buffer.read(), name=original_filename)
 
 
 def _get_extension(uploaded_file: Any, image: Any) -> str:
@@ -471,9 +500,33 @@ def _check_new(file_field: Any, instance: Any, sender: Any) -> bool:
                 # Compare file names and check if no new file data is present
                 if file_field.name == existing_file_name and not getattr(file_field, "file", None):
                     return True
-        except (sender.DoesNotExist, AttributeError) as e:
+        except (ObjectDoesNotExist, AttributeError) as e:
             # Silently handle any database or attribute errors
             logger.debug("Error checking file field for instance pk=%s: %s", instance.pk, e)
 
     # Default to treating as new file upload
     return False
+
+
+def _newsletter_set_active(email: str) -> None:
+    """Prepares a newsletter email for active."""
+    _newsletter_set(email, NewsletterStatus.ACTIVE)
+
+
+def _newsletter_set_non_active(email: str) -> None:
+    """Prepares a newsletter email for inactive."""
+    _newsletter_set(email, NewsletterStatus.NON_ACTIVE)
+
+
+def _newsletter_set(email: str, status: NewsletterStatus) -> None:
+    """Prepares a newsletter email for given status."""
+    if "demo" in email:
+        return
+
+    obj, _created = LarpManagerNewsletter.objects.get_or_create(
+        email=email,
+        defaults={"status": status},
+    )
+    if obj.status not in {NewsletterStatus.UNSUBSCRIBED, status}:
+        obj.status = status
+        obj.save(update_fields=["status"])

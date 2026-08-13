@@ -24,13 +24,12 @@ Verifies custom text management in multiple languages (English, Italian, French,
 language switching, and translation of interface elements.
 """
 
-import re
 from typing import Any
 
 import pytest
-from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, fill_tinymce, go_to, login_orga, submit_confirm, expect_normalized
+from larpmanager.tests.utils import fill_tinymce, go_to, login_orga, submit_confirm, expect_normalized, \
+    get_modal_iframe, save_modal, topbar
 
 pytestmark = pytest.mark.e2e
 
@@ -44,43 +43,51 @@ def test_translations_text(pw_page: Any) -> None:
     go_to(page, live_server, "/manage")
     page.get_by_role("link", name="Texts").click()
     page.get_by_role("link", name="New").click()
-    fill_tinymce(page, "id_text", "Hello", show=False)
-    page.locator("#id_typ").select_option("h")
-    page.get_by_text("After confirmation, add").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    fill_tinymce(edit_iframe, "id_text", "Hello", show=False)
+    edit_iframe.locator("#id_typ").select_option("h")
+    save_modal(page, edit_iframe)
 
-    fill_tinymce(page, "id_text", "BUONGIORNO", show=False)
-    page.locator("#id_language").select_option("it")
-    page.locator("#id_default").uncheck()
-    page.locator("#id_typ").select_option("h")
-    page.get_by_text("After confirmation, add").click()
-    submit_confirm(page)
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    fill_tinymce(edit_iframe, "id_text", "BUONGIORNO", show=False)
+    edit_iframe.locator("#id_language").select_option("it")
+    edit_iframe.locator("#id_default").uncheck()
+    edit_iframe.locator("#id_typ").select_option("h")
+    save_modal(page, edit_iframe)
 
-    fill_tinymce(page, "id_text", "bonjour", show=False)
-    page.locator("#id_language").select_option("fr")
-    page.locator("#id_typ").select_option("h")
-    page.locator("#id_default").uncheck()
-    submit_confirm(page)
-    expect_normalized(page, page.locator("#one"), "Home fr bonjour Home it BUONGIORNO Home en Hello")
+    page.get_by_role("link", name="New").click()
+    edit_iframe = get_modal_iframe(page)
+    fill_tinymce(edit_iframe, "id_text", "bonjour", show=False)
+    edit_iframe.locator("#id_language").select_option("fr")
+    edit_iframe.locator("#id_typ").select_option("h")
+    edit_iframe.locator("#id_default").uncheck()
+    save_modal(page, edit_iframe)
+    expect_normalized(page, page.locator("#one"), "Calendar fr bonjour Calendar it BUONGIORNO Calendar en Hello")
 
     # test languages
     go_to(page, live_server, "/")
     expect_normalized(page, page.locator("#one"), "Hello")
 
     go_to(page, live_server, "/language")
-    page.get_by_label("Select Language:").select_option("it")
-    page.get_by_label("Select Language:").click()
+    page.get_by_label('Select a language').select_option("it")
+    page.get_by_label('Select a language').click()
     submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "BUONGIORNO")
-    expect_normalized(page, page.locator("#topbar"), "Contabilità Profilo")
+    topbar(page, "Profilo")
+    expect_normalized(page, page.locator("#sidebar"), "Dati personali")
+
 
     go_to(page, live_server, "/language")
-    page.get_by_label("Seleziona la lingua:").select_option("fr")
+    page.get_by_label("Seleziona una lingua").select_option("fr")
     submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "bonjour")
-    expect_normalized(page, page.locator("#topbar"), "Comptabilité Profil")
+    topbar(page, "Profil")
+    expect_normalized(page, page.locator("#sidebar"), "Informations personnelles")
 
     go_to(page, live_server, "/language")
-    page.get_by_label("Sélectionner la langue :").select_option("de")
+    page.get_by_label("Sélectionne une langue").select_option("de")
     submit_confirm(page)
     expect_normalized(page, page.locator("#one"), "Hello")
+    topbar(page, "Profil")
+    expect_normalized(page, page.locator("#sidebar"), "Persönliche Angaben")

@@ -26,8 +26,9 @@ from typing import Any
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Case, Count, IntegerField, Value, When
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -36,12 +37,10 @@ from larpmanager.accounting.payment import unique_invoice_cod
 from larpmanager.accounting.registration import update_member_registrations
 from larpmanager.cache.config import get_association_config
 from larpmanager.forms.member import (
-    ExeBadgeForm,
     ExeMemberForm,
     ExeMembershipDocumentForm,
     ExeMembershipFeeForm,
     ExeMembershipForm,
-    ExeVolunteerRegistryForm,
     MembershipResponseForm,
 )
 from larpmanager.forms.miscellanea import OrgaHelpQuestionForm, SendMailForm
@@ -61,6 +60,7 @@ from larpmanager.models.association import Association
 from larpmanager.models.event import Run
 from larpmanager.models.member import (
     Badge,
+    LogOperationType,
     Member,
     Membership,
     MembershipStatus,
@@ -68,24 +68,27 @@ from larpmanager.models.member import (
     Vote,
     get_user_membership,
 )
-from larpmanager.models.miscellanea import Email, HelpQuestion
+from larpmanager.models.miscellanea import EmailRecipient, HelpQuestion
 from larpmanager.models.registration import Registration
 from larpmanager.utils.core.base import check_association_context
 from larpmanager.utils.core.common import (
     _get_help_questions,
     ensure_timezone_aware,
     format_email_body,
-    get_member,
+    get_assoc_member,
+    get_help_question_member,
     get_object_uuid,
     normalize_string,
 )
 from larpmanager.utils.core.paginate import exe_paginate
+from larpmanager.utils.edit.backend import save_log
+from larpmanager.utils.edit.exe import ExeAction, exe_delete, exe_edit, exe_new
 from larpmanager.utils.io.pdf import (
     get_membership_request,
     print_volunteer_registry,
     return_pdf,
 )
-from larpmanager.utils.services.edit import exe_edit
+from larpmanager.utils.security.csv_validation import SanitizingCsvWriter
 from larpmanager.utils.users.fiscal_code import calculate_fiscal_code
 from larpmanager.utils.users.member import get_mail
 from larpmanager.views.orga.member import send_mail_batch
@@ -110,6 +113,18 @@ def exe_membership(request: HttpRequest) -> HttpResponse:
     """
     # Check user permissions and get association context
     context = check_association_context(request, "exe_membership")
+    context["page_info"] = ExeMembershipForm.page_info
+
+    # Pending membership invoice approvals requiring confirmation
+    context["pending_invoices"] = (
+        PaymentInvoice.objects.filter(
+            association_id=context["association_id"],
+            status=PaymentStatus.SUBMITTED,
+            typ=PaymentType.MEMBERSHIP,
+        )
+        .select_related("member", "method")
+        .order_by("-created")
+    )
 
     # Get set of member IDs who have paid membership fees for current year
     fees = set(
@@ -127,8 +142,10 @@ def exe_membership(request: HttpRequest) -> HttpResponse:
         ),
     )
 
-    # Get registrations for upcoming runs and group by member
-    next_regs_qs = Registration.objects.filter(run__id__in=next_runs.keys()).values_list("run_id", "member_id")
+    # Get active registrations for upcoming runs and group by member
+    next_regs_qs = Registration.objects.filter(
+        run__id__in=next_runs.keys(), cancellation_date__isnull=True, pending=False
+    ).values_list("run_id", "member_id")
 
     # Create member_id -> [run_ids] mapping for upcoming registrations
     next_regs = defaultdict(list)
@@ -215,6 +232,7 @@ def exe_membership_evaluation(request: HttpRequest, member_uuid: str) -> HttpRes
                 # Approve member and send notifications
                 member.membership.status = MembershipStatus.ACCEPTED
                 member.membership.save()
+                save_log(context, Membership, member.membership, None, operation_type=LogOperationType.UPDATE)
                 notify_membership_approved(member, resp)
                 update_member_registrations(member)
                 messages.success(request, _("Member approved!"))
@@ -222,6 +240,7 @@ def exe_membership_evaluation(request: HttpRequest, member_uuid: str) -> HttpRes
                 # Reject member and send notifications
                 member.membership.status = MembershipStatus.EMPTY
                 member.membership.save()
+                save_log(context, Membership, member.membership, None, operation_type=LogOperationType.UPDATE)
                 notify_membership_reject(member, resp)
                 messages.success(request, _("Member refused!"))
 
@@ -267,7 +286,7 @@ def exe_membership_evaluation(request: HttpRequest, member_uuid: str) -> HttpRes
 def exe_membership_request(request: HttpRequest, member_uuid: str) -> HttpResponse:
     """Handle membership request display for organization executives."""
     context = check_association_context(request, "exe_membership")
-    member_request = get_member(member_uuid)
+    member_request = get_assoc_member(member_uuid, context["association_id"])
     return get_membership_request(context, member_request)
 
 
@@ -323,7 +342,7 @@ def exe_membership_check(request: HttpRequest) -> HttpResponse:
             # Add members with incorrect fiscal codes to report
             if not check["correct_cf"]:
                 check["member"] = str(member)
-                check["member_id"] = member.id
+                check["member_uuid"] = member.uuid
                 check["email"] = member.email
                 check["membership"] = get_user_membership(member, context["association_id"])
                 context["cf"].append(check)
@@ -352,13 +371,15 @@ def exe_member(request: HttpRequest, member_uuid: str) -> HttpResponse:
     """
     # Check user permissions and get association context
     context = check_association_context(request, "exe_membership")
-    context["member_edit"] = get_member(member_uuid)
+    context["member_edit"] = get_assoc_member(member_uuid, context["association_id"])
+    context["frame"] = request.GET.get("frame") == "1" or request.POST.get("frame") == "1"
 
     # Handle form submission for member profile updates
     if request.method == "POST":
         form = ExeMemberForm(request.POST, request.FILES, instance=context["member_edit"], context=context)
         if form.is_valid():
             form.save()
+            save_log(context, Member, context["member_edit"], context["member_edit"].uuid)
             messages.success(request, _("Profile updated"))
             return redirect(request.path)
     else:
@@ -403,7 +424,7 @@ def exe_member_accounting(request: HttpRequest, member_uuid: str) -> HttpRespons
     """
     # Check user permissions and get association context
     context = check_association_context(request, "exe_membership")
-    context["member_edit"] = get_member(member_uuid)
+    context["member_edit"] = get_assoc_member(member_uuid, context["association_id"])
 
     # Add accounting payment items to context
     member_add_accountingitempayment(context, context["member_edit"])
@@ -444,7 +465,7 @@ def exe_member_registrations(request: HttpRequest, member_uuid: str) -> HttpResp
     """
     # Check user permissions and get association context
     context = check_association_context(request, "exe_membership")
-    context["member_edit"] = get_member(member_uuid)
+    context["member_edit"] = get_assoc_member(member_uuid, context["association_id"])
 
     # Get member registrations for current association events
     context["regs"] = Registration.objects.filter(
@@ -509,7 +530,7 @@ def exe_membership_status(request: HttpRequest, member_uuid: str) -> HttpRespons
 
     """
     context = check_association_context(request, "exe_membership")
-    context["member_edit"] = get_member(member_uuid)
+    context["member_edit"] = get_assoc_member(member_uuid, context["association_id"])
     context["membership_edit"] = get_object_or_404(
         Membership,
         member_id=context["member_edit"].id,
@@ -520,6 +541,7 @@ def exe_membership_status(request: HttpRequest, member_uuid: str) -> HttpRespons
         form = ExeMembershipForm(request.POST, request.FILES, instance=context["membership_edit"], request=request)
         if form.is_valid():
             form.save()
+            save_log(context, Membership, context["membership_edit"], None, operation_type=LogOperationType.UPDATE)
             messages.success(request, _("Profile updated"))
             return redirect(request.path)
     else:
@@ -527,8 +549,9 @@ def exe_membership_status(request: HttpRequest, member_uuid: str) -> HttpRespons
     context["form"] = form
 
     context["num"] = member_uuid
+    context["name"] = context["member_edit"].display_real()
 
-    context["form"].page_title = str(context["member_edit"]) + " - " + _("Membership")
+    context["form"].page_title = str(context["member_edit"]) + " - " + _("Membership status")
 
     return render(request, "larpmanager/exe/edit.html", context)
 
@@ -550,7 +573,6 @@ def exe_membership_registry(request: HttpRequest) -> HttpResponse:
     """
     # Check user permissions for accessing membership registry
     context = check_association_context(request, "exe_membership_registry")
-    split_two_names = 2
 
     # Initialize empty list for processed members
     context["list"] = []
@@ -562,18 +584,6 @@ def exe_membership_registry(request: HttpRequest) -> HttpResponse:
     for mb in que.select_related("member").order_by("card_number"):
         member = mb.member
         member.membership = mb
-
-        # Split legal name into first and last name components
-        if member.legal_name:
-            splitted = member.legal_name.rsplit(" ", 1)
-            if len(splitted) == split_two_names:
-                member.name, member.surname = splitted
-            else:
-                member.name = splitted[0]
-
-        # Capitalize name components for consistent formatting
-        member.name = member.name.capitalize()
-        member.surname = member.surname.capitalize()
 
         # Add processed member to context list
         context["list"].append(member)
@@ -616,7 +626,7 @@ def exe_membership_fee(request: HttpRequest) -> HttpResponse:
             association_id = context["association_id"]
 
             # Get membership fee amount from association configuration
-            fee = get_association_config(association_id, "membership_fee", default_value="0", context=context)
+            fee = get_association_config(association_id, "membership_fee", context=context)
 
             # Create payment invoice record with confirmed status
             payment = PaymentInvoice.objects.create(
@@ -633,9 +643,10 @@ def exe_membership_fee(request: HttpRequest) -> HttpResponse:
             # Automatically confirm the payment and save
             payment.status = PaymentStatus.CONFIRMED
             payment.save()
+            save_log(context, PaymentInvoice, payment, None)
 
             # Show success message and redirect to membership page
-            messages.success(request, _("Operation completed") + "!")
+            messages.success(request, _("Operation completed!"))
             return redirect("exe_membership")
     else:
         # Initialize empty form for GET requests
@@ -643,6 +654,7 @@ def exe_membership_fee(request: HttpRequest) -> HttpResponse:
 
     # Add form to context and render the edit template
     context["form"] = form
+    context["num"] = "0"
     return render(request, "larpmanager/exe/edit.html", context)
 
 
@@ -670,11 +682,13 @@ def exe_membership_document(request: HttpRequest) -> Any:
             membership.date = form.cleaned_data["date"]
             membership.status = MembershipStatus.ACCEPTED
             membership.save()
-            messages.success(request, _("Operation completed") + "!")
+            save_log(context, Membership, membership, None, operation_type=LogOperationType.UPDATE)
+            messages.success(request, _("Operation completed!"))
             return redirect("exe_membership")
     else:
         form = ExeMembershipDocumentForm(context=context)
     context["form"] = form
+    context["num"] = "0"
 
     return render(request, "larpmanager/exe/edit.html", context)
 
@@ -701,7 +715,6 @@ def exe_enrolment(request: HttpRequest) -> HttpResponse:
     """
     # Check user permissions and get association context
     context = check_association_context(request, "exe_enrolment")
-    split_two_names = 2
 
     # Set current year and calculate year start date
     context["year"] = timezone.now().year
@@ -734,18 +747,6 @@ def exe_enrolment(request: HttpRequest) -> HttpResponse:
         # Ensure both datetimes are timezone-aware for comparison
         member.order = (ensure_timezone_aware(member.last_enrolment) - start).days
 
-        # Parse and format member legal name if available
-        if member.legal_name:
-            splitted = member.legal_name.rsplit(" ", 1)
-            if len(splitted) == split_two_names:
-                member.name, member.surname = splitted
-            else:
-                member.name = splitted[0]
-
-        # Capitalize name components for display
-        member.name = member.name.capitalize()
-        member.surname = member.surname.capitalize()
-
         context["list"].append(member)
 
     return render(request, "larpmanager/exe/users/enrolment.html", context)
@@ -776,9 +777,21 @@ def exe_volunteer_registry(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_volunteer_registry_new(request: HttpRequest) -> HttpResponse:
+    """Create a new volunteer registry entry."""
+    return exe_new(request, ExeAction.VOLUNTEER_REGISTRY)
+
+
+@login_required
 def exe_volunteer_registry_edit(request: HttpRequest, member_uuid: str) -> HttpResponse:
     """Edit volunteer registry entry using standard exe form handling."""
-    return exe_edit(request, ExeVolunteerRegistryForm, member_uuid, "exe_volunteer_registry")
+    return exe_edit(request, ExeAction.VOLUNTEER_REGISTRY, member_uuid)
+
+
+@login_required
+def exe_volunteer_registry_delete(request: HttpRequest, member_uuid: str) -> HttpResponse:
+    """Delete member."""
+    return exe_delete(request, ExeAction.VOLUNTEER_REGISTRY, member_uuid)
 
 
 @login_required
@@ -793,7 +806,7 @@ def exe_volunteer_registry_print(request: HttpRequest) -> HttpResponse:
 
     Raises:
         PermissionDenied: If user lacks exe_volunteer_registry permission.
-        Association.DoesNotExist: If association not found.
+        ObjectDoesNotExist: If association not found.
 
     """
     # Check user permissions and get association context
@@ -845,9 +858,7 @@ def exe_vote(request: HttpRequest) -> HttpResponse:
     # Parse candidate IDs from association configuration
     idxs = [
         el.strip()
-        for el in get_association_config(association_id, "vote_candidates", default_value="", context=context).split(
-            ","
-        )
+        for el in get_association_config(association_id, "vote_candidates", context=context).split(",")
         if el.strip()
     ]
 
@@ -891,9 +902,75 @@ def exe_badges(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_badges_new(request: HttpRequest) -> HttpResponse:
+    """Create a new badge."""
+    return exe_new(request, ExeAction.BADGES)
+
+
+@login_required
 def exe_badges_edit(request: HttpRequest, badge_uuid: str) -> HttpResponse:
     """Delegate to generic edit view for badge editing."""
-    return exe_edit(request, ExeBadgeForm, badge_uuid, "exe_badges")
+    return exe_edit(request, ExeAction.BADGES, badge_uuid)
+
+
+@login_required
+def exe_badges_delete(request: HttpRequest, badge_uuid: str) -> HttpResponse:
+    """Delete badge."""
+    return exe_delete(request, ExeAction.BADGES, badge_uuid)
+
+
+@login_required
+def exe_badges_assign(request: HttpRequest) -> HttpResponse:
+    """Two-panel badge assignment UI: search members, click to assign/unassign."""
+    context = check_association_context(request, "exe_badges")
+    association_id = context["association_id"]
+
+    badges = Badge.objects.filter(association_id=association_id).prefetch_related("members")
+
+    badges_data = []
+    for badge in badges:
+        entry = {
+            "uuid": str(badge.uuid),
+            "name": badge.name,
+            "members": [str(m.uuid) for m in badge.members.all()],
+        }
+        if badge.img:
+            entry["img_url"] = badge.img_thumb.url
+        badges_data.append(entry)
+
+    allowed_statuses = [MembershipStatus.ACCEPTED, MembershipStatus.SUBMITTED, MembershipStatus.JOINED]
+    members_qs = (
+        Member.objects.filter(memberships__association_id=association_id, memberships__status__in=allowed_statuses)
+        .distinct()
+        .order_by("surname", "name")
+    )
+    members_data = [{"uuid": str(m.uuid), "name": str(m)} for m in members_qs]
+
+    context["badges_data"] = badges_data
+    context["members_data"] = members_data
+
+    return render(request, "larpmanager/exe/users/badges_assign.html", context)
+
+
+@login_required
+def exe_badges_toggle(request: HttpRequest) -> JsonResponse:
+    """Toggle a member's assignment to a badge (AJAX POST)."""
+    context = check_association_context(request, "exe_badges")
+
+    try:
+        badge_uuid = request.POST["badge_uuid"]
+        member_uuid = request.POST["member_uuid"]
+
+        badge = Badge.objects.get(uuid=badge_uuid, association_id=context["association_id"])
+        member = Member.objects.get(uuid=member_uuid)
+
+        if badge.members.filter(pk=member.pk).exists():
+            badge.members.remove(member)
+            return JsonResponse({"res": "ok", "action": "removed"})
+        badge.members.add(member)
+        return JsonResponse({"res": "ok", "action": "added"})
+    except (ObjectDoesNotExist, KeyError):
+        return JsonResponse({"res": "ko"})
 
 
 @login_required
@@ -919,9 +996,8 @@ def exe_send_mail(request: HttpRequest) -> HttpResponse:
         form = SendMailForm(request.POST)
         if form.is_valid():
             # Queue mail for batch processing
-            send_mail_batch(request, association_id=context["association_id"])
-            messages.success(request, _("Mail added to queue!"))
-            return redirect(request.path_info)
+            context["added"], context["ignored"] = send_mail_batch(request, association_id=context["association_id"])
+            return render(request, "larpmanager/exe/users/send_mail_result.html", context)
     else:
         # Display empty form for GET requests
         form = SendMailForm()
@@ -952,8 +1028,9 @@ def exe_archive_email(request: HttpRequest) -> HttpResponse:
     # Define table columns for the email archive display
     context.update(
         {
+            "selrel": ("email_content",),
             "fields": [
-                ("run", _("Run")),
+                ("run", _("Event")),
                 ("recipient", _("Recipient")),
                 ("subj", _("Subject")),
                 ("body", _("Body")),
@@ -964,14 +1041,12 @@ def exe_archive_email(request: HttpRequest) -> HttpResponse:
                 "body": format_email_body,
                 "sent": lambda el: el.sent.strftime("%d/%m/%Y %H:%M") if el.sent else "",
                 "run": lambda el: str(el.run) if el.run else "",
-                "recipient": lambda el: str(el.recipient),
-                "subj": lambda el: str(el.subj),
             },
         },
     )
 
-    # Return paginated view of Email objects
-    return exe_paginate(request, context, Email, "larpmanager/exe/users/archive_mail.html", "exe_read_mail")
+    # Return paginated view of EmailRecipient objects
+    return exe_paginate(request, context, EmailRecipient, "larpmanager/exe/users/archive_mail.html", "exe_read_mail")
 
 
 @login_required
@@ -1037,14 +1112,14 @@ def exe_questions_answer(request: HttpRequest, member_uuid: str) -> HttpResponse
             after successful form submission
 
     Raises:
-        Member.DoesNotExist: If the member with the given ID doesn't exist
+        ObjectDoesNotExist: If the member with the given ID doesn't exist
 
     """
     # Check executive permissions for question management
     context = check_association_context(request, "exe_questions")
 
     # Retrieve the member and their question history
-    context["member_edit"] = get_member(member_uuid)
+    context["member_edit"] = get_help_question_member(member_uuid, context["association_id"])
     context["list"] = HelpQuestion.objects.filter(
         member=context["member_edit"],
         association_id=context["association_id"],
@@ -1069,6 +1144,7 @@ def exe_questions_answer(request: HttpRequest, member_uuid: str) -> HttpResponse
             hp.is_user = False
             hp.association_id = context["association_id"]
             hp.save()
+            save_log(context, HelpQuestion, hp, None)
 
             # Notify user of successful submission and redirect
             messages.success(request, _("Answer submitted!"))
@@ -1089,7 +1165,7 @@ def exe_questions_close(request: HttpRequest, member_uuid: str) -> HttpResponse:
     context = check_association_context(request, "exe_questions")
 
     # Get the member and their most recent help question
-    member = get_member(member_uuid)
+    member = get_help_question_member(member_uuid, context["association_id"])
     h = (
         HelpQuestion.objects.filter(member=member, association_id=context["association_id"])
         .order_by("-created")
@@ -1100,6 +1176,7 @@ def exe_questions_close(request: HttpRequest, member_uuid: str) -> HttpResponse:
     if h:
         h.closed = True
         h.save()
+        save_log(context, HelpQuestion, h, None, operation_type=LogOperationType.UPDATE)
 
     return redirect("exe_questions")
 
@@ -1161,7 +1238,7 @@ def exe_newsletter_csv(request: HttpRequest, lang: str) -> HttpResponse:
         content_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="Newsletter-{lang}.csv"'},
     )
-    writer = csv.writer(response)
+    writer = SanitizingCsvWriter(csv.writer(response))
 
     # Iterate through all memberships for the current association
     for el in Membership.objects.filter(association_id=context["association_id"]).select_related("member"):

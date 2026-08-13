@@ -26,34 +26,29 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ObjectDoesNotExist
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseRedirect, JsonResponse
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_POST
 
+from larpmanager.cache.config import get_association_config, save_single_config
 from larpmanager.cache.feature import get_association_features
-from larpmanager.forms.accounting import ExePaymentSettingsForm
 from larpmanager.forms.association import (
-    ExeAppearanceForm,
-    ExeAssociationForm,
-    ExeAssociationRoleForm,
-    ExeAssociationTextForm,
-    ExeAssociationTranslationForm,
-    ExeConfigForm,
     ExeFeatureForm,
-    ExePreferencesForm,
-    ExeQuickSetupForm,
 )
-from larpmanager.forms.member import ExeProfileForm
-from larpmanager.models.access import AssociationPermission, AssociationRole
+from larpmanager.mail.base import send_role_invite_email
+from larpmanager.models.access import AssociationPermission, AssociationRole, RoleInvite
 from larpmanager.models.association import Association, AssociationText, AssociationTranslation
 from larpmanager.models.base import Feature
 from larpmanager.models.event import Run
 from larpmanager.utils.auth.permission import get_index_association_permissions
 from larpmanager.utils.core.base import check_association_context
-from larpmanager.utils.core.common import clear_messages, get_feature
-from larpmanager.utils.services.association import _reset_all_association
-from larpmanager.utils.services.edit import backend_edit, exe_edit
+from larpmanager.utils.core.common import clear_messages, get_feature, is_rate_limited
+from larpmanager.utils.core.exceptions import RedirectError
+from larpmanager.utils.edit.backend import backend_edit
+from larpmanager.utils.edit.exe import ExeAction, exe_delete, exe_edit, exe_new
+from larpmanager.utils.larpmanager.versions import LATEST_AVAILABLE_VERSION, VERSIONS
+from larpmanager.utils.services.association import _reset_all_association, get_activation_checklist
 from larpmanager.views.larpmanager import get_run_lm_payment
 from larpmanager.views.orga.event import prepare_roles_list
 
@@ -61,27 +56,12 @@ from larpmanager.views.orga.event import prepare_roles_list
 @login_required
 def exe_association(request: HttpRequest) -> Any:
     """Edit association details."""
-    return exe_edit(
-        request,
-        ExeAssociationForm,
-        None,
-        "exe_association",
-        "manage",
-        additional_context={"add_another": False},
-    )
+    return exe_edit(request, ExeAction.ASSOCIATION)
 
 
 @login_required
 def exe_roles(request: HttpRequest) -> HttpResponse:
-    """Handle association roles management page.
-
-    Args:
-        request: HTTP request object
-
-    Returns:
-        Rendered roles management template
-
-    """
+    """Handle association roles management page."""
     # Check user permissions for role management
     context = check_association_context(request, "exe_roles")
 
@@ -97,28 +77,65 @@ def exe_roles(request: HttpRequest) -> HttpResponse:
         def_callback,
     )
 
+    # Attach pending (unredeemed) invites to each role for display
+    for role in context["list"]:
+        role.pending_invites = RoleInvite.objects.filter(
+            association_role=role, redeemed_by__isnull=True, deleted__isnull=True
+        )
+
     return render(request, "larpmanager/exe/roles.html", context)
+
+
+@login_required
+def exe_roles_new(request: HttpRequest) -> Any:
+    """Create a new association role."""
+    return exe_new(request, ExeAction.ROLES)
 
 
 @login_required
 def exe_roles_edit(request: HttpRequest, role_uuid: str) -> Any:
     """Edit specific association role."""
-    return exe_edit(request, ExeAssociationRoleForm, role_uuid, "exe_roles")
+    return exe_edit(request, ExeAction.ROLES, role_uuid)
 
 
 @login_required
-def exe_config(request: HttpRequest, section: str | None = None) -> HttpResponse:
+def exe_roles_delete(request: HttpRequest, role_uuid: str) -> HttpResponse:
+    """Delete role."""
+    return exe_delete(request, ExeAction.ROLES, role_uuid)
+
+
+@login_required
+def exe_roles_invite(request: HttpRequest, role_uuid: str) -> HttpResponse:
+    """Send email invitation to join an association role."""
+    context = check_association_context(request, "exe_roles")
+    role = get_object_or_404(AssociationRole, uuid=role_uuid, association_id=context["association_id"])
+    if request.method == "POST":
+        email = request.POST.get("email", "").strip()
+        if email:
+            invite = RoleInvite.objects.create(
+                email=email,
+                association_id=context["association_id"],
+                association_role=role,
+                invited_by=request.user.member,
+            )
+            send_role_invite_email(invite)
+            messages.success(request, _("Invitation sent to %(email)s") % {"email": email})
+        return redirect("exe_roles")
+    context["role"] = role
+    context["back_url"] = reverse("exe_roles")
+    return render(request, "larpmanager/manage/roles_invite.html", context)
+
+
+@login_required
+def exe_config(request: HttpRequest, section: str | None = None) -> HttpResponse:  # noqa: ARG001
     """Handle organization configuration editing with optional section jump."""
-    # Prepare context with section jump if specified
-    add_ctx = {"jump_section": section} if section else {}
-    add_ctx["add_another"] = False
-    return exe_edit(request, ExeConfigForm, None, "exe_config", "manage", additional_context=add_ctx)
+    return exe_edit(request, ExeAction.CONFIG)
 
 
 @login_required
 def exe_profile(request: HttpRequest) -> Any:
     """Edit user profile settings."""
-    return exe_edit(request, ExeProfileForm, None, "exe_profile", "manage", additional_context={"add_another": False})
+    return exe_edit(request, ExeAction.PROFILE)
 
 
 @login_required
@@ -138,76 +155,63 @@ def exe_texts(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def exe_texts_new(request: HttpRequest) -> HttpResponse:
+    """Create a new association text."""
+    return exe_new(request, ExeAction.TEXTS)
+
+
+@login_required
 def exe_texts_edit(request: HttpRequest, text_uuid: str) -> HttpResponse:
     """Edit specific association text."""
-    return exe_edit(request, ExeAssociationTextForm, text_uuid, "exe_texts")
+    return exe_edit(request, ExeAction.TEXTS, text_uuid)
+
+
+@login_required
+def exe_texts_delete(request: HttpRequest, text_uuid: str) -> HttpResponse:
+    """Delete text."""
+    return exe_delete(request, ExeAction.TEXTS, text_uuid)
 
 
 @login_required
 def exe_translations(request: HttpRequest) -> HttpResponse:
-    """Display the list of custom translation overrides for an association.
-
-    This view renders the management interface for organization-specific translation
-    overrides. It shows all custom translations (active and inactive) that have been
-    configured for the association, allowing administrators to review, edit, and
-    manage their translation customizations.
-
-    Args:
-        request: HTTP request object containing user authentication and session data
-
-    Returns:
-        HttpResponse: Rendered template showing the list of translation overrides
-            with options to add, edit, or delete translations
-
-    Raises:
-        PermissionDenied: If user lacks exe_translations permission for the association
-
-    """
+    """Display the list of custom translation overrides for an association."""
     # Verify user has permission to manage translations for this association
     context = check_association_context(request, "exe_translations")
 
-    # Fetch all custom translations for this association
-    # Results include both active and inactive translations for full visibility
+    # Fetch all custom translations for this association (both active and inactive)
     context["list"] = AssociationTranslation.objects.filter(association_id=context["association_id"])
 
     return render(request, "larpmanager/exe/translations.html", context)
 
 
 @login_required
+def exe_translations_new(request: HttpRequest) -> HttpResponse:
+    """Create a new association translation override."""
+    return exe_new(request, ExeAction.TRANSLATIONS)
+
+
+@login_required
 def exe_translations_edit(request: HttpRequest, translation_uuid: str) -> HttpResponse:
     """Handle creation and editing of association translation overrides."""
-    return exe_edit(request, ExeAssociationTranslationForm, translation_uuid, "exe_translations")
+    return exe_edit(request, ExeAction.TRANSLATIONS, translation_uuid)
+
+
+@login_required
+def exe_translations_delete(request: HttpRequest, translation_uuid: str) -> HttpResponse:
+    """Delete association translation overrides."""
+    return exe_delete(request, ExeAction.TRANSLATIONS, translation_uuid)
 
 
 @login_required
 def exe_methods(request: HttpRequest) -> Any:
     """Edit payment methods settings."""
-    return exe_edit(
-        request,
-        ExePaymentSettingsForm,
-        None,
-        "exe_methods",
-        "manage",
-        additional_context={"add_another": False},
-    )
+    return exe_edit(request, ExeAction.METHODS)
 
 
 @login_required
 def exe_appearance(request: HttpRequest) -> Any:
     """Edit association appearance settings."""
-    return exe_edit(
-        request,
-        ExeAppearanceForm,
-        None,
-        "exe_appearance",
-        "manage",
-        additional_context={"add_another": False},
-    )
-
-
-def f_k_exe(f_id: Any, r_id: Any) -> str:
-    """Generate feature key for association role."""
-    return f"feature_{f_id}_exe_{r_id}_key"
+    return exe_edit(request, ExeAction.APPEARANCE)
 
 
 @login_required
@@ -228,10 +232,11 @@ def exe_features(request: HttpRequest) -> HttpResponse:
     """
     # Check user permissions and get initial context
     context = check_association_context(request, "exe_features")
+    context["assoc_form"] = True
     context["add_another"] = False
 
     # Process form submission and handle feature activation
-    if backend_edit(request, context, ExeFeatureForm, None, additional_field=None, is_association=True):
+    if backend_edit(request, context, ExeFeatureForm):
         # Get newly activated features that have after-links
         context["new_features"] = Feature.objects.filter(
             pk__in=context["form"].added_features,
@@ -249,7 +254,7 @@ def exe_features(request: HttpRequest) -> HttpResponse:
         # Handle single feature activation with immediate redirect
         if len(context["new_features"]) == 1:
             feature = context["new_features"][0]
-            msg = _("Feature %(name)s activated") % {"name": feature.name} + "! " + feature.after_text
+            msg = _("Feature %(name)s activated!") % {"name": feature.name} + " " + feature.after_text
             clear_messages(request)
             messages.success(request, msg)
             return redirect(feature.follow_link)
@@ -282,6 +287,12 @@ def exe_features_go(request: HttpRequest, slug: str, *, to_active: bool = True) 
     context = check_association_context(request, "exe_features")
     get_feature(context, slug)
 
+    # Block feature activation in lite mode
+    if to_active and context.get("lite_mode"):
+        messages.error(request, _("Features cannot be activated in lite mode, complete the activation checklist first"))
+        msg = "manage"
+        raise RedirectError(msg)
+
     # Ensure this is an overall feature (organization-wide)
     if not context["feature"].overall:
         msg = "not overall feature!"
@@ -294,16 +305,17 @@ def exe_features_go(request: HttpRequest, slug: str, *, to_active: bool = True) 
     # Handle feature activation
     if to_active:
         if slug not in context["features"]:
-            association.features.add(feature_id)
-            message = _("Feature %(name)s activated") + "!"
+            for dep_id in Feature.get_all_dependencies([feature_id]):
+                association.features.add(dep_id)
+            message = _("Feature %(name)s activated!")
         else:
-            message = _("Feature %(name)s already activated") + "!"
+            message = _("Feature %(name)s already activated!")
     # Handle feature deactivation
     elif slug not in context["features"]:
-        message = _("Feature %(name)s already deactivated") + "!"
+        message = _("Feature %(name)s already deactivated!")
     else:
         association.features.remove(feature_id)
-        message = _("Feature %(name)s deactivated") + "!"
+        message = _("Feature %(name)s deactivated!")
 
     # Save changes to association
     association.save()
@@ -318,15 +330,7 @@ def exe_features_go(request: HttpRequest, slug: str, *, to_active: bool = True) 
 
 
 def _exe_feature_after_link(feature: Feature) -> str:
-    """Generate the appropriate redirect URL after feature setup.
-
-    Args:
-        feature: Feature object containing after_link configuration
-
-    Returns:
-        Full URL path for redirection
-
-    """
+    """Generate the appropriate redirect URL after feature setup."""
     redirect_url_or_fragment = feature.after_link
 
     # Check if redirect_url_or_fragment is a named URL pattern starting with "exe"
@@ -349,6 +353,45 @@ def exe_features_off(request: HttpRequest, slug: str) -> HttpResponse:
     """Disable features and redirect to management page."""
     exe_features_go(request, slug, to_active=False)
     return redirect("manage")
+
+
+def exe_config_go(request: HttpRequest, slug: str, *, to_active: bool = True) -> None:
+    """Activate or deactivate a boolean configuration option of an association.
+
+    Args:
+        request: The HTTP request object containing user and association context
+        slug: The name of the configuration option to toggle
+        to_active: Whether to activate (True) or deactivate (False) the option
+
+    """
+    # Check user permissions and retrieve the association
+    context = check_association_context(request, "exe_config")
+    context["request"] = request
+    association = Association.objects.get(pk=context["association_id"])
+
+    # Skip the update if the option already has the requested value
+    if get_association_config(context["association_id"], slug) == to_active:
+        message = _("Option %(name)s already activated!") if to_active else _("Option %(name)s already deactivated!")
+    else:
+        save_single_config(association, slug, str(to_active))
+        association.save()
+        message = _("Option %(name)s activated!") if to_active else _("Option %(name)s deactivated!")
+
+    messages.success(request, message % {"name": slug})
+
+
+@login_required
+def exe_config_on(request: HttpRequest, slug: str) -> HttpResponseRedirect:
+    """Activate a configuration option and redirect to the configuration page."""
+    exe_config_go(request, slug, to_active=True)
+    return redirect("exe_config")
+
+
+@login_required
+def exe_config_off(request: HttpRequest, slug: str) -> HttpResponseRedirect:
+    """Deactivate a configuration option and redirect to the configuration page."""
+    exe_config_go(request, slug, to_active=False)
+    return redirect("exe_config")
 
 
 @login_required
@@ -449,20 +492,61 @@ def feature_description(request: HttpRequest) -> JsonResponse:
 @login_required
 def exe_quick(request: HttpRequest) -> Any:
     """Edit quick setup configuration."""
-    return exe_edit(request, ExeQuickSetupForm, None, "exe_quick", "manage", additional_context={"add_another": False})
+    return exe_edit(request, ExeAction.QUICK)
 
 
 @login_required
 def exe_preferences(request: HttpRequest) -> Any:
     """Edit user preferences."""
-    return exe_edit(
-        request,
-        ExePreferencesForm,
-        request.user.member.id,
-        None,
-        "manage",
-        additional_context={"add_another": False},
+    return exe_edit(request, ExeAction.PREFERENCES)
+
+
+@login_required
+def exe_version_upgrade(request: HttpRequest) -> HttpResponse:
+    """Show available platform versions and allow testing or upgrading."""
+    context = check_association_context(request)
+    assoc_version = context.get("assoc_version", LATEST_AVAILABLE_VERSION)
+    member = context["member"]
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        try:
+            target_version = int(request.POST.get("target_version", assoc_version))
+        except (TypeError, ValueError):
+            target_version = assoc_version
+
+        available_numbers = [v["number"] for v in VERSIONS if v["available"]]
+        if target_version not in available_numbers:
+            messages.error(request, _("Invalid version selected."))
+            return redirect("exe_version_upgrade")
+
+        if action == "test":
+            save_single_config(member, "interface_version", str(target_version))
+            messages.success(
+                request,
+                _("Preview activated: you are now viewing version %(v)s.") % {"v": target_version},
+            )
+        elif action == "upgrade":
+            association = Association.objects.get(pk=context["association_id"])
+            save_single_config(association, "version", str(target_version))
+            save_single_config(member, "interface_version", "")
+            _reset_all_association(context["association_id"], context["slug"])
+            messages.success(request, _("Organization upgraded to version %(v)s.") % {"v": target_version})
+        elif action == "reset_preview":
+            save_single_config(member, "interface_version", "")
+            messages.success(request, _("Preview reset. Using organization version."))
+
+        return redirect("exe_version_upgrade")
+
+    upgradeable = [v for v in VERSIONS if v["available"] and v["number"] > assoc_version]
+    context["upgradeable_versions"] = upgradeable
+    context["assoc_version_description"] = next(
+        (v["description"] for v in VERSIONS if v["number"] == assoc_version), ""
     )
+    context["member_version"] = context.get("effective_version")
+    context["is_previewing"] = context.get("effective_version") != assoc_version
+
+    return render(request, "larpmanager/exe/version_upgrade.html", context)
 
 
 @login_required
@@ -475,8 +559,49 @@ def exe_reload_cache(request: HttpRequest) -> HttpResponse:
     association_slug = context["slug"]
     association_id = context["id"]
 
+    if is_rate_limited(f"exe_reload_cache_{association_id}"):
+        messages.error(request, _("Please wait before retrying."))
+        return redirect("manage")
+
     _reset_all_association(association_id, association_slug)
 
     # Notify user of successful cache reset
     messages.success(request, _("Cache reset!"))
     return redirect("manage")
+
+
+@login_required
+def exe_activation(request: HttpRequest) -> HttpResponse | HttpResponseRedirect:
+    """Show activation checklist and allow unlocking advanced mode from lite/demo."""
+    context = check_association_context(request, "exe_activation")
+    context["page_info"] = _("Check and complete your organization's activation checklist")
+    association_id = context["association_id"]
+
+    if request.method == "GET" and request.GET.get("slug"):
+        slug = request.GET["slug"]
+        checklist, _progress = get_activation_checklist(association_id)
+        item = next((i for i in checklist if i["slug"] == slug), None)
+        if item:
+            url = item["url"]
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            params["hint_slug"] = [slug]
+            url = urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
+            return redirect(url)
+
+    checklist, progress = get_activation_checklist(association_id)
+    progress_done = 100
+    all_done = progress == progress_done
+    context["checklist"] = checklist
+    context["progress"] = progress
+    context["all_done"] = all_done
+
+    if request.method == "POST" and all_done:
+        association = Association.objects.get(pk=association_id)
+        association.lite_mode = False
+        association.save(update_fields=["lite_mode"])
+        save_single_config(association, "intro_driver", "advanced_unlock")
+        messages.success(request, _("Advanced mode activated! All features are now available."))
+        return redirect("manage")
+
+    return render(request, "larpmanager/exe/activation.html", context)

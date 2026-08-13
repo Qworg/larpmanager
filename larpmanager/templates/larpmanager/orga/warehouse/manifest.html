@@ -1,13 +1,13 @@
 {% extends "utils.html" %}
 {% load i18n %}
 {% block title %}
-    {% trans "Cargo manifest" %} - {{ run }}
+    {% trans "Cargo manifest" %} - {{ run.search }}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows the cargo manifest, and the status of each item assignment" %}
+    {% trans "Track all item assignments grouped by area, marking each item as loaded and deployed" %}
 {% endblock info %}
 {% block content %}
-    {% include "elements/header/edit.html" %}
+    {% include "elements/table/header.html" %}
     {% if optionals.quantity and not warehouse_committed %}
         <div class="alert alert-info" role="alert">
             <i class="fas fa-info-circle"></i>
@@ -27,12 +27,12 @@
         <h2>{{ area }}</h2>
         {% if area.position %}
             <p>
-                <b>{% trans "Position" %}:</b> {{ area.position }}
+                <b>{% trans "Position:" %}</b> {{ area.position }}
             </p>
         {% endif %}
         {% if area.description %}
             <p>
-                <b>{% trans "Description" %}:</b> {{ area.description }}
+                <b>{% trans "Description:" %}</b> {{ area.description }}
             </p>
         {% endif %}
         <table id="inv_manifest_itm_{{ area.uuid }}"
@@ -40,6 +40,7 @@
                no_header_cols="{{ no_header_cols }}">
             <thead>
                 <tr>
+                    <th></th>
                     <th></th>
                     <th>{% trans "Item" %}</th>
                     <th>{% trans "Container" %}</th>
@@ -50,11 +51,13 @@
                     <th>{% trans "Notes" %}</th>
                     <th>{% trans "Photo" %}</th>
                     <th>{% trans "Deployed" %}</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
                 {% for el in area.items %}
                     <tr id="{{ el.uuid }}">
+                        <td></td>
                         <td>
                             <a href="{% url 'orga_warehouse_assignment_item_edit' run.get_slug el.uuid %}"
                                qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
@@ -89,14 +92,23 @@
                             tp="depl">
                             <span class="value {% if not el.deployed %}hide{% endif %}"><i class="fa-solid fa-check"></i></span>
                         </td>
+                        <td>
+                            <a href="{% url 'orga_warehouse_assignment_item_delete' run.get_slug el.uuid %}"
+                               qtip="{% trans "Delete" %}"
+                               class="only_new_v18"><i class="fas fa-trash"></i></a>
+                        </td>
                     </tr>
                 {% endfor %}
             </tbody>
         </table>
+        {% if area.items %}
+            <p class="no-elements-available">{% trans "No items have been assigned to this area yet." %}</p>
+        {% endif %}
     {% endfor %}
     <div id="imagePopup">
         <img id="popupImg" src="" alt="popup image" />
     </div>
+    {% include "elements/table/footer.html" %}
 {% endblock content %}
 {% block js %}
     <script>
@@ -168,7 +180,7 @@ document.getElementById('imagePopup').onclick = function() {
     }
     const tryRestore = () => {
       if (restore()) return;
-      // ritenta finché #page-wrapper non esiste
+      // retry until #page-wrapper does not exists
       setTimeout(tryRestore, 30);
     };
     tryRestore();

@@ -24,7 +24,7 @@ This module provides admin interfaces for managing associations, their
 configurations, custom texts, translations, and visual themes.
 """
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from django.contrib import admin
 
@@ -42,10 +42,16 @@ from larpmanager.models.association import (
 class AssociationAdmin(DefModelAdmin):
     """Admin interface for LARP organizations and associations."""
 
-    list_display = ("id", "name", "slug", "uuid")
+    list_display = ("id", "name", "slug", "main_mail", "uuid", "lite_mode")
     search_fields: ClassVar[tuple] = ("id", "name", "uuid")
 
     autocomplete_fields: ClassVar[list] = ["payment_methods", "features", "maintainers"]
+
+    def has_delete_permission(self, request: Any, obj: Any | None = None) -> bool:
+        """Prevent delete if not demo."""
+        if obj is not None and not obj.lite_mode:
+            return False
+        return super().has_delete_permission(request, obj)
 
 
 @admin.register(AssociationConfig)
@@ -85,30 +91,14 @@ class AssociationTranslationAdmin(DefModelAdmin):
     list_editable = ("active",)
 
     def msgid_preview(self, obj: AssociationTranslation) -> str:
-        """Display a truncated preview of the original text for list view.
-
-        Args:
-            obj: The AssociationTranslation instance
-
-        Returns:
-            The original text truncated to 50 characters with ellipsis if needed
-
-        """
+        """Display a truncated preview of the original text for list view."""
         max_length = 50
         return obj.msgid[:max_length] + "..." if len(obj.msgid) > max_length else obj.msgid
 
     msgid_preview.short_description = "Original text"
 
     def msgstr_preview(self, obj: AssociationTranslation) -> str:
-        """Display a truncated preview of the translated text for list view.
-
-        Args:
-            obj: The AssociationTranslation instance
-
-        Returns:
-            The translated text truncated to 50 characters with ellipsis if needed
-
-        """
+        """Display a truncated preview of the translated text for list view."""
         max_length = 50
         return obj.msgstr[:max_length] + "..." if len(obj.msgstr) > max_length else obj.msgstr
 

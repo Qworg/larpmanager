@@ -22,43 +22,23 @@ from django.conf import settings as conf_settings
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 
+from larpmanager.cache.config import _get_event_parent_id
 from larpmanager.models.association import Association
 from larpmanager.models.event import Event
 
 
 def reset_association_features(association_id: int) -> None:
-    """Clear cached association features.
-
-    Args:
-        association_id (int): Association ID to clear cache for
-
-    """
+    """Clear cached association features."""
     cache.delete(cache_association_features_key(association_id))
 
 
 def cache_association_features_key(association_id: int) -> str:
-    """Generate cache key for association features.
-
-    Args:
-        association_id (int): Association ID
-
-    Returns:
-        str: Cache key for association features
-
-    """
+    """Generate cache key for association features."""
     return f"association_features_{association_id}"
 
 
 def get_association_features(association_id: int) -> dict[str, int]:
-    """Get cached association features, updating cache if needed.
-
-    Args:
-        association_id (int): Association ID
-
-    Returns:
-        dict: Dictionary of enabled features {feature_slug: 1}
-
-    """
+    """Get cached association features, updating cache if needed."""
     cache_key = cache_association_features_key(association_id)
     cached_features = cache.get(cache_key)
     if cached_features is None:
@@ -105,7 +85,7 @@ def update_association_features(association_id: int) -> dict[str, int]:
             "tagline",
         ]:
             # Add calendar features based on configuration
-            if association.get_config("calendar_" + sl, default_value=False):
+            if association.get_config("calendar_" + sl):
                 res[sl] = 1
 
         # Check field-based features (safety and diet)
@@ -131,19 +111,12 @@ def cache_event_features_key(event_id: int) -> str:
 
 
 def get_event_features(event_id: int) -> dict[str, int]:
-    """Get cached event features, updating cache if needed.
-
-    Args:
-        event_id (int): Event ID
-
-    Returns:
-        dict: Dictionary of enabled event features {feature_slug: 1}
-
-    """
-    cache_key = cache_event_features_key(event_id)
+    """Get cached event features, updating cache if needed."""
+    lookup_id = _get_event_parent_id(event_id, None) or event_id
+    cache_key = cache_event_features_key(lookup_id)
     cached_features = cache.get(cache_key)
     if cached_features is None:
-        cached_features = update_event_features(event_id)
+        cached_features = update_event_features(lookup_id)
         cache.set(cache_key, cached_features, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
     return cached_features
 
@@ -164,17 +137,18 @@ def update_event_features(ev_id: int) -> dict[str, int]:
         for feature_slug in event.features.values_list("slug", flat=True):
             features_dict[feature_slug] = 1
         extra_features_mapping = {
-            "writing": ["paste_text", "title", "cover", "hide", "assigned"],
+            "writing": ["paste_text", "title", "cover", "hide", "assigned", "locked"],
             "registration": ["reg_que_age", "reg_que_faction", "reg_que_tickets", "reg_que_allowed"],
             "character_form": ["wri_que_max", "wri_que_tickets", "wri_que_requirements"],
             "casting": ["mirror"],
-            "user_character": ["player_relationships"],
-            "px": ["rules", "modifiers", "templates"],
         }
         for config_type, config_feature_slugs in extra_features_mapping.items():
             for feature_slug in config_feature_slugs:
-                if event.get_config(f"{config_type}_{feature_slug}", default_value=False):
+                if event.get_config(f"{config_type}_{feature_slug}"):
                     features_dict[feature_slug] = 1
+        for feature_slug in ["exp_rules", "exp_modifiers", "exp_templates", "exp_systems", "exp_criterions"]:
+            if event.get_config(feature_slug):
+                features_dict[feature_slug] = 1
 
     except ObjectDoesNotExist:
         return {}
@@ -183,12 +157,7 @@ def update_event_features(ev_id: int) -> dict[str, int]:
 
 
 def on_association_post_save_reset_features_cache(instance: Association) -> None:
-    """Handle association post-save feature cache reset.
-
-    Args:
-        instance: Association instance that was saved
-
-    """
+    """Handle association post-save feature cache reset."""
     reset_association_features(instance.id)
     for ev_id in instance.events.values_list("pk", flat=True):
         clear_event_features_cache(ev_id)

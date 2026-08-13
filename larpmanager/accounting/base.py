@@ -23,12 +23,13 @@
 from __future__ import annotations
 
 import json
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from larpmanager.cache.config import get_event_config
+from larpmanager.cache.config import get_association_config, get_event_config
 from larpmanager.cache.feature import get_event_features
 from larpmanager.models.accounting import (
     AccountingItemCollection,
@@ -75,7 +76,7 @@ def is_registration_provisional(
         features = get_event_features(event.id)
 
     # Check if provisional payments are disabled for this event
-    if get_event_config(event.id, "payment_no_provisional", default_value=False, context=context):
+    if get_event_config(event.id, "payment_no_provisional", context=context):
         return False
 
     # Check if payment feature is enabled and registration has outstanding balance
@@ -135,6 +136,7 @@ def handle_accounting_item_payment_pre_save(instance: AccountingItemPayment) -> 
     1. Ensure the payment has a member (defaults to registration member)
     2. Track if payment value changed for registration updates
     3. Update related transactions when registration changes
+    4. Check if to send payment confirmation
 
     Args:
         instance (AccountingItemPayment): The payment instance being saved
@@ -143,25 +145,34 @@ def handle_accounting_item_payment_pre_save(instance: AccountingItemPayment) -> 
         None
 
     """
+    # Skip pre-save logic when the instance is being soft-deleted
+    if instance.deleted:
+        return
+
     # Set member from registration if not already set
     if not instance.member:
         instance.member = instance.registration.member
 
-    # Skip further processing for new instances (no pk yet)
-    if not instance.pk:
-        return
+    if instance.pk:
+        # Get previous state to detect changes
+        prev = AccountingItemPayment.objects.get(pk=instance.pk)
 
-    # Get previous state to detect changes
-    prev = AccountingItemPayment.objects.get(pk=instance.pk)
+        # Flag if value changed to trigger registration updates
+        instance._update_reg = prev.value != instance.value  # noqa: SLF001
 
-    # Flag if value changed to trigger registration updates
-    instance._update_reg = prev.value != instance.value  # noqa: SLF001  # Internal flag for registration update
+        # Update all related transactions if registration changed using bulk update
+        if prev.registration != instance.registration:
+            AccountingItemTransaction.objects.filter(inv_id=instance.inv_id).update(registration=instance.registration)
+    else:
+        # Early return if payment should be hidden from notifications
+        if instance.hide:
+            return
 
-    # Update all related transactions if registration changed
-    if prev.registration != instance.registration:
-        for trans in AccountingItemTransaction.objects.filter(inv_id=instance.inv_id):
-            trans.registration = instance.registration
-            trans.save()
+        # Check if payment notifications are enabled for this association
+        if not get_association_config(instance.registration.run.event.association_id, "mail_payment"):
+            return
+
+        instance._send_confirmation = True  # noqa: SLF001
 
 
 def handle_collection_pre_save(instance: Collection) -> None:
@@ -193,11 +204,36 @@ def handle_collection_pre_save(instance: Collection) -> None:
 
 
 def handle_accounting_item_collection_post_save(instance: AccountingItemCollection) -> None:
-    """Update collection total when items are added.
-
-    Args:
-        instance: AccountingItemCollection instance that was saved
-
-    """
+    """Update collection total when items are added."""
     if instance.collection:
         instance.collection.save()
+
+
+def round_decimal(amount: Decimal) -> Decimal:
+    """Round decimal value."""
+    return amount.quantize(PRECISION, rounding=ROUND_HALF_UP)
+
+
+def round_to_nearest_cent(amount: float) -> float:
+    """Round a number to the nearest cent with tolerance for small differences."""
+    rounded_amount = round(amount * 100) / 100
+    rounding_tolerance = 0.03
+    if abs(float(amount) - rounded_amount) <= rounding_tolerance:
+        return rounded_amount
+    return float(amount)
+
+
+def _format_decimal(decimal_value: Decimal) -> str | Decimal:
+    """Format a decimal value for visualization."""
+    try:
+        rounded_value = round_to_nearest_cent(float(decimal_value))
+        if rounded_value == 0:
+            return ""
+        if rounded_value == int(rounded_value):
+            return str(int(rounded_value))
+        return f"{rounded_value:.2f}".rstrip("0").rstrip(".")
+    except (ValueError, TypeError):
+        return decimal_value
+
+
+PRECISION = Decimal("0.01")

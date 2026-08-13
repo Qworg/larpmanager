@@ -25,12 +25,11 @@ from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
-from larpmanager.forms.inventory import OrgaInventoryForm, OrgaPoolTypePxForm
-from larpmanager.models.inventory import Inventory, InventoryTransfer, PoolTypeCI
+from larpmanager.models.inventory import Inventory, InventoryTransfer, InventoryType, PoolLabel, PoolType
 from larpmanager.utils.auth.permission import has_event_permission
 from larpmanager.utils.core.base import check_event_context, get_event_context
 from larpmanager.utils.core.common import get_element_event
-from larpmanager.utils.services.edit import orga_edit
+from larpmanager.utils.edit.orga import OrgaAction, orga_delete, orga_edit, orga_new
 from larpmanager.utils.services.inventory import perform_transfer
 
 logger = logging.getLogger(__name__)
@@ -45,23 +44,99 @@ def orga_ci_inventory(request: HttpRequest, event_slug: str) -> HttpResponse:
 
 
 @login_required
+def orga_ci_inventory_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a character inventory."""
+    return orga_new(request, event_slug, OrgaAction.CI_INVENTORY)
+
+
+@login_required
 def orga_ci_inventory_edit(request: HttpRequest, event_slug: str, inventory_uuid: str) -> HttpResponse:
     """Edit a character inventory."""
-    return orga_edit(request, event_slug, "orga_ci_inventory", OrgaInventoryForm, inventory_uuid)
+    return orga_edit(request, event_slug, OrgaAction.CI_INVENTORY, inventory_uuid)
+
+
+@login_required
+def orga_ci_inventory_delete(request: HttpRequest, event_slug: str, inventory_uuid: str) -> HttpResponse:
+    """Delete inventory for event."""
+    return orga_delete(request, event_slug, OrgaAction.CI_INVENTORY, inventory_uuid)
 
 
 @login_required
 def orga_ci_pool_types(request: HttpRequest, event_slug: str) -> HttpResponse:
     """Display list of pool types for character inventory."""
     context = check_event_context(request, event_slug, "orga_ci_pool_types")
-    context["list"] = context["event"].get_elements(PoolTypeCI).order_by("number")
+    context["list"] = context["event"].get_elements(PoolType).order_by("number")
     return render(request, "larpmanager/orga/ci/pool_types.html", context)
+
+
+@login_required
+def orga_ci_pool_types_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a pool type for character inventory."""
+    return orga_new(request, event_slug, OrgaAction.CI_POOL_TYPES)
 
 
 @login_required
 def orga_ci_pool_types_edit(request: HttpRequest, event_slug: str, pool_uuid: str) -> HttpResponse:
     """Edit a pool type for character inventory."""
-    return orga_edit(request, event_slug, "orga_ci_pool_types", OrgaPoolTypePxForm, pool_uuid)
+    return orga_edit(request, event_slug, OrgaAction.CI_POOL_TYPES, pool_uuid)
+
+
+@login_required
+def orga_ci_pool_types_delete(request: HttpRequest, event_slug: str, pool_uuid: str) -> HttpResponse:
+    """Delete pool for event."""
+    return orga_delete(request, event_slug, OrgaAction.CI_POOL_TYPES, pool_uuid)
+
+
+@login_required
+def orga_ci_inventory_types(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Display list of inventory types for character inventory."""
+    context = check_event_context(request, event_slug, "orga_ci_inventory_types")
+    context["list"] = context["event"].get_elements(InventoryType).order_by("number")
+    return render(request, "larpmanager/orga/ci/inventory_types.html", context)
+
+
+@login_required
+def orga_ci_inventory_types_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create an inventory type."""
+    return orga_new(request, event_slug, OrgaAction.CI_INVENTORY_TYPES)
+
+
+@login_required
+def orga_ci_inventory_types_edit(request: HttpRequest, event_slug: str, type_uuid: str) -> HttpResponse:
+    """Edit an inventory type."""
+    return orga_edit(request, event_slug, OrgaAction.CI_INVENTORY_TYPES, type_uuid)
+
+
+@login_required
+def orga_ci_inventory_types_delete(request: HttpRequest, event_slug: str, type_uuid: str) -> HttpResponse:
+    """Delete an inventory type."""
+    return orga_delete(request, event_slug, OrgaAction.CI_INVENTORY_TYPES, type_uuid)
+
+
+@login_required
+def orga_ci_pool_labels(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Display list of pool labels for character inventory."""
+    context = check_event_context(request, event_slug, "orga_ci_pool_labels")
+    context["list"] = context["event"].get_elements(PoolLabel).order_by("number")
+    return render(request, "larpmanager/orga/ci/pool_labels.html", context)
+
+
+@login_required
+def orga_ci_pool_labels_new(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Create a pool label."""
+    return orga_new(request, event_slug, OrgaAction.CI_POOL_LABELS)
+
+
+@login_required
+def orga_ci_pool_labels_edit(request: HttpRequest, event_slug: str, label_uuid: str) -> HttpResponse:
+    """Edit a pool label."""
+    return orga_edit(request, event_slug, OrgaAction.CI_POOL_LABELS, label_uuid)
+
+
+@login_required
+def orga_ci_pool_labels_delete(request: HttpRequest, event_slug: str, label_uuid: str) -> HttpResponse:
+    """Delete a pool label."""
+    return orga_delete(request, event_slug, OrgaAction.CI_POOL_LABELS, label_uuid)
 
 
 @login_required
@@ -98,17 +173,17 @@ def orga_ci_transfer(request: HttpRequest, event_slug: str) -> HttpResponse:
     context = get_event_context(request, event_slug, signup=True)
     actor = request.user.member
 
-    # Get source inventory
+    # Get source inventory, scoped to the current event
     source_inventory_uuid = request.POST.get("source_inventory")
     source_inventory = None
     if source_inventory_uuid:
-        source_inventory = get_object_or_404(Inventory, uuid=source_inventory_uuid)
+        source_inventory = get_object_or_404(Inventory, uuid=source_inventory_uuid, event=context["event"])
 
-    # Get target inventory
+    # Get target inventory, scoped to the current event
     target_inventory_uuid = request.POST.get("target_inventory")
     target_inventory = None
     if target_inventory_uuid:
-        target_inventory = get_object_or_404(Inventory, uuid=target_inventory_uuid)
+        target_inventory = get_object_or_404(Inventory, uuid=target_inventory_uuid, event=context["event"])
 
     # Permission enforcement
     if source_inventory:
@@ -116,15 +191,15 @@ def orga_ci_transfer(request: HttpRequest, event_slug: str) -> HttpResponse:
             request, context, event_slug, "orga_ci_inventory"
         ):
             messages.error(request, "Only staff can transfer from this inventory.")
-            redirect_pk = target_inventory.uuid if target_inventory else "0"
+            redirect_pk = target_inventory.uuid if target_inventory else ""
             return redirect("orga_ci_inventory_view", event_slug=context["run"].get_slug(), inventory_uuid=redirect_pk)
     elif not has_event_permission(request, context, event_slug, "orga_ci_inventory"):
         messages.error(request, "Only staff can transfer from NPC.")
-        redirect_pk = target_inventory.uuid if target_inventory else "0"
+        redirect_pk = target_inventory.uuid if target_inventory else ""
         return redirect("orga_ci_inventory_view", event_slug=context["run"].get_slug(), inventory_uuid=redirect_pk)
 
-    # Get pool type and amount
-    pool_type = get_object_or_404(PoolTypeCI, uuid=request.POST.get("pool_type"))
+    # Get pool type (scoped to the current event) and amount
+    pool_type = get_object_or_404(PoolType, uuid=request.POST.get("pool_type"), event=context["event"])
     try:
         amount = int(request.POST.get("amount"))
     except (TypeError, ValueError):
@@ -143,5 +218,5 @@ def orga_ci_transfer(request: HttpRequest, event_slug: str) -> HttpResponse:
     except ValueError as e:
         messages.error(request, f"Transfer failed: {e!s}")
 
-    redirect_pk = source_inventory.uuid if source_inventory else (target_inventory.uuid if target_inventory else "0")
+    redirect_pk = source_inventory.uuid if source_inventory else (target_inventory.uuid if target_inventory else "")
     return redirect("orga_ci_inventory_view", event_slug=context["run"].get_slug(), inventory_uuid=redirect_pk)

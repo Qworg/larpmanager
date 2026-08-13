@@ -1,5 +1,11 @@
 {% extends "base.html" %}
 {% load show_tags i18n %}
+{% block datatables_css %}
+    {% include "elements/structure/datatables-css.html" %}
+{% endblock datatables_css %}
+{% block datatables_js %}
+    {% include "elements/structure/datatables-js.html" %}
+{% endblock datatables_js %}
 {% block title %}
     {% trans "Your characters" %} - {{ run.search }}
 {% endblock title %}
@@ -8,15 +14,15 @@
         <a href="{% url 'character_create' run.get_slug %}" class="add-new">{% trans "Create new character" %}</a>
         <br />
     {% endif %}
-    <table id="characters" class="tablesorter mob">
+    <table id="characters" class="go_datatable">
         <thead>
             <tr>
-                <th class="hide">number</th>
+                <th></th>
                 {% if features.user_character %}<th></th>{% endif %}
-                <th>{{ writing_fields.character.names.name }}</th>
-                {% if features.title %}<th>{{ writing_fields.character.names.title }}</th>{% endif %}
-                <th>{{ writing_fields.character.names.teaser }}</th>
-                {% for idx, _ in searchable.items %}
+                <th>{{ writing_field_names.name }}</th>
+                {% if features.title %}<th>{{ writing_field_names.title }}</th>{% endif %}
+                <th>{{ writing_field_names.teaser }}</th>
+                {% for idx, _unused in searchable.items %}
                     {% with questions|get:idx as que %}<th>{{ que.name }}</th>{% endwith %}
                 {% endfor %}
                 {% if approval %}
@@ -25,29 +31,32 @@
                 {% if features.campaign %}
                     <th>{% trans "Active" %}</th>
                 {% endif %}
-                {% if features.px %}
-                    <th>{% trans "XP tot" %}</th>
-                    <th>{% trans "XP used" %}</th>
-                    <th>{% trans "XP avail" %}</th>
+                {% if features.experience and exp_systems %}
+                    {% for sys in exp_systems %}
+                        <th>{% blocktrans with name=sys.name %}{{ name }} total{% endblocktrans %}</th>
+                        <th>{% blocktrans with name=sys.name %}{{ name }} used{% endblocktrans %}</th>
+                        <th>{% blocktrans with name=sys.name %}{{ name }} available{% endblocktrans %}</th>
+                    {% endfor %}
                 {% endif %}
-                {% if px_user %}<th></th>{% endif %}
-                {% if not assigned %}<th></th>{% endif %}
+                <th>{% trans "Last played" %}</th>
+                {% if exp_user %}<th></th>{% endif %}
+                <th></th>
             </tr>
         </thead>
         <tbody>
             {% for el in list %}
                 <tr id="{{ el.uuid }}">
-                    <td class="hide">{{ el.number }}</td>
+                    <td></td>
                     {% if features.user_character %}
                         <td>
-                            <a href="{% url 'character_change' run.get_slug el.uuid %}"
+                            <a href="{% url 'character_edit' run.get_slug el.uuid %}"
                                qtip="{% trans "Edit" %}"><i class="fas fa-edit"></i></a>
                         </td>
                     {% endif %}
                     <td>{{ el.name }}</td>
                     {% if features.title %}<td>{{ el.title }}</td>{% endif %}
                     <td>{{ el.teaser | safe | clean_tags | truncatechars:200 }}</td>
-                    {% for idx, _ in searchable.items %}
+                    {% for idx, _unused in searchable.items %}
                         {% with el.fields|get:idx as field %}
                             {% if field %}
                                 <td>{% get_character_field field options %}</td>
@@ -62,23 +71,52 @@
                             {% if el.addit.inactive != "True" %}<i class="fa fa-check"></i>{% endif %}
                         </td>
                     {% endif %}
-                    {% if features.px %}
-                        <td>{{ el.addit | get:'px_tot' }}</td>
-                        <td>{{ el.addit | get:'px_used' }}</td>
-                        <td>{{ el.addit | get:'px_avail' }}</td>
+                    {% if features.experience %}
+                        {% if exp_systems %}
+                            {% for sys in exp_systems %}
+                                <td>{{ el.addit|get:sys.tot_key }}</td>
+                                <td>{{ el.addit|get:sys.used_key }}</td>
+                                <td>{{ el.addit|get:sys.avail_key }}</td>
+                            {% endfor %}
+                        {% endif %}
                     {% endif %}
-                    {% if px_user %}
+                    <td>
+                        {% if el.last_run %}{{ el.last_run }}{% endif %}
+                    </td>
+                    {% if exp_user %}
                         <td>
                             <a href="{% url 'character_abilities' run.get_slug el.uuid %}">{% trans "Ability" %}</a>
                         </td>
                     {% endif %}
-                    {% if not assigned %}
-                        <td>
-                            <a href="{% url 'character_assign' run.get_slug el.uuid %}">{% trans "Select" %}</a>
-                        </td>
-                    {% endif %}
+                    <td>
+                        {% if el.assigned_here %}
+                            <span class="char-choose-badge">{% trans "Selected" %}</span>
+                        {% elif el.addit.inactive != "True" %}
+                            {% if can_select or can_switch %}
+                                <form action="{% url 'character_assign' run.get_slug el.uuid %}"
+                                      method="post"
+                                      class="char-choose-form">
+                                    {% csrf_token %}
+                                    <a href="#" class="char-choose-select">{% trans "Select" %}</a>
+                                </form>
+                            {% endif %}
+                        {% endif %}
+                    </td>
                 </tr>
             {% endfor %}
         </tbody>
     </table>
 {% endblock content %}
+{% block js %}
+    <script>
+ window.addEventListener('DOMContentLoaded', function() {
+    $(document).on('click', '.char-choose-select', function(e) {
+        e.preventDefault();
+        if (!window.lmTesting && !confirm('{% filter escapejs %}{% trans "Are you sure you want to play this character?" %}{% endfilter %}')) {
+            return;
+        }
+        $(this).closest('form').submit();
+    });
+});
+    </script>
+{% endblock js %}

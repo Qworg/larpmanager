@@ -37,11 +37,15 @@ from pilkit.processors import ResizeToFill
 
 from larpmanager.cache.config import get_element_config
 from larpmanager.models.association import Association
-from larpmanager.models.base import BaseModel, UuidMixin
+from larpmanager.models.base import BaseModel, MediaTokenMixin, UuidMixin
 from larpmanager.models.utils import UploadToPathAndRename, download_d, show_thumb
 from larpmanager.utils.core.codes import countries
 
 logger = logging.getLogger(__name__)
+
+SENSITIVE_DISCLAIMER = _(
+    "It will only be used for internal bureaucratic purposes, and will NEVER be displayed to other participants."
+)
 
 
 class GenderChoices(models.TextChoices):
@@ -49,7 +53,6 @@ class GenderChoices(models.TextChoices):
 
     MALE = "m", _("Male")
     FEMALE = "f", _("Female")
-    OTHER = "o", _("Other")
 
 
 class FirstAidChoices(models.TextChoices):
@@ -75,7 +78,7 @@ class DocumentChoices(models.TextChoices):
     PASS = "s", _("Passport")
 
 
-class Member(UuidMixin, BaseModel):
+class Member(MediaTokenMixin, UuidMixin, BaseModel):
     """Represents Member model."""
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="member")
@@ -93,9 +96,37 @@ class Member(UuidMixin, BaseModel):
         help_text=_("Preferred navigation language"),
     )
 
-    name = models.CharField(max_length=100, verbose_name=_("Name"))
+    profile = models.ImageField(
+        max_length=500,
+        upload_to=UploadToPathAndRename("member/"),
+        verbose_name=_("Portrait"),
+        help_text=_(
+            "Upload your portrait photo. It will be shown to other participants to help recognize "
+            "you in the event. Choose a photo that you would put in an official document (in which "
+            "you are alone, centered on your face)",
+        ),
+        blank=True,
+        null=True,
+    )
 
-    surname = models.CharField(max_length=100, verbose_name=_("Surname"))
+    profile_thumb = ImageSpecField(
+        source="profile",
+        processors=[ResizeToFill(500, 500)],
+        format="JPEG",
+        options={"quality": 90},
+    )
+
+    name = models.CharField(
+        max_length=100,
+        verbose_name=_("Name"),
+        help_text=_("Your first name as you prefer to be called"),
+    )
+
+    surname = models.CharField(
+        max_length=100,
+        verbose_name=_("Surname"),
+        help_text=_("Your last name or family name"),
+    )
 
     nickname = models.CharField(
         max_length=100,
@@ -115,17 +146,26 @@ class Member(UuidMixin, BaseModel):
         blank=True,
         null=True,
         help_text=_(
-            "If for whatever reason the first and last name shown on your documents is "
-            "different from the one you prefer to use, then write it here. It will only be "
-            "used for internal bureaucratic purposes, and will NEVER be displayed to other "
-            "participants.",
-        ),
+            "If the first name shown on your documents is different from the one you prefer to use, then write "
+            "it here; otherwise leave this field empty.",
+        )
+        + " "
+        + SENSITIVE_DISCLAIMER,
+    )
+
+    gender = models.CharField(
+        max_length=1,
+        choices=GenderChoices.choices,
+        default=None,
+        verbose_name=_("Legal Gender"),
+        null=True,
+        help_text=_("Enter your legal gender as it appears on official documents.") + " " + SENSITIVE_DISCLAIMER,
     )
 
     pronoun = models.CharField(
         max_length=20,
         verbose_name=_("Pronouns"),
-        help_text=_("Indicate the pronouns you wish to be used to refer to you"),
+        help_text=_("Enter the pronouns you want others to use when referring to you"),
         blank=True,
         null=True,
     )
@@ -136,16 +176,7 @@ class Member(UuidMixin, BaseModel):
         blank=True,
         null=True,
         verbose_name=_("Nationality"),
-        help_text=_("Indicate the country of which you are a citizen"),
-    )
-
-    gender = models.CharField(
-        max_length=1,
-        choices=GenderChoices.choices,
-        default=GenderChoices.OTHER,
-        verbose_name=_("Gender"),
-        help_text=_("Indicates what gender you identify yourself as"),
-        null=True,
+        help_text=_("Enter the country of which you are a citizen"),
     )
 
     phone_contact = PhoneNumberField(
@@ -160,8 +191,7 @@ class Member(UuidMixin, BaseModel):
         max_length=150,
         verbose_name=_("Contact"),
         help_text=_(
-            "Indicates a way for other participants to contact you. It can be an email, a social "
-            "profile, whatever you want. It will be made public to others participants",
+            "Enter a way for other participants to contact you. It can be an email address, a social profile, or anything else you choose. It will be made public to other participants.",
         ),
         blank=True,
         null=True,
@@ -179,9 +209,20 @@ class Member(UuidMixin, BaseModel):
         null=True,
     )
 
-    birth_date = models.DateField(verbose_name=_("Birth date"), blank=True, null=True)
+    birth_date = models.DateField(
+        verbose_name=_("Birth date"),
+        help_text=_("Your date of birth"),
+        blank=True,
+        null=True,
+    )
 
-    birth_place = models.CharField(max_length=150, verbose_name=_("Birth place"), blank=True, null=True)
+    birth_place = models.CharField(
+        max_length=150,
+        verbose_name=_("Birth place"),
+        help_text=_("City and country where you were born"),
+        blank=True,
+        null=True,
+    )
 
     fiscal_code = models.CharField(
         max_length=16,
@@ -197,7 +238,7 @@ class Member(UuidMixin, BaseModel):
         default=DocumentChoices.IDENT,
         verbose_name=_("Document type"),
         null=True,
-        help_text=_("Indicates a type of identification document issued by the nation in which you reside"),
+        help_text=_("Enter the type of identification document issued by the country where you live."),
     )
 
     document = models.CharField(
@@ -208,20 +249,26 @@ class Member(UuidMixin, BaseModel):
         help_text=_("Enter the number or code of the identification document indicated above"),
     )
 
-    document_issued = models.DateField(verbose_name=_("Date of issue of the document"), blank=True, null=True)
+    document_issued = models.DateField(
+        verbose_name=_("Date of issue of the document"),
+        help_text=_("The date when your identification document was issued"),
+        blank=True,
+        null=True,
+    )
 
     document_expiration = models.DateField(
         blank=True,
         null=True,
         verbose_name=_("Date of expiration of the document"),
         help_text=_(
-            "Leave blank if the document has no expiration date - Please check that it does not expire before the event you want to signup up for.",
+            "Leave blank if the document has no expiration date. Please check that it does not expire before the event you want to sign up for.",
         ),
     )
 
     residence_address = models.CharField(
         max_length=500,
         verbose_name=_("Residence address"),
+        help_text=_("Your full residential address including street, city, and country"),
         blank=True,
         null=True,
     )
@@ -269,28 +316,8 @@ class Member(UuidMixin, BaseModel):
         choices=NewsletterChoices.choices,
         default=NewsletterChoices.ALL,
         verbose_name=_("Newsletter"),
-        help_text=_("Do you wish to be always updated on our events") + "?",
+        help_text=_("Would you like to receive updates about our upcoming events?"),
         null=True,
-    )
-
-    profile = models.ImageField(
-        max_length=500,
-        upload_to=UploadToPathAndRename("member/"),
-        verbose_name=_("Portrait"),
-        help_text=_(
-            "Upload your portrait photo. It will be shown to other participants to help recognize "
-            "you in the event. Choose a photo that you would put in an official document (in which "
-            "you are alone, centered on your face)",
-        ),
-        blank=True,
-        null=True,
-    )
-
-    profile_thumb = ImageSpecField(
-        source="profile",
-        processors=[ResizeToFill(500, 500)],
-        format="JPEG",
-        options={"quality": 90},
     )
 
     presentation = models.CharField(
@@ -306,6 +333,13 @@ class Member(UuidMixin, BaseModel):
 
     class Meta:
         ordering: ClassVar[list] = ["surname", "name"]
+        indexes: ClassVar[list] = [
+            # Performance index from migration 0137
+            models.Index(
+                fields=["email"],
+                name="member_email_idx",
+            ),
+        ]
 
     def __str__(self) -> str:
         """Return string representation."""
@@ -319,16 +353,23 @@ class Member(UuidMixin, BaseModel):
             return self.display_real()
         return str(self.user)
 
-    def display_member(self) -> str:
+    def display_member(self, context: dict | None = None) -> str:
         """Return a user-friendly display name for the member.
 
         Returns the member's display name in order of preference:
         nickname > real name > email > primary key.
 
+        Args:
+            context: If is organizer, we should show the full name.
+
         Returns:
             str: The display name for the member.
 
         """
+        # If organizer, return full show
+        if context and context.get("is_organizer"):
+            return str(self)
+
         # Use nickname if available
         if self.nickname:
             return str(self.nickname)
@@ -365,16 +406,11 @@ class Member(UuidMixin, BaseModel):
         return str(self)
 
     def get_member_filepath(self) -> str:
-        """Get the file path for member PDF storage.
-
-        Returns:
-            The absolute path to the member's PDF directory.
-
-        """
+        """Get the file path for member PDF storage."""
         # Build base PDF members directory path
-        member_pdf_directory = str(Path(conf_settings.MEDIA_ROOT) / "pdf/members" / str(self.id))
+        member_pdf_directory = str(Path(conf_settings.MEDIA_ROOT) / "pdf/members" / f"{self.id}-{self.media_token}")
         # Ensure directory exists
-        Path(member_pdf_directory).mkdir(parents=True, exist_ok=True)
+        Path(member_pdf_directory).mkdir(mode=0o770, parents=True, exist_ok=True)
         return member_pdf_directory
 
     def get_request_filepath(self) -> Any:
@@ -397,12 +433,17 @@ class Member(UuidMixin, BaseModel):
         # noinspection PyUnresolvedReferences
         address_components = self.residence_address.split("|")
 
+        expected_parts = 6
+        if len(address_components) < expected_parts:
+            # Return raw address if format is unexpected
+            return self.residence_address
+
         # Format: street number, city (province), country_code (country)
         return f"{address_components[4]} {address_components[5]}, {address_components[2]} ({address_components[3]}), {address_components[1].replace('IT-', '')} ({address_components[0]})"
 
-    def get_config(self, name: str, *, default_value: Any = None, bypass_cache: bool = False) -> Any:
+    def get_config(self, name: str, *, bypass_cache: bool = False) -> Any:
         """Get configuration value for this member."""
-        return get_element_config(self, name, default_value, bypass_cache=bypass_cache)
+        return get_element_config(self, name, bypass_cache=bypass_cache)
 
 
 class MemberConfig(BaseModel):
@@ -443,7 +484,7 @@ class MembershipStatus(models.TextChoices):
     UPLOADED = "u", _("Inactive") + " (U)"
     SUBMITTED = "s", _("Review")
     ACCEPTED = "a", _("Accepted")
-    REWOKED = "r", _("Kicked out")
+    REWOKED = "r", _("Removed")
 
 
 class Membership(BaseModel):
@@ -468,7 +509,7 @@ class Membership(BaseModel):
     compiled = models.BooleanField(
         default=False,
         verbose_name=_("Profile completed"),
-        help_text=_("Indicates whether the member has completed their profile information"),
+        help_text=_("Whether the member has completed their profile information"),
     )
 
     credit = models.DecimalField(
@@ -554,6 +595,11 @@ class Membership(BaseModel):
                 condition=Q(deleted__isnull=True),
                 name="memb_association_stat_act",
             ),
+            models.Index(
+                fields=["association", "status", "member"],
+                condition=Q(deleted__isnull=True),
+                name="memb_assoc_stat_mem_act",
+            ),
         ]
         constraints: ClassVar[list] = [
             UniqueConstraint(
@@ -564,6 +610,12 @@ class Membership(BaseModel):
                 fields=["member", "association"],
                 condition=Q(deleted=None),
                 name="unique_membership_number_without_optional",
+            ),
+            # Card numbers are an official per-association identifier
+            UniqueConstraint(
+                fields=["association", "card_number"],
+                condition=Q(card_number__isnull=False, deleted=None),
+                name="unique_membership_card_number",
             ),
         ]
 
@@ -590,7 +642,7 @@ class Membership(BaseModel):
             return ""
 
 
-class VolunteerRegistry(BaseModel):
+class VolunteerRegistry(UuidMixin, BaseModel):
     """Represents VolunteerRegistry model."""
 
     member = models.ForeignKey(Member, on_delete=models.CASCADE, related_name="volunteer")
@@ -682,22 +734,15 @@ class Badge(UuidMixin, BaseModel):
         return js
 
 
-class Log(BaseModel):
-    """Represents Log model."""
+class LogOperationType(models.TextChoices):
+    """Log operation types."""
 
-    member = models.ForeignKey(Member, on_delete=models.CASCADE)
-
-    eid = models.IntegerField()
-
-    cls = models.CharField(max_length=100)
-
-    dct = models.TextField()
-
-    dl = models.BooleanField(default=False)
-
-    def __str__(self) -> str:
-        """Return string representation."""
-        return f"{self.cls} {self.eid}"
+    NEW = "new", _("New")
+    UPDATE = "update", _("Update")
+    DELETE = "delete", _("Delete")
+    BULK = "bulk", _("Bulk operation")
+    UPLOAD = "upload", _("Upload")
+    RESTORE = "restore", _("Restore")
 
 
 class Vote(BaseModel):
@@ -768,3 +813,50 @@ def get_user_membership(user: Member, association: Association | int) -> Members
     # Cache the membership on the user object for future access
     user.membership = membership
     return membership
+
+
+class NotificationType(models.TextChoices):
+    """Notification types for email sent to organizers and association executives."""
+
+    # Event-level notifications (sent to event organizers)
+    REGISTRATION_NEW = "registration_new", "New Registration"
+    REGISTRATION_UPDATE = "registration_update", "Updated Registration"
+    REGISTRATION_CANCEL = "registration_cancel", "Cancelled Registration"
+    REGISTRATION_REQUEST_NEW = "registration_request_new", "New Signup Request"
+    PAYMENT_MONEY = "payment_money", "Money Payment"
+    PAYMENT_CREDIT = "payment_credit", "Credit Payment"
+    PAYMENT_TOKEN = "payment_token", "Token Payment"
+    INVOICE_APPROVAL = "invoice_approval", "Invoice Awaiting Approval"
+
+    # Association-level notifications (sent to association executives)
+    HELP_QUESTION = "help_question", "Help Question"
+    PASSWORD_REMINDER = "password_reminder", "Password Reminder"
+    REFUND_REQUEST = "refund_request", "Refund Request"
+    INVOICE_APPROVAL_EXE = "invoice_approval_exe", "Invoice Approval (Executive)"
+
+
+class NotificationQueue(BaseModel):
+    """Queue for batching organizer and executive notifications into daily summaries.
+
+    Supports both event-level notifications (for event organizers) and association-level
+    notifications (for association executives). Event-level notifications require a run,
+    while association-level notifications require an association.
+
+    If member is None, the notification will be sent to the association's main_mail address.
+    """
+
+    run = models.ForeignKey("Run", on_delete=models.CASCADE, null=True, blank=True)
+    association = models.ForeignKey("Association", on_delete=models.CASCADE, null=True, blank=True)
+    member = models.ForeignKey(Member, on_delete=models.CASCADE, null=True, blank=True)
+    notification_type = models.CharField(max_length=30, choices=NotificationType.choices)
+    object_id = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent = models.BooleanField(default=False)
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self) -> str:
+        """String representation for notification in queue."""
+        member_str = self.member if self.member else "main_mail"
+        if self.run:
+            return f"{self.run.search} - {member_str} - {self.get_notification_type_display()}"
+        return f"{self.association.name} - {member_str} - {self.get_notification_type_display()}"

@@ -1,0 +1,39 @@
+{% load i18n %}
+{% if registration_list %}
+    <div class="calendar">
+        <table class="mob">
+            <tbody>
+                {% for registration in registration_list %}
+                    <tr data-assoc-slug="{{ registration.run.event.association.slug }}">
+                        {% if show_association %}<td>{{ registration.run.event.association.name }}</td>{% endif %}
+                        <td>
+                            <b>
+                                <a href="{% url 'event' registration.run.get_slug %}">{{ registration.run }}</a>
+                            </b>
+                        </td>
+                        {% if not hide_cover %}
+                            {% if run.event.cover %}
+                                <td class="cover-container">
+                                    <img src="{{ run.event.cover_thumb.url }}" alt="run cover image" />
+                                </td>
+                            {% else %}
+                                <td></td>
+                            {% endif %}
+                        {% endif %}
+                        <td>
+                            <i>{{ registration.run.pretty_dates }}</i>
+                            {% if registration.run.event.maps_url %}
+                                <a href="{{ registration.run.event.maps_url }}"
+                                   target="_blank"
+                                   rel="noopener noreferrer"><i class="fa-solid fa-map-location-dot"></i></a>
+                            {% endif %}
+                        </td>
+                        <td>{% include "elements/reg_status.html" with run_status=registration.run.status registration=registration %}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% else %}
+    <p>{% trans "You don't have any registrations yet." %}</p>
+{% endif %}

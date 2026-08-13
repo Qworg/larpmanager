@@ -19,31 +19,35 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings as conf_settings
 from django.core.cache import cache
+from django.core.exceptions import ObjectDoesNotExist
 
 from larpmanager.cache.config import get_event_config
 from larpmanager.cache.feature import get_event_features
 from larpmanager.cache.fields import visible_writing_fields
 from larpmanager.cache.registration import search_player
+from larpmanager.cache.writing import get_character_element_fields
 from larpmanager.models.casting import AssignmentTrait, Quest, QuestType, Trait
 from larpmanager.models.event import Event, Run
 from larpmanager.models.form import (
-    BaseQuestionType,
     QuestionApplicable,
     WritingAnswer,
     WritingChoice,
 )
 from larpmanager.models.registration import RegistrationCharacterRel
-from larpmanager.models.writing import Character, Faction, FactionType
+from larpmanager.models.writing import Character, Faction, FactionType, Guild
 
 if TYPE_CHECKING:
     from larpmanager.models.base import BaseModel
     from larpmanager.models.member import Member
+
+logger = logging.getLogger(__name__)
 
 
 def delete_all_in_path(path: str) -> None:
@@ -54,26 +58,25 @@ def delete_all_in_path(path: str) -> None:
 
     """
     path_obj = Path(path)
-    if path_obj.exists():
-        # Remove all contents inside the path
-        for entry in path_obj.iterdir():
+    if not path_obj.exists():
+        return
+
+    def _on_error(func: Any, failed_path: Any, err: BaseException) -> None:  # noqa: ARG001
+        logger.warning("could not delete %s: %s", failed_path, err)
+
+    for entry in path_obj.iterdir():
+        try:
             if entry.is_file() or entry.is_symlink():
                 entry.unlink()
             elif entry.is_dir():
-                shutil.rmtree(entry)
+                shutil.rmtree(entry, onexc=_on_error)
+        except OSError as err:
+            logger.warning("could not delete %s: %s", entry, err)
 
 
 def get_event_cache_all_key(event_run: Run) -> str:
-    """Generate cache key for event data.
-
-    Args:
-        event_run: Run instance
-
-    Returns:
-        str: Cache key for event factions and characters
-
-    """
-    return f"event_factions_characters_{event_run.event.slug}_{event_run.number}"
+    """Generate cache key for event data."""
+    return f"event_factions_characters_{event_run.id}"
 
 
 def init_event_cache_all(context: dict) -> dict:
@@ -99,6 +102,9 @@ def init_event_cache_all(context: dict) -> dict:
 
     # Load faction data into cache
     get_event_cache_factions(context, cached_event_data)
+
+    # Load guild data into cache
+    get_event_cache_guilds(context, cached_event_data)
 
     # Conditionally load traits if questbuilder feature is available
     if "questbuilder" in context["features"]:
@@ -137,18 +143,15 @@ def get_event_cache_characters(context: dict, cache_result: dict) -> dict:
 
     # Get event configuration for hiding uncasted characters
     hide_uncasted_characters = get_event_config(
-        context["event"].id, "gallery_hide_uncasted_characters", default_value=False, context=context
+        context["event"].id, "gallery_hide_uncasted_characters", context=context
     )
 
-    # Get list of assigned character IDs for mirror filtering
-    assigned_character_ids = RegistrationCharacterRel.objects.filter(registration__run=context["run"]).values_list(
-        "character_id",
-        flat=True,
-    )
+    # Derive assigned character IDs from already-loaded assignments
+    assigned_character_ids = {rel.character_id for rel in context["assignments"].values()}
 
     # Process each character for the event cache
-    characters_query = context["event"].get_elements(Character).filter(hide=False).order_by("number")
-    for character in characters_query.prefetch_related("factions_list"):
+    characters_query = context["event"].get_elements(Character).filter(hide=False).order_by("order")
+    for character in characters_query.prefetch_related("factions_list", "guild_memberships__guild"):
         # Skip mirror characters that are already assigned
         if is_mirror_enabled and character.mirror_id in assigned_character_ids:
             continue
@@ -202,12 +205,12 @@ def get_event_cache_fields(context: dict, res: dict, *, only_visible: bool = Tru
         return
 
     # Retrieve visible question IDs and populate context with questions
-    visible_writing_fields(context, QuestionApplicable.CHARACTER, only_visible=only_visible)
-    if "questions" not in context:
+    fields_data = visible_writing_fields(context, QuestionApplicable.CHARACTER, only_visible=only_visible)
+    if "questions" not in fields_data:
         return
 
     # Extract question IDs from context for database filtering
-    question_uuids = context["questions"].keys()
+    question_uuids = fields_data["questions"].keys()
 
     # Query the Character table to get id -> number mapping for the event
     character_id_mapping = dict(context["event"].get_elements(Character).values_list("id", "number"))
@@ -217,7 +220,7 @@ def get_event_cache_fields(context: dict, res: dict, *, only_visible: bool = Tru
     choice_answers = WritingChoice.objects.filter(question__uuid__in=question_uuids)
     for element_id, question_uuid, option_uuid in choice_answers.values_list(
         "element_id", "question__uuid", "option__uuid"
-    ):
+    ).order_by("question__order", "option__order"):
         # Skip if character not in current event mapping
         if element_id not in character_id_mapping:
             continue
@@ -254,121 +257,6 @@ def get_event_cache_fields(context: dict, res: dict, *, only_visible: bool = Tru
         if character_index not in res["chars"]:
             continue
         res["chars"][character_index]["fields"][question] = value
-
-
-def get_character_element_fields(
-    context: dict,
-    character_id: int,
-    *,
-    only_visible: bool = True,
-) -> dict:
-    """Get writing element fields for a character."""
-    return get_writing_element_fields(
-        context,
-        "character",
-        QuestionApplicable.CHARACTER,
-        character_id,
-        only_visible=only_visible,
-    )
-
-
-def get_writing_element_fields(
-    context: dict,
-    feature_name: str,
-    applicable: str,
-    element_id: int,
-    *,
-    only_visible: bool = True,
-) -> dict[str, dict]:
-    """Get writing fields for a specific element with visibility filtering."""
-    batch_results = get_writing_element_fields_batch(
-        context,
-        feature_name,
-        applicable,
-        [element_id],
-        only_visible=only_visible,
-    )
-    return batch_results.get(
-        element_id, {"questions": context.get("questions", {}), "options": context.get("options", {}), "fields": {}}
-    )
-
-
-def get_writing_element_fields_batch(
-    context: dict,
-    feature_name: str,
-    applicable: str,
-    element_ids: list[int],
-    *,
-    only_visible: bool = True,
-) -> dict[int, dict[str, dict]]:
-    """Get writing fields for multiple elements with visibility filtering.
-
-    Args:
-        context: Context dictionary containing event and configuration data including
-             'questions', 'options', and visibility settings
-        feature_name: Name of the feature (e.g., 'character', 'faction') used
-                     for determining visibility key
-        applicable: QuestionApplicable enum value defining question scope
-        element_ids: List of element IDs to retrieve fields for
-        only_visible: Whether to include only visible fields. Defaults to True
-
-    Returns:
-        Dictionary mapping element_id to:
-            - questions: Available questions from context
-            - options: Available options from context
-            - fields: Mapping of question_id to field values (text or list of option_ids)
-
-    """
-    # Apply visibility filtering to populate context with visible fields
-    visible_writing_fields(context, applicable, only_visible=only_visible)
-
-    # Filter questions based on visibility configuration
-    # Only include questions that are explicitly shown or when show_all is enabled
-    visible_question_ids = []
-    for question_uuid in context["questions"]:
-        question_config_key = str(question_uuid)
-        # Skip questions not marked as visible unless showing all
-        if "show_all" not in context and question_config_key not in context.get(f"show_{feature_name}", {}):
-            continue
-        visible_question_ids.append(question_uuid)
-
-    # Initialize results dictionary for all elements
-    results = {element_id: {} for element_id in element_ids}
-
-    # Retrieve text answers for all elements
-    # Query WritingAnswer model for text-based responses
-    text_answers_query = WritingAnswer.objects.filter(
-        element_id__in=element_ids,
-        question__uuid__in=visible_question_ids,
-        question__typ__in=[BaseQuestionType.TEXT, BaseQuestionType.PARAGRAPH, BaseQuestionType.EDITOR],
-    ).select_related("question")
-    for element_id, question_uuid, text in text_answers_query.values_list("element_id", "question__uuid", "text"):
-        results[element_id][question_uuid] = text
-
-    # Retrieve choice answers for all elements
-    # Group multiple choice options into lists per question
-    choice_answers_query = WritingChoice.objects.filter(
-        element_id__in=element_ids,
-        question__uuid__in=visible_question_ids,
-        question__typ__in=[BaseQuestionType.SINGLE, BaseQuestionType.MULTIPLE],
-    ).select_related("question", "option")
-    for element_id, question_uuid, option_uuid in choice_answers_query.values_list(
-        "element_id", "question__uuid", "option__uuid"
-    ):
-        # Initialize list if question not yet in fields
-        if question_uuid not in results[element_id]:
-            results[element_id][question_uuid] = []
-        results[element_id][question_uuid].append(option_uuid)
-
-    # Return full format for each element
-    return {
-        element_id: {
-            "questions": context["questions"],
-            "options": context["options"],
-            "fields": fields,
-        }
-        for element_id, fields in results.items()
-    }
 
 
 def get_event_cache_factions(context: dict, result: dict) -> None:
@@ -415,7 +303,7 @@ def get_event_cache_factions(context: dict, result: dict) -> None:
         if character_data["hide"]:
             continue
 
-        if "factions" in character_data and 0 in character_data["factions"]:
+        if 0 in character_data.get("factions", {}):
             characters_without_primary_faction.append(character_number)
 
     # Create fake faction for characters without primary faction
@@ -457,6 +345,49 @@ def _process_faction_cache(faction: Faction, result: dict) -> None:
         result["factions_typ"][faction.typ] = []
     result["factions_typ"][faction.typ].append(faction.number)
     result["fac_mapping"][faction.number] = faction.id
+
+
+def get_event_cache_guilds(context: dict, result: dict) -> None:
+    """Build cached guild data for events.
+
+    Creates guild-character mappings for the event cache, skipping guilds
+    with no accepted members.
+
+    Args:
+        context: Context dictionary containing event information with 'event' key
+        result: Result dictionary to be populated with guild data, modified in-place
+
+    Returns:
+        None: Function modifies result in-place, adding 'guilds' key
+
+    """
+    result["guilds"] = {}
+    result["guild_mapping"] = {}
+
+    if "guild" not in get_event_features(context["event"].id):
+        return
+
+    for guild in context["event"].get_elements(Guild).order_by("order"):
+        _process_guild_cache(guild, result)
+
+
+def _process_guild_cache(guild: Guild, result: dict) -> None:
+    """Process a guild adding its values into the result cache."""
+    guild_data = guild.show_red()
+    guild_data["characters"] = []
+    for character_number, character_data in result["chars"].items():
+        if character_data["hide"]:
+            continue
+
+        if guild_data["number"] in character_data.get("guilds", []):
+            guild_data["characters"].append(character_number)
+
+    # Skip guilds with no accepted members
+    if not guild_data["characters"]:
+        return
+
+    result["guilds"][guild.number] = guild_data
+    result["guild_mapping"][guild.number] = guild.id
 
 
 def _build_trait_relationships(event: Event) -> dict:
@@ -592,13 +523,7 @@ def reset_event_cache_all(run: Run) -> None:
 
 
 def update_character_fields(character: Character, character_data: dict) -> None:
-    """Update character fields with event-specific data if character features are enabled.
-
-    Args:
-        character: Character instance with event_id attribute
-        character_data: Dictionary to update with character element fields
-
-    """
+    """Update character fields with event-specific data if character features are enabled."""
     # Check if character features are enabled for this event
     enabled_features = get_event_features(character.event_id)
     if "character" not in enabled_features:
@@ -634,7 +559,7 @@ def update_event_cache_all(run: Run, instance: BaseModel) -> None:
 
     # Update cache based on instance type - Faction updates
     if isinstance(instance, Faction):
-        update_event_cache_all_faction(instance, cached_result)
+        update_event_cache_all_faction(instance, cached_result, run)
 
     # Character updates include both character data and faction refresh
     if isinstance(instance, Character):
@@ -649,26 +574,32 @@ def update_event_cache_all(run: Run, instance: BaseModel) -> None:
     cache.set(cache_key, cached_result, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
 
 
-def update_event_cache_all_character_reg(character_registration: Any, cache_result: dict, event_run: Any) -> None:
+def update_event_cache_all_character_reg(
+    relation: RegistrationCharacterRel, cache_result: dict, event_run: Any
+) -> None:
     """Update character registration cache data for an event.
 
     Args:
-        character_registration: Character registration instance
+        relation: Character registration relation
         cache_result: Result dictionary to update with character data
         event_run: Event run instance
 
     """
-    # Get character from registration instance
-    character = character_registration.character
+    # Get character from relation instance
+    character = relation.character
+
+    # Only update cache if character belongs to this event
+    if character.event_id != event_run.event_id:
+        return
 
     # Generate character display data
-    character_display_data = character.show()
+    character_display_data = character.show(event_run)
 
     # Search and update player information
     search_player(
         character,
         character_display_data,
-        {"run": event_run, "assignments": {character.number: character_registration}},
+        {"run": event_run, "assignments": {character.number: relation}},
     )
 
     # Initialize character entry if not exists
@@ -693,6 +624,10 @@ def update_event_cache_all_character(instance: Character, res: dict, run: Run) -
         run: Event run context
 
     """
+    # Only update cache if character belongs to this event
+    if instance.event_id != run.event_id:
+        return
+
     # Generate character display data for the specific run
     character_display_data = instance.show(run)
 
@@ -715,14 +650,16 @@ def update_event_cache_all_character(instance: Character, res: dict, run: Run) -
     res["char_mapping"][instance.number] = instance.id
 
 
-def update_event_cache_all_faction(instance: Faction, res: dict[str, dict]) -> None:
+def update_event_cache_all_faction(instance: Faction, res: dict[str, dict], run: Run) -> None:
     """Update or add faction data in the cache result dictionary."""
-    faction_data = instance.show()
+    if instance.number not in res["factions"]:
+        # Faction missing from cache: rebuild faction data so type index and mapping stay consistent
+        get_event_cache_factions({"event": run.event}, res)
+        if instance.number not in res["factions"]:
+            return
 
-    if instance.number in res["factions"]:
-        res["factions"][instance.number].update(faction_data)
-    else:
-        res["factions"][instance.number] = faction_data
+    # Overlay in-memory values, since the instance may not be persisted yet (pre_save)
+    res["factions"][instance.number].update(instance.show())
 
 
 def has_different_cache_values(instance: object, previous_instance: object, attributes_to_check: list) -> bool:
@@ -767,6 +704,10 @@ def update_member_event_character_cache(instance: Member) -> None:
 
 def on_character_pre_save_update_cache(char: Character) -> None:
     """Update or clear character cache before save based on changed fields."""
+    # Skip cache updates when the instance is being soft-deleted
+    if char.deleted:
+        return
+
     # Clear cache for new characters (no primary key yet)
     if not char.pk:
         clear_event_cache_all_runs(char.event)
@@ -784,7 +725,7 @@ def on_character_pre_save_update_cache(char: Character) -> None:
         else:
             # Update cache with new character data
             update_event_cache_all_runs(char.event, char)
-    except Character.DoesNotExist:
+    except ObjectDoesNotExist:
         # Fallback: clear cache if character not found
         clear_event_cache_all_runs(char.event)
 
@@ -812,6 +753,10 @@ def on_faction_pre_save_update_cache(instance: Faction) -> None:
         instance: The Faction instance being saved.
 
     """
+    # Skip cache updates when the instance is being soft-deleted
+    if instance.deleted:
+        return
+
     # Handle new faction creation - clear all event caches
     if not instance.pk:
         clear_event_cache_all_runs(instance.event)
@@ -820,8 +765,8 @@ def on_faction_pre_save_update_cache(instance: Faction) -> None:
     # Get the previous version from database for comparison
     prev = Faction.objects.get(pk=instance.pk)
 
-    # Check if faction type changed - requires full cache clear
-    lst = ["typ"]
+    # Check if faction type or visibility/access flags changed - requires full cache clear
+    lst = ["typ", "hide", "locked"]
     if has_different_cache_values(instance, prev, lst):
         clear_event_cache_all_runs(instance.event)
 
@@ -833,6 +778,10 @@ def on_faction_pre_save_update_cache(instance: Faction) -> None:
 
 def on_quest_type_pre_save_update_cache(instance: QuestType) -> None:
     """Clear event cache when QuestType changes that affect caching."""
+    # Skip cache updates when the instance is being soft-deleted
+    if instance.deleted:
+        return
+
     # Handle new QuestType creation
     if not instance.pk:
         clear_event_cache_all_runs(instance.event)
@@ -847,6 +796,10 @@ def on_quest_type_pre_save_update_cache(instance: QuestType) -> None:
 
 def on_quest_pre_save_update_cache(instance: Quest) -> None:
     """Clear event cache when quest fields change."""
+    # Skip cache updates when the instance is being soft-deleted
+    if instance.deleted:
+        return
+
     # Clear cache for new quests
     if not instance.pk:
         clear_event_cache_all_runs(instance.event)
@@ -866,6 +819,10 @@ def on_trait_pre_save_update_cache(instance: Trait) -> None:
         instance: The trait instance being saved.
 
     """
+    # Skip cache updates when the instance is being soft-deleted
+    if instance.deleted:
+        return
+
     # Clear cache for new traits
     if not instance.pk:
         clear_event_cache_all_runs(instance.event)

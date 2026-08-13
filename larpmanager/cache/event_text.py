@@ -26,7 +26,8 @@ from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils.translation import get_language
 
-from larpmanager.models.event import EventText
+from larpmanager.cache.config import _get_event_parent_id
+from larpmanager.models.event import EventText, EventTextType
 
 logger = logging.getLogger(__name__)
 
@@ -63,17 +64,7 @@ def update_event_text(event_id: int, text_type: str, language: str) -> str:
 
 
 def get_event_text_cache(event_id: int, typ: str, lang: str) -> str:
-    """Get cached event text or update cache if missing.
-
-    Args:
-        event_id: The event identifier
-        typ: The text type
-        lang: The language code
-
-    Returns:
-        The cached or newly updated event text
-
-    """
+    """Get cached event text or update cache if missing."""
     # Try to get text from cache
     res = cache.get(event_text_key(event_id, typ, lang))
 
@@ -114,16 +105,7 @@ def update_event_text_def(event_id: int, typ: str) -> str:
 
 
 def get_event_text_cache_def(event_id: int, typ: str) -> str:
-    """Get cached event text or update cache if missing.
-
-    Args:
-        event_id: The event identifier
-        typ: The text type to retrieve
-
-    Returns:
-        The cached or newly generated event text
-
-    """
+    """Get cached event text or update cache if missing."""
     # Try to get cached result
     res = cache.get(event_text_key_def(event_id, typ))
     if res is None:
@@ -136,7 +118,8 @@ def get_event_text(event_id: int, text_type: str, language_code: str | None = No
     """Get event text for the specified event, type, and language.
 
     Retrieves event text from cache if available, otherwise falls back to
-    default language cache. Uses current language if no language specified.
+    default language cache, then to the campaign parent event (if any).
+    Uses current language if no language specified.
 
     Args:
         event_id: The ID of the event to get text for
@@ -157,7 +140,16 @@ def get_event_text(event_id: int, text_type: str, language_code: str | None = No
         return cached_text
 
     # Fall back to default language cache if no text found
-    return get_event_text_cache_def(event_id, text_type)
+    default_text = get_event_text_cache_def(event_id, text_type)
+    if default_text:
+        return default_text
+
+    # Fall back to the campaign parent event, if this event belongs to one
+    parent_id = _get_event_parent_id(event_id, None)
+    if parent_id:
+        return get_event_text(parent_id, text_type, language_code)
+
+    return ""
 
 
 def update_event_text_cache_on_save(instance: EventText) -> None:
@@ -170,11 +162,9 @@ def update_event_text_cache_on_save(instance: EventText) -> None:
         update_event_text_def(instance.event_id, instance.typ)
 
 
-def reset_event_text(instance: EventText) -> None:
-    """Clear event text cache entries when an EventText instance is deleted."""
-    # Clear cache for specific language variant
-    cache.delete(event_text_key(instance.event_id, instance.typ, instance.language))
-
-    # Clear default cache entry if this was the default text
-    if instance.default:
-        cache.delete(event_text_key_def(instance.event_id, instance.typ))
+def clear_event_text_cache(event_id: int) -> None:
+    """Clear all event text cache entries for an event, for every type and language."""
+    for text_type in EventTextType.values:
+        cache.delete(event_text_key_def(event_id, text_type))
+        for language_code, _label in conf_settings.LANGUAGES:
+            cache.delete(event_text_key(event_id, text_type, language_code))

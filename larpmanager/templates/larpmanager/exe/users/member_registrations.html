@@ -4,22 +4,24 @@
     {{ member_edit }} - {% trans "Registrations" %}
 {% endblock title %}
 {% block info %}
-    {% trans "This page shows all event registrations for the member" %}
+    {% trans "Track a member's full event registration history with payment status for each run" %}
 {% endblock info %}
 {% block content %}
     <h2>{% trans "Registrations" %}</h2>
     <table class="writing go_datatable">
         <thead>
             <tr>
+                <th></th>
                 <th>{% trans "Event" %}</th>
                 <th>{% trans "Total" %}</th>
-                <th>{% trans "Given" %}</th>
+                <th>{% trans "Amount Paid" %}</th>
                 <th>{% trans "Status" %}</th>
             </tr>
         </thead>
         <tbody>
             {% for el in regs %}
                 <tr>
+                    <td></td>
                     <td>{{ el.run.search }}</td>
                     <td>{{ el.tot_iscr|format_decimal }}</td>
                     <td>{{ el.tot_payed|format_decimal }}</td>
@@ -42,4 +44,7 @@
             {% endfor %}
         </tbody>
     </table>
+    {% if not regs %}
+        <p class="no-elements-available">{% trans "This member has not registered for any events yet." %}</p>
+    {% endif %}
 {% endblock content %}

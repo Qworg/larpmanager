@@ -28,13 +28,14 @@ from typing import Any
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ObjectDoesNotExist
-from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils.translation import gettext_lazy as _
 
 from larpmanager.accounting.registration import registration_payments_status
 from larpmanager.cache.config import get_event_config
-from larpmanager.forms.miscellanea import OrganizerCastingOptionsForm
+from larpmanager.cache.registration import get_active_registrations
+from larpmanager.forms.miscellanea import NO_FACTION_KEY, OrganizerCastingOptionsForm
 from larpmanager.models.casting import AssignmentTrait, Casting, CastingAvoid, Quest, QuestType, Trait
 from larpmanager.models.member import Member, Membership
 from larpmanager.models.registration import (
@@ -58,26 +59,27 @@ logger = logging.getLogger(__name__)
 
 
 @login_required
-def orga_casting_preferences(request: HttpRequest, event_slug: str, casting_type: str = "0") -> HttpResponse:
+def orga_casting_preferences(request: HttpRequest, event_slug: str, casting_type: str | None = None) -> HttpResponse:
     """Handle casting preferences for characters or traits based on type."""
     # Check user permissions for casting preferences
     context = check_event_context(request, event_slug, "orga_casting_preferences")
+    context["page_info"] = _("Configure casting preferences for this event")
 
     # Get base casting details
     get_element(context, casting_type, "quest_type", QuestType)
     casting_details(context)
 
     # Load preferences based on type
-    if casting_type == "0":
-        casting_preferences_characters(context)
-    else:
+    if casting_type:
         casting_preferences_traits(context)
+    else:
+        casting_preferences_characters(context)
 
     return render(request, "larpmanager/event/casting/preferences.html", context)
 
 
 @login_required
-def orga_casting_history(request: HttpRequest, event_slug: str, casting_type: str = "0") -> HttpResponse:
+def orga_casting_history(request: HttpRequest, event_slug: str, casting_type: str | None = None) -> HttpResponse:
     """Render casting history page with characters or traits based on type.
 
     Args:
@@ -91,16 +93,17 @@ def orga_casting_history(request: HttpRequest, event_slug: str, casting_type: st
     """
     # Check user permissions for casting history access
     context = check_event_context(request, event_slug, "orga_casting_history")
+    context["page_info"] = _("View casting history showing character and trait assignments across sessions")
 
     # Add casting details to context
     get_element(context, casting_type, "quest_type", QuestType)
     casting_details(context)
 
     # Add type-specific history data to context
-    if casting_type == "0":
-        casting_history_characters(context)
-    else:
+    if casting_type:
         casting_history_traits(context)
+    else:
+        casting_history_characters(context)
 
     return render(request, "larpmanager/event/casting/history.html", context)
 
@@ -145,7 +148,7 @@ def assign_casting(request: HttpRequest, context: dict) -> None:
             member = Member.objects.get(uuid=member_uuid)
 
             # Get active registration for this member and run
-            registration = Registration.objects.get(member=member, run=context["run"], cancellation_date__isnull=True)
+            registration = get_active_registrations(context["run"]).get(member=member)
 
             # Extract entity UUID (character or trait)
             entity_uuid = parts[1]
@@ -214,12 +217,22 @@ def get_casting_choices_characters(
     if "faction" in context["features"]:
         # Get primary factions for the event
         primary_factions_query = context["event"].get_elements(Faction).filter(typ=FactionType.PRIM)
+        factioned_character_uuids = set()
         for faction_element in primary_factions_query.order_by("number"):
+            faction_char_uuids = [str(char.uuid) for char in faction_element.characters.all()]
+            factioned_character_uuids.update(faction_char_uuids)
             # Skip factions not in the allowed filtering_options
             if str(faction_element.uuid) not in filtering_options["factions"]:
                 continue
             # Add all characters from this faction to allowed list
-            allowed_character_uuids.extend([str(char.uuid) for char in faction_element.characters.all()])
+            allowed_character_uuids.extend(faction_char_uuids)
+
+        # Include characters with no primary faction if the "no faction" pseudo-choice is selected
+        if NO_FACTION_KEY in filtering_options["factions"]:
+            all_character_uuids = {
+                str(char.uuid) for char in context["event"].get_elements(Character).exclude(hide=True)
+            }
+            allowed_character_uuids.extend(all_character_uuids - factioned_character_uuids)
 
     # Get characters that are already registered for this run
     registered_character_ids = set(
@@ -292,9 +305,7 @@ def get_casting_choices_quests(context: dict) -> tuple[dict[str, str], list[str]
 def check_player_skip_characters(relation: RegistrationCharacterRel, context: dict) -> bool:
     """Check if registration has reached maximum allowed characters."""
     # Get max characters allowed from event config
-    max_characters_allowed = int(
-        get_event_config(context["event"].id, "casting_characters", default_value=1, context=context)
-    )
+    max_characters_allowed = int(get_event_config(context["event"].id, "casting_characters", context=context))
 
     # Check if current character count meets or exceeds limit
     return RegistrationCharacterRel.objects.filter(registration=relation).count() >= max_characters_allowed
@@ -309,7 +320,7 @@ def check_player_skip_quests(registration: Registration, quest_type: QuestType) 
     ).exists()
 
 
-def check_casting_player(
+def skip_casting_player(
     context: dict,
     registration: Any,
     casting_filter_options: dict,
@@ -331,6 +342,10 @@ def check_casting_player(
     Returns:
         True if player should be skipped in casting, False otherwise
     """
+    # If not ticket type - skip
+    if not registration.ticket:
+        return True
+
     # Filter by ticket type - skip if player's ticket not in allowed list
     if "tickets" in casting_filter_options and str(registration.ticket.uuid) not in casting_filter_options["tickets"]:
         return True
@@ -422,7 +437,7 @@ def get_casting_data(
     cache_aim, cache_memberships, casting_submissions = _casting_prepare(context)
 
     # Process each registration to build player preferences
-    registrations_query = Registration.objects.filter(run=context["run"], cancellation_date__isnull=True)
+    registrations_query = get_active_registrations(context["run"])
     # Exclude non-participant ticket types from casting
     registrations_query = registrations_query.exclude(
         ticket__tier__in=[TicketTier.WAITING],
@@ -430,7 +445,7 @@ def get_casting_data(
     registrations_query = registrations_query.order_by("created").select_related("ticket", "member")
     for registration in registrations_query:
         # Skip players that don't match filter criteria (ticket, membership, payment)
-        if check_casting_player(context, registration, filter_options, cache_memberships, cache_aim):
+        if skip_casting_player(context, registration, filter_options, cache_memberships, cache_aim):
             continue
 
         # Add player info with ticket priority and registration/payment dates
@@ -481,9 +496,7 @@ def get_casting_data(
 
     # Load priority configuration for algorithm weighting
     for priority_key in ("reg_priority", "pay_priority"):
-        context[priority_key] = int(
-            get_event_config(context["event"].id, f"casting_{priority_key}", default_value=0, context=context)
-        )
+        context[priority_key] = int(get_event_config(context["event"].id, f"casting_{priority_key}", context=context))
 
 
 def _casting_prepare(context: dict) -> tuple[set, dict[Any, Any], dict[Any, list[Any]]]:
@@ -660,16 +673,9 @@ def orga_casting(
         HttpResponse: Rendered casting template with form and casting data,
                      or redirect response after successful assignment
 
-    Raises:
-        Http404: When the submitted form is not valid
-
     """
     # Check user permissions for accessing casting functionality
     context = check_event_context(request, event_slug, "orga_casting")
-
-    # Redirect to default casting type if none specified
-    if casting_type is None:
-        return redirect("orga_casting", event_slug=context["run"].get_slug(), casting_type=0)
 
     # Set context variables for template rendering
     context["typ"] = casting_type
@@ -680,15 +686,14 @@ def orga_casting(
     if request.method == "POST":
         form = OrganizerCastingOptionsForm(request.POST, context=context)
 
-        # Validate form data before processing
-        if not form.is_valid():
-            msg = "form not valid"
-            raise Http404(msg)
-
-        # Process casting assignment if submit button was clicked
-        if request.POST.get("submit"):
-            assign_casting(request, context)
-            return redirect(request.path_info)
+        if form.is_valid():
+            # Process casting assignment if submit button was clicked
+            if request.POST.get("submit"):
+                assign_casting(request, context)
+                return redirect(request.path_info)
+        else:
+            # Fall back to default form on invalid POST data
+            form = OrganizerCastingOptionsForm(context=context)
     else:
         # Initialize empty form for GET requests
         form = OrganizerCastingOptionsForm(context=context)
@@ -705,7 +710,7 @@ def orga_casting(
 
 
 @login_required
-def orga_casting_toggle(request: HttpRequest, event_slug: str, casting_type: str) -> JsonResponse:
+def orga_casting_toggle(request: HttpRequest, event_slug: str, casting_type: str | None = None) -> JsonResponse:
     """Toggle the 'nope' status of a casting entry."""
     context = check_event_context(request, event_slug, "orga_casting")
     get_element(context, casting_type, "quest_type", QuestType)
@@ -722,5 +727,5 @@ def orga_casting_toggle(request: HttpRequest, event_slug: str, casting_type: str
         c.save()
 
         return JsonResponse({"res": "ok"})
-    except ObjectDoesNotExist:
+    except (ObjectDoesNotExist, KeyError):
         return JsonResponse({"res": "ko"})

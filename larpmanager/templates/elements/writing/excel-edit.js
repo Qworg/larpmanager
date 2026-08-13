@@ -142,10 +142,11 @@ window.addEventListener('DOMContentLoaded', function() {
                         cell.invalidate('dom');
                     }
                 });
+                window._datatablesRefreshCount = (window._datatablesRefreshCount || 0) + 1;
                 return;
             }
             // form error
-            alert(res.errors);
+            if (!window.lmTesting) alert(res.errors);
         });
     }
 
@@ -174,6 +175,9 @@ window.addEventListener('DOMContentLoaded', function() {
             request.done(function(res) {
                 if (res.k == 0) return;
                 $('#excel-edit').empty().append(res.v);
+
+                // Initialize select2 on dynamically inserted django-select2 fields
+                $('#excel-edit').find('.django-select2').djangoSelect2();
 
                 // Start working ticket updates every 1 second
                 if (workingTicketInterval) {
@@ -207,6 +211,13 @@ window.addEventListener('DOMContentLoaded', function() {
 
                 $('#excel-edit input[type="submit"]').on("click", function() {
                     submitExcelForm(false);
+                });
+
+                // Prevent form submission on Enter, use our custom submit instead
+                $('#excel-edit form').on("submit", function(e) {
+                    e.preventDefault();
+                    submitExcelForm(false);
+                    return false;
                 });
 
                 $('#excel-edit').addClass('visible');

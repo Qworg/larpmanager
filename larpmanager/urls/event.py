@@ -20,24 +20,38 @@
 
 
 from django.urls import path
+from django.views.generic import RedirectView
 
-from larpmanager.views.user import casting as views_uca
-from larpmanager.views.user import character as views_uc
-from larpmanager.views.user import event as views_ue
-from larpmanager.views.user import miscellanea as views_ums
-from larpmanager.views.user import pdf as views_up
-from larpmanager.views.user import registration as views_ur
+from larpmanager.views.user import (
+    accounting as views_ua,
+    casting as views_uca,
+    character as views_uc,
+    event as views_ue,
+    guild as views_ug,
+    miscellanea as views_ums,
+    pdf as views_up,
+    registration as views_ur,
+)
 
 urlpatterns = [
     path(
         "<slug:event_slug>/",
+        views_ue.event,
+        name="event",
+    ),
+    path(
+        "<slug:event_slug>/event/",
+        RedirectView.as_view(pattern_name="event", permanent=True),
+    ),
+    path(
+        "<slug:event_slug>/gallery/",
         views_ue.gallery,
         name="gallery",
     ),
     path(
-        "<slug:event_slug>/event/",
-        views_ue.event,
-        name="event",
+        "<slug:event_slug>/ensemble/",
+        views_ue.ensemble,
+        name="ensemble",
     ),
     path(
         "<slug:event_slug>/event/register/",
@@ -45,14 +59,14 @@ urlpatterns = [
         name="event_register",
     ),
     path(
-        "<slug:event_slug>/character/list/",
-        views_uc.character_list,
-        name="character_list",
-    ),
-    path(
         "<slug:event_slug>/character/list/json/",
         views_uc.character_list_json,
         name="character_list_json",
+    ),
+    path(
+        "<slug:event_slug>/character/list/",
+        views_uc.character_list,
+        name="character_list",
     ),
     path(
         "<slug:event_slug>/character/create/",
@@ -65,7 +79,7 @@ urlpatterns = [
         name="character_your",
     ),
     path(
-        "<slug:event_slug>/character/your/<path:path>",
+        "<slug:event_slug>/character/your/<path:path>/",
         views_uc.character_your,
         name="character_your",
     ),
@@ -82,7 +96,7 @@ urlpatterns = [
     path(
         "<slug:event_slug>/character/<slug:character_uuid>/change/",
         views_uc.character_edit,
-        name="character_change",
+        name="character_edit",
     ),
     path(
         "<slug:event_slug>/character/<slug:character_uuid>/customize/",
@@ -100,14 +114,14 @@ urlpatterns = [
         name="character_profile_upload",
     ),
     path(
-        "<slug:event_slug>/character/<slug:character_uuid>/abilities/",
-        views_uc.character_abilities,
-        name="character_abilities",
-    ),
-    path(
         "<slug:event_slug>/character/<slug:character_uuid>/abilities/json/",
         views_uc.character_abilities_json,
         name="character_abilities_json",
+    ),
+    path(
+        "<slug:event_slug>/character/<slug:character_uuid>/abilities/",
+        views_uc.character_abilities,
+        name="character_abilities",
     ),
     path(
         "<slug:event_slug>/character/<slug:character_uuid>/abilities/<slug:ability_uuid>/",
@@ -130,7 +144,12 @@ urlpatterns = [
         name="character_relationships",
     ),
     path(
-        "<slug:event_slug>/character/<slug:character_uuid>/relationships/edit/<slug:other_character_uuid>",
+        "<slug:event_slug>/character/<slug:character_uuid>/relationships/new/",
+        views_uc.character_relationships_new,
+        name="character_relationships_new",
+    ),
+    path(
+        "<slug:event_slug>/character/<slug:character_uuid>/relationships/edit/<slug:other_character_uuid>/",
         views_uc.character_relationships_edit,
         name="character_relationships_edit",
     ),
@@ -143,11 +162,6 @@ urlpatterns = [
         "<slug:event_slug>/character/<slug:character_uuid>/pdf/friendly/",
         views_up.character_pdf_sheet_friendly,
         name="character_pdf_sheet_friendly",
-    ),
-    path(
-        "<slug:event_slug>/character/<slug:character_uuid>/pdf/relationships/",
-        views_up.character_pdf_relationships,
-        name="character_pdf_relationships",
     ),
     path(
         "<slug:event_slug>/search/",
@@ -165,6 +179,11 @@ urlpatterns = [
         name="gift",
     ),
     path(
+        "<slug:event_slug>/gift/new/",
+        views_ur.gift_new,
+        name="gift_new",
+    ),
+    path(
         "<slug:event_slug>/gift/edit/<slug:gift_uuid>/",
         views_ur.gift_edit,
         name="gift_edit",
@@ -176,11 +195,6 @@ urlpatterns = [
     ),
     path(
         "<slug:event_slug>/casting/",
-        views_uca.casting,
-        name="casting",
-    ),
-    path(
-        "<slug:event_slug>/casting/<str:casting_type>/",
         views_uca.casting,
         name="casting",
     ),
@@ -200,9 +214,19 @@ urlpatterns = [
         name="casting_history",
     ),
     path(
+        "<slug:event_slug>/casting/<str:casting_type>/",
+        views_uca.casting,
+        name="casting",
+    ),
+    path(
         "<slug:event_slug>/casting/history/<str:casting_type>/",
         views_uca.casting_history,
         name="casting_history",
+    ),
+    path(
+        "<slug:event_slug>/matchmaker/",
+        views_ue.matchmaker,
+        name="matchmaker",
     ),
     path(
         "<slug:event_slug>/factions/",
@@ -213,6 +237,66 @@ urlpatterns = [
         "<slug:event_slug>/faction/<slug:faction_uuid>/",
         views_ue.faction,
         name="faction",
+    ),
+    path(
+        "<slug:event_slug>/guilds/",
+        views_ug.guilds,
+        name="guilds",
+    ),
+    path(
+        "<slug:event_slug>/guilds/new/",
+        views_ug.guild_create,
+        name="guild_create",
+    ),
+    path(
+        "<slug:event_slug>/guilds/invites/",
+        views_ug.guild_invites,
+        name="guild_invites",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/",
+        views_ug.guild,
+        name="guild",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/edit/",
+        views_ug.guild_edit,
+        name="guild_edit",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/invite/",
+        views_ug.guild_invite,
+        name="guild_invite",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/invite/<slug:character_uuid>/accept/",
+        views_ug.guild_invite_accept,
+        name="guild_invite_accept",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/invite/<slug:character_uuid>/decline/",
+        views_ug.guild_invite_decline,
+        name="guild_invite_decline",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/kick/<slug:character_uuid>/",
+        views_ug.guild_kick,
+        name="guild_kick",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/leave/",
+        views_ug.guild_leave,
+        name="guild_leave",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/promote/<slug:character_uuid>/",
+        views_ug.guild_promote,
+        name="guild_promote",
+    ),
+    path(
+        "<slug:event_slug>/guilds/<slug:guild_uuid>/demote/<slug:character_uuid>/",
+        views_ug.guild_demote,
+        name="guild_demote",
     ),
     path(
         "<slug:event_slug>/quests/",
@@ -290,6 +374,11 @@ urlpatterns = [
         name="register_reduced",
     ),
     path(
+        "<slug:event_slug>/register/request/",
+        views_ur.request_signup,
+        name="request_signup",
+    ),
+    path(
         "<slug:event_slug>/register/<slug:secret_code>/",
         views_ur.register_exclusive,
         name="register_exclusive",
@@ -333,5 +422,20 @@ urlpatterns = [
         "<slug:event_slug>/show_char/",
         views_uc.show_char,
         name="show_char",
+    ),
+    path(
+        "<slug:event_slug>/payments/",
+        views_ua.event_payments,
+        name="event_payments",
+    ),
+    path(
+        "<slug:event_slug>/payments/<slug:registration_uuid>/",
+        views_ua.event_payments_registration,
+        name="event_payments_registration",
+    ),
+    path(
+        "<slug:event_slug>/payments/<slug:registration_uuid>/<slug:method>/",
+        views_ua.event_payments_registration,
+        name="event_payments_registration",
     ),
 ]

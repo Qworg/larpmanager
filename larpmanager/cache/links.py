@@ -34,6 +34,7 @@ from larpmanager.models.access import AssociationRole, EventRole
 from larpmanager.models.event import DevelopStatus, Event, Run
 from larpmanager.models.registration import Registration
 from larpmanager.utils.auth.admin import is_lm_admin
+from larpmanager.utils.core.common import get_coming_runs
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
@@ -92,6 +93,7 @@ def _build_navigation_context(request: HttpRequest, context: dict) -> dict:
         member=member,
         run__end__gte=cutoff_date,
         cancellation_date__isnull=True,
+        pending=False,
         run__event__association_id=association_id,
     ).select_related("run", "run__event")
     navigation_context["reg_menu"] = [
@@ -108,9 +110,48 @@ def _build_navigation_context(request: HttpRequest, context: dict) -> dict:
     )
 
     # Determine if topbar should be shown
-    navigation_context["topbar"] = bool(navigation_context["event_role"] or navigation_context["association_role"])
+    navigation_context["topbar_admin"] = bool(
+        navigation_context["event_role"] or navigation_context["association_role"]
+    )
+
+    # Store personal theme preference (overrides event/association theme)
+    navigation_context["member_theme"] = member.get_config("member_theme")
+
+    # Visible runs for v22 topbar (public upcoming events + hidden managed events)
+    navigation_context["visible_runs"] = _get_visible_runs(association_id)
+    navigation_context["hidden_role_runs"] = _get_hidden_role_runs(
+        association_id,
+        navigation_context["association_role"],
+        navigation_context["event_role"],
+    )
+    navigation_context["visible_runs_slugs"] = {
+        vrun["slug"] for vrun in navigation_context["visible_runs"] + navigation_context["hidden_role_runs"]
+    }
 
     return navigation_context
+
+
+def _get_hidden_role_runs(association_id: int, association_roles: dict, event_roles: dict) -> list[dict]:
+    """Get upcoming hidden runs that the user may access through a role."""
+    is_admin = 1 in association_roles
+    return [
+        {"slug": run.get_slug(), "name": str(run), "cover_url": run.get_cover_url()}
+        for run in get_coming_runs(association_id, include_hidden=True).filter(development=DevelopStatus.START)
+        if _determine_run_roles(run, event_roles, is_admin=is_admin)
+    ]
+
+
+def _get_visible_runs(association_id: int) -> list[dict]:
+    """Get public upcoming runs for the association, cached per association."""
+    cache_key = f"visible_runs:{association_id}"
+    result = cache.get(cache_key)
+    if result is None:
+        result = [
+            {"slug": run.get_slug(), "name": str(run), "cover_url": run.get_cover_url()}
+            for run in get_coming_runs(association_id)
+        ]
+        cache.set(cache_key, result, timeout=conf_settings.CACHE_TIMEOUT_1_DAY)
+    return result
 
 
 def _get_association_roles(member: Member, association_id: int, request: HttpRequest) -> dict[int, int]:
@@ -154,10 +195,11 @@ def _get_accessible_runs(association_id: int, association_roles: dict, event_rol
         # Create run element for display
         run_element = {
             "slug": run.get_slug(),
-            "e": run.event.slug,
-            "r": run.number,
-            "s": str(run),
-            "k": (run.start if run.start else datetime.max.replace(tzinfo=UTC).date()),
+            "event_slug": run.event.slug,
+            "number": run.number,
+            "label": str(run),
+            "start_date": (run.start if run.start else datetime.max.replace(tzinfo=UTC).date()),
+            "cover_url": run.get_cover_url(),
         }
 
         # Categorize as open or past run
@@ -193,6 +235,9 @@ def clear_run_event_links_cache(event: Event) -> None:
         May perform multiple database queries to fetch role memberships.
 
     """
+    # Clear visible_runs cache for this association (public run list may have changed)
+    cache.delete(f"visible_runs:{event.association_id}")
+
     # Clear cache for all members with roles in this specific event
     for event_role in EventRole.objects.filter(event=event).prefetch_related("members"):
         for member in event_role.members.all():
@@ -217,22 +262,7 @@ def clear_run_event_links_cache(event: Event) -> None:
 
 
 def on_registration_post_save_reset_event_links(instance: Registration) -> None:
-    """Handle registration post-save event link reset.
-
-    This function is triggered after a Registration model instance is saved.
-    It clears the cached event links for the registered member to ensure
-    fresh data is displayed after registration changes.
-
-    Args:
-        instance: Registration instance that was saved
-
-    Returns:
-        None
-
-    Side Effects:
-        Clears event link cache for the registered member and associated event
-
-    """
+    """Handle registration post-save event link reset."""
     # Early return if no member is associated with the registration
     if not instance.member:
         return
@@ -242,23 +272,7 @@ def on_registration_post_save_reset_event_links(instance: Registration) -> None:
 
 
 def reset_event_links(member_id: int, association_id: int) -> None:
-    """Clear event link cache for a specific member and association.
-
-    This function removes cached event links from the cache system to ensure
-    fresh data is loaded on the next request.
-
-    Args:
-        member_id: Member ID to clear cache for
-        association_id: Association ID to clear cache for
-
-    Returns:
-        None
-
-    Side Effects:
-        Removes cached event links from the cache system using the generated
-        cache key for the specified member and association combination.
-
-    """
+    """Clear event link cache for a specific member and association."""
     # Generate cache key for the specific member-association combination
     cache_key = get_cache_event_key(member_id, association_id)
 
@@ -267,22 +281,6 @@ def reset_event_links(member_id: int, association_id: int) -> None:
 
 
 def get_cache_event_key(member_id: int, association_id: int) -> str:
-    """Generate cache key for member event links.
-
-    Creates a unique cache key string for storing member-specific event links
-    based on member ID and association ID combination.
-
-    Args:
-        member_id: Member ID for cache key generation
-        association_id: Association ID for cache key generation
-
-    Returns:
-        Formatted cache key string for member event links storage
-
-    Example:
-        >>> get_cache_event_key(123, 456)
-        'ctx_event_links_123_456'
-
-    """
+    """Generate cache key for member event links."""
     # Generate cache key using member and association IDs
     return f"ctx_event_links_{member_id}_{association_id}"

@@ -25,7 +25,6 @@ from larpmanager.utils.core.base import get_event_context
 from larpmanager.utils.io.pdf import (
     print_character,
     print_character_friendly,
-    print_character_rel,
     print_gallery,
     print_profiles,
 )
@@ -59,7 +58,7 @@ def character_pdf_sheet(request: HttpRequest, event_slug: str, character_uuid: s
     check_print_pdf(context)
 
     # Validate character access and retrieve character data
-    get_char_check(request, context, character_uuid, restrict_non_owners=True)
+    get_char_check(request, context, character_uuid, deny_public=True)
 
     # Generate and return the character PDF
     return print_character(context)
@@ -85,36 +84,10 @@ def character_pdf_sheet_friendly(request: HttpRequest, event_slug: str, characte
     check_print_pdf(context)
 
     # Retrieve and validate character access
-    get_char_check(request, context, character_uuid, restrict_non_owners=True)
+    get_char_check(request, context, character_uuid, deny_public=True)
 
     # Generate and return the printer-friendly PDF
     return print_character_friendly(context)
-
-
-@login_required
-def character_pdf_relationships(request: HttpRequest, event_slug: str, character_uuid: str) -> HttpResponse:
-    """Generate PDF with character relationships for a specific character.
-
-    Args:
-        request: HTTP request object
-        event_slug: Event slug identifier
-        character_uuid: Character uuid
-
-    Returns:
-        PDF response with character relationships
-
-    """
-    # Get event/run context with signup validation
-    context = get_event_context(request, event_slug, signup=True)
-
-    # Verify PDF printing permissions
-    check_print_pdf(context)
-
-    # Validate character access and retrieve character data
-    get_char_check(request, context, character_uuid, restrict_non_owners=True)
-
-    # Generate and return the relationships PDF
-    return print_character_rel(context)
 
 
 @login_required

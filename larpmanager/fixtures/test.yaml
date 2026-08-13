@@ -209,7 +209,7 @@
     deleted_by_cascade: false
     created: 2025-03-19 09:06:22.735509
     updated: 2025-03-19 09:06:22.887608
-    name: Test Larp
+    name: Test Orga
     slug: def
     activated: 2025-03-19 09:06:22.887646
     profile: association/d3f86006e94d41849dfd79d1172b9074.jpg
@@ -233,6 +233,7 @@
     payment_methods: []
     skin: 1
     uuid: u1
+    lite_mode: false
 - model: larpmanager.associationrole
   pk: 1
   fields:
@@ -324,7 +325,6 @@
     carousel_img: ''
     carousel_text: ''
     website: ''
-    register_link: ''
     max_pg: 10
     max_filler: 0
     max_waiting: 0
@@ -361,6 +361,7 @@
     updated: 2025-03-19 10:31:49.183930
     search: Test Larp
     development: '1'
+    registration_status: 'o'
     event: 1
     number: 1
     start: 2050-03-19

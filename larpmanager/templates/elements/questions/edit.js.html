@@ -1,0 +1,158 @@
+{% load i18n static %}
+<script>
+window.addEventListener('DOMContentLoaded', function() {
+
+    // ========== AJAX Utilities ==========
+
+    // Make AJAX request with common error handling
+    function makeAjaxRequest(config) {
+        start_spinner();
+
+        return $.ajax(config)
+            .done(function(response) {
+                stop_spinner();
+                if (config.onSuccess) {
+                    config.onSuccess(response);
+                }
+            })
+            .fail(function(xhr, status, error) {
+                stop_spinner();
+                if (config.onError) {
+                    config.onError(xhr, status, error);
+                } else {
+                    if (!window.lmTesting) alert('{% filter escapejs %}{% trans "An error occurred" %}{% endfilter %}');
+                }
+            });
+    }
+
+    // Save question via AJAX, so options can be added before the page is submitted.
+    // Exposed globally: the inline options editor uses it when the question is new.
+    window.lmEnsureQuestionSaved = function(callback) {
+        const $mainForm = $('#main_form');
+        const $optionInputs = $('#inline-options').find('input, textarea, select');
+        $optionInputs.prop('disabled', true);
+        const formData = new FormData($mainForm[0]);
+        $optionInputs.prop('disabled', false);
+
+        makeAjaxRequest({
+            url: window.location.pathname,
+            method: "POST",
+            data: formData,
+            processData: false,
+            contentType: false,
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            dataType: "json",
+            onSuccess: function(response) {
+                if (response.success && response.question_uuid) {
+                    // Update URL with new question UUID
+                    const newUrl = window.location.pathname.replace('/new/', '/' + response.question_uuid + '/edit/');
+                    window.history.replaceState({}, '', newUrl);
+
+                    // Update form action to new UUID path
+                    $mainForm.attr('action', newUrl);
+
+                    // Execute callback with question UUID
+                    if (callback) {
+                        callback(response.question_uuid);
+                    }
+                } else {
+                    // Form has validation errors, submit normally to show errors
+                    $mainForm.off('submit');
+                    $mainForm.submit();
+                }
+            },
+            onError: function() {
+                // AJAX error, submit form normally to show errors
+                $mainForm.off('submit');
+                $mainForm.submit();
+            }
+        });
+    };
+
+
+    // ========== Form Field Visibility ==========
+
+    // Toggle visibility of form fields based on question type
+    function toggleOptions() {
+        const selectedValue = $('#id_typ').val();
+        const speed = 300;
+
+        // Options section visibility
+        if (["m", "s"].includes(selectedValue)) {
+            if (!$('#options').is(':visible')) {
+                $('#options').removeClass('hide').fadeIn(speed);
+            }
+        } else {
+            if ($('#options').is(':visible')) {
+                $('#options').fadeOut(speed, function() {
+                    $(this).addClass('hide');
+                });
+            }
+        }
+
+        // Max length field visibility
+        const maxLengtheable = ["m", "t", "p", "e", "name", "teaser", "text", "title", "additional_tickets"];
+        $('#id_max_length_tr').toggle(maxLengtheable.includes(selectedValue));
+
+        // Printable and visibility fields
+        if (["s", "m", "t", "p", "e", "c"].includes(selectedValue)) {
+            $('#id_printable_tr').fadeIn(speed);
+            $('#id_visibility_tr').fadeIn(speed);
+        } else {
+            $('#id_printable_tr').fadeOut(speed);
+            $('#id_visibility_tr').fadeOut(speed);
+        }
+
+        // Hide visibility for specific types
+        if (["name", "teaser", "text", "faction"].includes(selectedValue)) {
+            $('#id_visibility_tr').fadeOut(speed);
+        }
+
+        // Status field visibility
+        if (["ticket", "c"].includes(selectedValue)) {
+            $('#id_status_tr').fadeOut(speed);
+        } else {
+            $('#id_status_tr').fadeIn(speed);
+        }
+
+        // Editable field visibility
+        const selectedStatus = $('#id_status').val();
+        if (["c"].includes(selectedValue) || ["d", "h"].includes(selectedStatus)) {
+            $('#id_editable_tr').fadeOut(speed);
+        } else {
+            $('#id_editable_tr').fadeIn(speed);
+        }
+    }
+
+
+    // Grey out "Add option" until the question name is set
+    function toggleAddOptionButton() {
+        const name = $('#id_name').val().trim();
+        $('.add-inline-option').toggleClass('disabled', !name);
+    }
+
+    // ========== Initialization ==========
+
+    $(document).ready(function() {
+        // Move options section before submit button
+        $('#options').insertBefore('#form_submit');
+
+        // Prevent inline-option inputs from being submitted with the question form
+        $('#main_form').on('submit', function() {
+            $('#inline-options').find('input, textarea, select').prop('disabled', true);
+        });
+
+        // Initialize visibility toggle
+        setTimeout(toggleOptions, 10);
+
+        // Bind event handlers for question type changes
+        $('#id_typ').on('change', toggleOptions);
+        $('#id_status').on('change', toggleOptions);
+
+        // Bind and initialize "Add option" enable/disable state
+        $('#id_name').on('input', toggleAddOptionButton);
+        toggleAddOptionButton();
+    });
+
+});
+</script>

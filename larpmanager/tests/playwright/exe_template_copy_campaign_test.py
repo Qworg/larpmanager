@@ -30,8 +30,8 @@ from typing import Any
 import pytest
 from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, check_feature, go_to, login_orga, submit_confirm, expect_normalized, _checkboxes, \
-    fill_tinymce
+from larpmanager.tests.utils import fill_date, check_feature, go_to, login_orga, submit_confirm, \
+    expect_normalized, _checkboxes, fill_tinymce, get_modal_iframe, save_modal, click_and_wait_question, char_dual_pick
 
 pytestmark = pytest.mark.e2e
 
@@ -55,11 +55,12 @@ def template(live_server: Any, page: Any) -> None:
     go_to(page, live_server, "/manage/features/template/on")
     go_to(page, live_server, "/manage/template")
     page.get_by_role("link", name="New").click()
-    page.get_by_role("row", name="Name").locator("td").click()
-    page.locator("#id_name").fill("template")
-    page.get_by_role("checkbox", name="Characters").check()
-    page.locator("div.feature_checkbox", has_text="Copy").locator("input[type='checkbox']").check()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.get_by_role("row", name="Name").locator("td").click()
+    edit_iframe.locator("#id_name").fill("template")
+    edit_iframe.get_by_role("checkbox", name="Characters").check()
+    edit_iframe.locator("div.feature_checkbox", has_text="Copy").locator("input[type='checkbox']").check()
+    save_modal(page, edit_iframe)
     page.get_by_role("link", name="Add").click()
     page.locator("#id_name").click()
     page.locator("#id_name").fill("base role")
@@ -69,25 +70,22 @@ def template(live_server: Any, page: Any) -> None:
     check_feature(page, "Texts")
     submit_confirm(page)
     page.locator("#one").get_by_role("link", name="Configuration").click()
-    page.get_by_role("link", name="Gallery ").click()
+    page.get_by_role("link", name=re.compile(r"^Gallery ")).click()
     page.locator("#id_gallery_hide_signup").check()
     submit_confirm(page)
     # create new event from template
     go_to(page, live_server, "/manage/events")
-    page.get_by_role("link", name="New event").click()
-    page.locator("#id_form1-name").click()
-    page.locator("#id_form1-name").fill("from template")
-    page.locator("#id_form1-name").press("Tab")
-    page.locator("#slug").fill("fromtemplate")
-    # the template should be auto-selected
 
-    page.locator("#id_form2-start").fill("2050-01-01")
-    just_wait(page)
-    page.locator("#id_form2-start").click()
-    page.locator("#id_form2-end").fill("2050-01-03")
-    just_wait(page)
-    page.locator("#id_form2-end").click()
-    submit_confirm(page)
+    page.get_by_role("link", name="New event").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_form1-name").click()
+    edit_iframe.locator("#id_form1-name").fill("from template")
+    edit_iframe.locator("#id_form1-name").press("Tab")
+    edit_iframe.locator("#slug").fill("fromtemplate")
+    # the template should be auto-selected
+    fill_date(edit_iframe, "#id_form2-start", "2050-01-01")
+    fill_date(edit_iframe, "#id_form2-end", "2050-01-03")
+    save_modal(page, edit_iframe)
 
     # check roles
     go_to(page, live_server, "/fromtemplate/manage/roles/")
@@ -96,7 +94,7 @@ def template(live_server: Any, page: Any) -> None:
     expect_normalized(page, row, "Texts")
     # check configuration
     go_to(page, live_server, "/fromtemplate/manage/config/")
-    page.get_by_role("link", name="Gallery ").click()
+    page.get_by_role("link", name=re.compile(r"^Gallery ")).click()
     expect(page.locator("#id_gallery_hide_signup")).to_be_checked()
     # check features
     go_to(page, live_server, "/fromtemplate/manage/features")
@@ -107,82 +105,78 @@ def setup(live_server: Any, page: Any) -> None:
     # activate factions
     go_to(page, live_server, "/test/manage/features/faction/on")
     # activate xp
-    go_to(page, live_server, "/test/manage/features/px/on")
+    go_to(page, live_server, "/test/manage/features/experience/on")
     # activate characters
     go_to(page, live_server, "/test/manage/features/character/on")
     # configure test larp
     go_to(page, live_server, "/test/manage/config/")
-    page.get_by_role("link", name="Gallery ").click()
+    page.get_by_role("link", name=re.compile(r"^Gallery ")).click()
     page.locator("#id_gallery_hide_login").check()
     page.get_by_role("link", name=re.compile(r"^Experience points\s.+")).click()
-    page.locator("#id_px_start").click()
-    page.locator("#id_px_start").fill("10")
+    page.locator("#id_exp_start").click()
+    page.locator("#id_exp_start").fill("10")
 
     submit_confirm(page)
 
     go_to(page, live_server, "/test/manage/roles/")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("blabla")
-    page.locator("#id_name").press("Tab")
-    page.get_by_role("searchbox").fill("user")
-    page.get_by_role("option", name="User Test - user@test.it").click()
-    check_feature(page, "Navigation")
-    check_feature(page, "Factions")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("blabla")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.get_by_role("searchbox").fill("user")
+    edit_iframe.get_by_role("option", name="User Test - user@test.it").click()
+    check_feature(edit_iframe, "Navigation")
+    check_feature(edit_iframe, "Factions")
+    save_modal(page, edit_iframe)
 
     # give ability xp
-    go_to(page, live_server, "/test/manage/px/ability_types/")
+    go_to(page, live_server, "/test/manage/experience/ability_types/")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("base ability")
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("base ability")
+    save_modal(page, edit_iframe)
 
-    go_to(page, live_server, "/test/manage/px/abilities/")
+    go_to(page, live_server, "/test/manage/experience/abilities/")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("standard")
-    page.locator("#id_cost").click()
-    page.locator("#id_name").dblclick()
-    page.locator("#id_name").fill("sword")
-    page.locator("#id_cost").click()
-    page.locator("#id_cost").fill("1")
-    fill_tinymce(page, "id_descr", "sdsfdsfds", False)
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("te")
-    page.get_by_role("option", name="#1 Test Character").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("standard")
+    edit_iframe.locator("#id_cost").click()
+    edit_iframe.locator("#id_name").dblclick()
+    edit_iframe.locator("#id_name").fill("sword")
+    edit_iframe.locator("#id_cost").click()
+    edit_iframe.locator("#id_cost").fill("1")
+    fill_tinymce(edit_iframe, "id_descr", "sdsfdsfds", False)
+    char_dual_pick(edit_iframe, "te", "Test Character")
+    save_modal(page, edit_iframe)
 
-    # give delivery xp
-    go_to(page, live_server, "/test/manage/px/deliveries/")
+    # give award xp
+    go_to(page, live_server, "/test/manage/experience/awards/")
     page.get_by_role("link", name="New").click()
-    page.locator("#id_name").click()
-    page.locator("#id_name").fill("first live")
-    page.locator("#id_name").press("Tab")
-    page.locator("#id_amount").fill("2")
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("te")
-    page.get_by_role("option", name="#1 Test Character").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_name").click()
+    edit_iframe.locator("#id_name").fill("first live")
+    edit_iframe.locator("#id_name").press("Tab")
+    edit_iframe.locator("#id_amount").fill("2")
+    char_dual_pick(edit_iframe, "te", "Test Character")
+    save_modal(page, edit_iframe)
 
 
 def copy(live_server: Any, page: Any) -> None:
     # copy event
     go_to(page, live_server, "/manage/events")
+
     page.get_by_role("link", name="New event").click()
-    page.locator("#id_form1-name").click()
-    page.locator("#id_form1-name").fill("copy")
-    page.locator("#id_form1-name").press("Tab")
-    page.locator("#slug").fill("copy")
-
-    page.locator("#id_form2-start").fill("2050-01-01")
-    just_wait(page)
-    page.locator("#id_form2-start").click()
-    page.locator("#id_form2-end").fill("2050-01-03")
-    just_wait(page)
-    page.locator("#id_form2-end").click()
-
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_form1-name").click()
+    edit_iframe.locator("#id_form1-name").fill("copy")
+    edit_iframe.locator("#id_form1-name").press("Tab")
+    edit_iframe.locator("#slug").fill("copy")
+    fill_date(edit_iframe, "#id_form2-start", "2050-01-01")
+    fill_date(edit_iframe, "#id_form2-end", "2050-01-03")
+    save_modal(page, edit_iframe)
 
     go_to(page, live_server, "/copy/manage/features/copy/on")
     go_to(page, live_server, "/copy/manage/copy/")
@@ -191,8 +185,9 @@ def copy(live_server: Any, page: Any) -> None:
     page.get_by_role("searchbox").fill("tes")
     page.get_by_role("option", name="Test Larp").click()
 
-    # copy everything
+    # copy everything: select all types, then confirm all their elements
     _checkboxes(page, True)
+    submit_confirm(page)
 
     go_to(page, live_server, "/copy/manage/roles/")
     row = page.locator('tr:has-text("User Test")')
@@ -200,14 +195,14 @@ def copy(live_server: Any, page: Any) -> None:
     expect_normalized(page, row, "Appearance (Navigation), Writing (Factions) ")
 
     go_to(page, live_server, "/copy/manage/config/")
-    page.get_by_role("link", name="Gallery ").click()
+    page.get_by_role("link", name=re.compile(r"^Gallery ")).click()
     expect(page.locator("#id_gallery_hide_login")).to_be_checked()
     page.get_by_role("link", name=re.compile(r"^Experience points\s.+")).click()
-    expect(page.locator("#id_px_start")).to_have_value("10")
+    expect(page.locator("#id_exp_start")).to_have_value("10")
 
     go_to(page, live_server, "/copy/manage/characters/")
-    page.get_by_role("link", name="XP").click()
-    char_row = page.locator('tr:has-text("Test Character")').first
+    click_and_wait_question(page, "Experience")
+    char_row = page.locator('tr:has-text("Test Character")')
     expect_normalized(page, char_row, "12")
     expect_normalized(page, char_row, "1")
     expect_normalized(page, char_row, "11")
@@ -218,26 +213,21 @@ def campaign(live_server: Any, page: Any) -> None:
     go_to(page, live_server, "/manage/features/campaign/on")
     go_to(page, live_server, "/manage/events")
     page.get_by_role("link", name="New event").click()
-    page.locator("#id_form1-name").click()
-    page.locator("#id_form1-name").fill("campaign")
-    page.locator("#id_form1-name").press("Tab")
-    page.locator("#slug").fill("campaign")
-    just_wait(page)
-    page.locator("#select2-id_form1-parent-container").click()
-    page.get_by_role("searchbox").fill("tes")
-    page.get_by_role("option", name="Test Larp", exact=True).click()
-
-    page.locator("#id_form2-start").fill("2050-01-01")
-    just_wait(page)
-    page.locator("#id_form2-start").click()
-    page.locator("#id_form2-end").fill("2050-01-03")
-    just_wait(page)
-    page.locator("#id_form2-end").click()
-
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_form1-name").click()
+    edit_iframe.locator("#id_form1-name").fill("campaign")
+    edit_iframe.locator("#id_form1-name").press("Tab")
+    edit_iframe.locator("#slug").fill("campaign")
+    expect(edit_iframe.locator("#slug")).to_have_value("campaign")
+    edit_iframe.locator("#select2-id_form1-parent-container").click()
+    edit_iframe.get_by_role("searchbox").fill("tes")
+    edit_iframe.get_by_role("option", name="Test Larp", exact=True).click()
+    fill_date(edit_iframe, "#id_form2-start", "2050-01-01")
+    fill_date(edit_iframe, "#id_form2-end", "2050-01-03")
+    save_modal(page, edit_iframe)
 
     go_to(page, live_server, "/campaign/manage/characters/")
-    page.get_by_role("link", name="XP").click()
+    click_and_wait_question(page, "Experience")
     char_row = page.locator('tr:has-text("Test Character")').first
     expect_normalized(page, char_row, "12")
     expect_normalized(page, char_row, "1")

@@ -21,30 +21,34 @@
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.http import Http404, HttpRequest, HttpResponse
+from django.http import FileResponse, Http404, HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from larpmanager.cache.character import get_event_cache_all, get_writing_element_fields
+from larpmanager.cache.character import get_event_cache_all
+from larpmanager.cache.writing import get_writing_element_fields
 from larpmanager.forms.event import EventCharactersPdfForm
-from larpmanager.models.event import Run
+from larpmanager.models.event import Event, Run
 from larpmanager.models.form import QuestionApplicable
 from larpmanager.models.writing import Character, Faction, Handout
 from larpmanager.utils.core.base import check_event_context
 from larpmanager.utils.core.common import get_element
+from larpmanager.utils.edit.backend import save_log
 from larpmanager.utils.io.pdf import (
+    _get_character_pdf_data,
     add_pdf_instructions,
+    build_friendly_bundle_bkg,
+    get_friendly_bundle_filepath,
     print_bulk,
     print_character,
     print_character_bkg,
     print_character_friendly,
-    print_character_rel,
     print_faction,
     print_gallery,
     print_profiles,
 )
-from larpmanager.utils.services.character import get_char_check, get_character_relationships, get_character_sheet
+from larpmanager.utils.services.character import get_char_check
 
 
 @login_required
@@ -76,7 +80,8 @@ def orga_characters_pdf(request: HttpRequest, event_slug: str) -> HttpResponse:
         # Validate and save form data, then redirect to prevent resubmission
         if form.is_valid():
             form.save()
-            messages.success(request, _("Updated") + "!")
+            save_log(context, Event, context["event"], context["event"].uuid)
+            messages.success(request, _("Updated!"))
             return redirect(request.path_info)
     else:
         # Initialize form with current event data for GET requests
@@ -173,28 +178,59 @@ def orga_pdf_regenerate(request: HttpRequest, event_slug: str) -> HttpResponse:
             print_character_bkg(context["event"].association.slug, run.get_slug(), ch.uuid)
 
     # Show success message and redirect
-    messages.success(request, _("Regeneration pdf started") + "!")
+    messages.success(request, _("PDF regeneration has started!"))
     return redirect("orga_characters_pdf", event_slug=context["run"].get_slug())
 
 
 @login_required
+def orga_characters_friendly_bundle(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Download a ZIP bundle of printable character sheet PDFs."""
+    context = check_event_context(request, event_slug, "orga_characters_pdf")
+    run = context["run"]
+    zip_path = get_friendly_bundle_filepath(run)
+
+    if not zip_path.exists():
+        messages.warning(request, _("Bundle not ready yet"))
+        return redirect("orga_characters_friendly_bundle_wait", event_slug=run.get_slug())
+
+    return FileResponse(
+        zip_path.open("rb"),
+        content_type="application/zip",
+        as_attachment=True,
+        filename=f"{run.get_slug()}_printable.zip",
+    )
+
+
+@login_required
+def orga_characters_friendly_bundle_build(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Queue background regeneration of the printable character sheet ZIP bundle."""
+    context = check_event_context(request, event_slug, "orga_characters_pdf")
+    run = context["run"]
+    zip_path = get_friendly_bundle_filepath(run)
+
+    zip_path.unlink(missing_ok=True)
+
+    build_friendly_bundle_bkg(context["association_slug"], event_slug)
+    return redirect("orga_characters_friendly_bundle_wait", event_slug=run.get_slug())
+
+
+@login_required
+def orga_characters_friendly_bundle_wait(request: HttpRequest, event_slug: str) -> HttpResponse:
+    """Show bundle generation status page; auto-refreshes until ZIP is ready."""
+    context = check_event_context(request, event_slug, "orga_characters_pdf")
+    run = context["run"]
+    context["bundle_ready"] = get_friendly_bundle_filepath(run).exists()
+    return render(request, "larpmanager/orga/characters/pdf_bundle_wait.html", context)
+
+
+@login_required
 def orga_characters_sheet_pdf(request: HttpRequest, event_slug: str, character_uuid: str) -> HttpResponse:
-    """Generate PDF character sheet for organizers.
-
-    Args:
-        request: HTTP request object
-        event_slug: Event slug identifier
-        character_uuid: Character uuid/ID
-
-    Returns:
-        HTTP response containing the generated PDF
-
-    """
+    """Generate PDF character sheet for organizers."""
     # Check organizer permissions for PDF access
     context = check_event_context(request, event_slug, "orga_characters_pdf")
 
     # Retrieve and validate character data
-    get_char_check(request, context, character_uuid, restrict_non_owners=True)
+    get_char_check(request, context, character_uuid, deny_public=True)
 
     # Generate and return the character sheet PDF
     return print_character(context, force=True)
@@ -217,11 +253,11 @@ def orga_characters_sheet_test(request: HttpRequest, event_slug: str, character_
     context = check_event_context(request, event_slug, "orga_characters_pdf")
 
     # Validate and retrieve character data
-    get_char_check(request, context, character_uuid, restrict_non_owners=True)
+    get_char_check(request, context, character_uuid, deny_public=True)
 
     # Configure context for PDF rendering
     context["pdf"] = True
-    get_character_sheet(context)
+    _get_character_pdf_data(context)
     add_pdf_instructions(context)
 
     # Render the auxiliary PDF template
@@ -235,73 +271,24 @@ def orga_characters_friendly_pdf(request: HttpRequest, event_slug: str, characte
     context = check_event_context(request, event_slug, "orga_characters_pdf")
 
     # Validate and retrieve character
-    get_char_check(request, context, character_uuid, restrict_non_owners=True)
+    get_char_check(request, context, character_uuid, deny_public=True)
 
     return print_character_friendly(context, force=True)
 
 
 @login_required
 def orga_characters_friendly_test(request: HttpRequest, event_slug: str, character_uuid: str) -> HttpResponse:
-    """Generate friendly test character sheet PDF.
-
-    Args:
-        request: HTTP request object
-        event_slug: Event slug
-        character_uuid: Character uuid
-
-    Returns:
-        Rendered PDF template for friendly test sheet
-
-    """
+    """Generate friendly test character sheet PDF."""
     # Verify user has permission to access character PDFs
     context = check_event_context(request, event_slug, "orga_characters_pdf")
 
     # Retrieve and validate character, ensuring user has access
-    get_char_check(request, context, character_uuid, restrict_non_owners=True)
+    get_char_check(request, context, character_uuid, deny_public=True)
 
     # Populate context with character sheet data
-    get_character_sheet(context)
+    _get_character_pdf_data(context)
 
     return render(request, "pdf/sheets/friendly.html", context)
-
-
-@login_required
-def orga_characters_relationships_pdf(request: HttpRequest, event_slug: str, character_uuid: str) -> HttpResponse:
-    """Generate PDF of character relationships for organization view."""
-    # Verify event permissions for PDF generation
-    context = check_event_context(request, event_slug, "orga_characters_pdf")
-
-    # Retrieve and validate character data
-    get_char_check(request, context, character_uuid, bypass_access_checks=True)
-
-    # Generate and return relationship PDF
-    return print_character_rel(context, force=True)
-
-
-@login_required
-def orga_characters_relationships_test(request: HttpRequest, event_slug: str, character_uuid: str) -> HttpResponse:
-    """Generate character relationships test PDF for organization view.
-
-    Args:
-        request: HTTP request object
-        event_slug: Event slug identifier
-        character_uuid: Character uuid
-
-    Returns:
-        Rendered relationships template response
-
-    """
-    # Check organization permissions for character PDF access
-    context = check_event_context(request, event_slug, "orga_characters_pdf")
-
-    # Validate character access and retrieve character data
-    get_char_check(request, context, character_uuid, restrict_non_owners=True)
-
-    # Populate context with character sheet and relationship data
-    get_character_sheet(context)
-    get_character_relationships(context)
-
-    return render(request, "pdf/sheets/relationships.html", context)
 
 
 @login_required

@@ -70,12 +70,10 @@ def calculate_payment_vat(instance: AccountingItemPayment) -> None:
     # Convert percentage values (e.g., 22) to decimal rates (e.g., 0.22)
     config_context = {}
     _vat_rate_ticket = (
-        int(get_association_config(instance.association_id, "vat_ticket", default_value=0, context=config_context))
-        / 100.0
+        int(get_association_config(instance.association_id, "vat_ticket", context=config_context)) / 100.0
     )
     _vat_rate_options = (
-        int(get_association_config(instance.association_id, "vat_options", default_value=0, context=config_context))
-        / 100.0
+        int(get_association_config(instance.association_id, "vat_options", context=config_context)) / 100.0
     )
 
     # Calculate total ticket cost including both base price and custom amounts
@@ -107,25 +105,7 @@ def calculate_payment_vat(instance: AccountingItemPayment) -> None:
 
 
 def get_previous_sum(aip: AccountingItemPayment, typ: type) -> Decimal:
-    """Calculate sum of previous accounting items for the same member and run.
-
-    Computes the total value of all accounting items of the specified type
-    that were created before the given reference item, for the same member
-    and run combination.
-
-    Args:
-        aip: AccountingItemPayment instance used as reference point for
-            filtering by member, run, and creation timestamp
-        typ: Model class to query (AccountingItemPayment or AccountingItemTransaction)
-
-    Returns:
-        Sum of values from previous items matching the criteria, or Decimal(0) if none found
-
-    Example:
-        >>> previous_total = get_previous_sum(payment_item, AccountingItemPayment)
-        >>> print(f"Previous payments total: {previous_total}")
-
-    """
+    """Calculate sum of previous accounting items for the same member and run."""
     # Filter items by same member and run, created before reference item
     previous_items = typ.objects.filter(
         registration__member=aip.registration.member, registration__run=aip.registration.run, created__lt=aip.created

@@ -28,9 +28,9 @@ import re
 from typing import Any
 
 import pytest
-from playwright.sync_api import expect
 
-from larpmanager.tests.utils import just_wait, go_to, load_image, login_orga, submit, submit_confirm, expect_normalized
+from larpmanager.tests.utils import go_to, load_image, login_orga, submit, submit_confirm, expect_normalized, \
+    get_modal_iframe, save_modal, sidebar, confirm_modal
 
 pytestmark = pytest.mark.e2e
 
@@ -59,7 +59,7 @@ def prepare(page: Any, live_server: Any) -> None:
     page.locator("#id_mail_signup_del").check()
     page.locator("#id_mail_payment").check()
 
-    page.get_by_role("link", name="Payments ").click()
+    page.get_by_role("link", name=re.compile(r"^Payments ")).click()
     page.locator("#id_payment_require_receipt").check()
 
     submit_confirm(page)
@@ -74,14 +74,20 @@ def prepare(page: Any, live_server: Any) -> None:
     page.locator("#id_wire_payee").press("Tab")
     page.locator("#id_wire_iban").fill("test iban")
     page.locator("#id_wire_bic").fill("test iban")
+    page.get_by_role("checkbox", name="Freeform").check()
+    page.locator("#id_any_descr").click()
+    page.locator("#id_any_descr").fill("freeeeee")
+    page.locator("#id_any_fee").click()
+    page.locator("#id_any_fee").fill("1")
     submit_confirm(page)
 
     # set ticket price
     go_to(page, live_server, "/test/manage/tickets")
-    page.locator("a:has(i.fas.fa-edit)").click()
-    page.locator("#id_price").click()
-    page.locator("#id_price").fill("100.00")
-    submit_confirm(page)
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_price").click()
+    edit_iframe.locator("#id_price").fill("100.00")
+    save_modal(page, edit_iframe)
 
 
 def signup(page: Any, live_server: Any) -> None:
@@ -91,18 +97,21 @@ def signup(page: Any, live_server: Any) -> None:
     expect_normalized(page, page.locator("#riepilogo"), "provisional status")
     submit_confirm(page)
 
+    # submit profile
+    page.get_by_role("checkbox", name="Authorisation").check()
+    submit_confirm(page)
+
     # Check we are on payment page
-    expect_normalized(page, page.locator("#banner"), "Payment")
+    expect_normalized(page, page.locator("body"), "Payment")
     expect_normalized(page, page.locator("b"), "100")
 
     # check reg status
-    go_to(page, live_server, "/test/register")
-    expect_normalized(page, page.locator("#one"), "Provisional registration")
-    expect_normalized(page, page.locator("#one"), "to confirm it proceed with payment")
+    go_to(page, live_server, "/test/")
+    expect_normalized(page, page.locator("#one"), "Your registration is provisional")
 
     # pay
     go_to(page, live_server, "/test/register")
-    page.get_by_role("link", name=re.compile(r"proceed with payment")).click()
+    page.get_by_role("link", name=re.compile(r"A payment of 100€ is due within 8 days to confirm your registration")).click()
     page.get_by_role("cell", name="Wire", exact=True).click()
     expect_normalized(page, page.locator("b"), "100")
     submit(page)
@@ -113,19 +122,14 @@ def signup(page: Any, live_server: Any) -> None:
     submit(page)
 
     # approve payment
-    go_to(page, live_server, "/test/manage/invoices")
-    page.get_by_role("link", name="Confirm", exact=True).click()
+    go_to(page, live_server, "/test/manage/payments")
+    page.get_by_role("link", name="Confirm").first.click()
+    confirm_modal(page)
 
     # check reg status
     go_to(page, live_server, "/test/register")
-    expect_normalized(page, page.locator("#one"), "Registration confirmed")
-    expect_normalized(page, page.locator("#one"), "please fill in your profile")
-    page.get_by_role("link", name=re.compile(r"please fill in your")).click()
-
-    # Approve sharing
-    page.get_by_role("checkbox", name="Authorisation").check()
-    submit_confirm(page)
-    expect_normalized(page, page.locator("#one"), "Registration confirmed (Standard)")
+    sidebar(page, "Event")
+    expect_normalized(page, page.locator("#one"), "Your registration for this event has been confirmed (Standard)")
 
 
 def characters(page: Any, live_server: Any) -> None:
@@ -134,20 +138,22 @@ def characters(page: Any, live_server: Any) -> None:
 
     # Assign character
     go_to(page, live_server, "/test/manage/registrations")
-    page.locator("a:has(i.fas.fa-edit)").click()
-    page.get_by_role("searchbox").click()
-    page.get_by_role("searchbox").fill("te")
-    page.get_by_role("option", name="#1 Test Character").click()
-    submit_confirm(page)
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.get_by_role("searchbox").click()
+    edit_iframe.get_by_role("searchbox").fill("te")
+    edit_iframe.get_by_role("option", name="Test Character").click()
+    save_modal(page, edit_iframe)
 
     # test mails
     go_to(page, live_server, "/debug/mail")
 
     # Remove character
     go_to(page, live_server, "/test/manage/registrations")
-    page.locator("a:has(i.fas.fa-edit)").click()
-    page.get_by_role("listitem", name="#1 Test Character").locator("span").click()
-    submit_confirm(page)
+    page.locator(".fa-edit").click()
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.get_by_role("listitem", name="Test Character").locator("span").click()
+    save_modal(page, edit_iframe)
 
     # test mails
     go_to(page, live_server, "/debug/mail")

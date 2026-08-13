@@ -20,7 +20,7 @@
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 from django.utils.translation import gettext_lazy as _
@@ -28,8 +28,10 @@ from django.views.decorators.http import require_POST
 
 from larpmanager.forms.registration import RegistrationTransferForm
 from larpmanager.models.event import Run
+from larpmanager.models.member import LogOperationType
 from larpmanager.models.registration import Registration
 from larpmanager.utils.core.base import check_event_context
+from larpmanager.utils.edit.backend import save_log
 from larpmanager.utils.services.event import reset_all_run
 from larpmanager.utils.services.transfer import (
     get_suggested_ticket_mapping,
@@ -40,16 +42,7 @@ from larpmanager.utils.services.transfer import (
 
 @login_required
 def orga_registration_transfer(request: HttpRequest, event_slug: str) -> HttpResponse:
-    """Display form to select registration and target run for transfer.
-
-    Args:
-        request: HTTP request object
-        event_slug: Event slug identifier
-
-    Returns:
-        HttpResponse: Rendered transfer form template
-
-    """
+    """Display form to select registration and target run for transfer."""
     context = check_event_context(request, event_slug, "orga_registrations")
 
     # Initialize the form with context data
@@ -89,14 +82,16 @@ def orga_registration_transfer_preview(request: HttpRequest, event_slug: str) ->
         registration = Registration.objects.select_related("member", "ticket", "run").get(
             pk=registration_id, run=context["run"]
         )
-    except Registration.DoesNotExist:
+    except ObjectDoesNotExist:
         messages.error(request, _("Registration not found"))
         return redirect("orga_registration_transfer", event_slug=event_slug)
 
-    # Get the target run
+    # Get the target run, scoped to the current association
     try:
-        target_run = Run.objects.select_related("event").get(pk=target_run_id)
-    except Run.DoesNotExist:
+        target_run = Run.objects.select_related("event").get(
+            pk=target_run_id, event__association_id=context["association_id"]
+        )
+    except ObjectDoesNotExist:
         messages.error(request, _("Target event not found"))
         return redirect("orga_registration_transfer", event_slug=event_slug)
 
@@ -142,15 +137,23 @@ def orga_registration_transfer_confirm(request: HttpRequest, event_slug: str) ->
         registration = Registration.objects.select_related("member", "ticket", "run").get(
             pk=registration_id, run=context["run"]
         )
-    except Registration.DoesNotExist:
+    except ObjectDoesNotExist:
         messages.error(request, _("Registration not found"))
         return redirect("orga_registration_transfer", event_slug=event_slug)
 
-    # Get the target run
+    # Get the target run, scoped to the current association
     try:
-        target_run = Run.objects.select_related("event").get(pk=target_run_id)
-    except Run.DoesNotExist:
+        target_run = Run.objects.select_related("event").get(
+            pk=target_run_id, event__association_id=context["association_id"]
+        )
+    except ObjectDoesNotExist:
         messages.error(request, _("Target session not found"))
+        return redirect("orga_registration_transfer", event_slug=event_slug)
+
+    # Re-validate feasibility before executing
+    validation_result = validate_transfer_feasibility(registration, target_run)
+    if validation_result.get("errors"):
+        messages.error(request, _("Transfer is not possible"))
         return redirect("orga_registration_transfer", event_slug=event_slug)
 
     # Execute the transfer
@@ -162,13 +165,24 @@ def orga_registration_transfer_confirm(request: HttpRequest, event_slug: str) ->
             preserve_answers=True,
             preserve_accounting=True,
         )
+        save_log(
+            context,
+            Registration,
+            registration,
+            registration.uuid,
+            operation_type=LogOperationType.UPDATE,
+            info=f"transfer to run {target_run.id}",
+        )
 
-        action = _("moved") if move_registration else _("copied")
-        member_name = registration.member.display_member()
+        label = (
+            _("Registration for %(member)s moved to %(event)s")
+            if move_registration
+            else _("Registration for %(member)s copied to %(event)s")
+        )
+        member_name = registration.member.display_member(context)
         messages.success(
             request,
-            _("Registration for %(member)s successfully %(action)s to %(run)s")
-            % {"member": member_name, "action": action, "run": target_run},
+            label % {"member": member_name, "event": target_run},
         )
 
         # Clear all relevant caches for both source and target runs

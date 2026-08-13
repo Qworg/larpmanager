@@ -27,20 +27,29 @@ import holidays
 from django.conf import settings as conf_settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.utils import timezone
-from django.utils.translation import activate
-from django.utils.translation import gettext_lazy as _
+from django.utils.html import escape
+from django.utils.translation import activate, gettext_lazy as _
 
 from larpmanager.cache.config import get_event_config
 from larpmanager.cache.event_text import get_event_text
 from larpmanager.cache.links import reset_event_links
-from larpmanager.models.access import AssociationRole, EventRole, get_association_executives, get_event_organizers
+from larpmanager.mail.digest import my_send_digest_email_exe
+from larpmanager.models.access import (
+    AssociationRole,
+    EventRole,
+    RoleInvite,
+    get_association_executives,
+    get_event_organizers,
+)
 from larpmanager.models.association import Association, get_association_maintainers, get_url, hdr
 from larpmanager.models.casting import AssignmentTrait, Casting
 from larpmanager.models.event import EventTextType
 from larpmanager.models.member import Member
 from larpmanager.models.writing import Character, CharacterStatus
 from larpmanager.utils.larpmanager.tasks import my_send_mail
+from larpmanager.utils.services.miscellanea import _newsletter_set_active
 
 if TYPE_CHECKING:
     from larpmanager.models.registration import Registration
@@ -83,7 +92,7 @@ def join_email(association: Any) -> None:
     """
     for executive_member in get_association_executives(association):
         activate(executive_member.language)
-        welcome_subject = _("Welcome to LarpManager") + "!"
+        welcome_subject = _("Welcome to LarpManager!")
         welcome_body = render_to_string(
             "mails/join_association.html",
             {"member": executive_member, "association": association},
@@ -100,7 +109,7 @@ def join_email(association: Any) -> None:
         my_send_mail(feedback_subject, feedback_body, executive_member, schedule=feedback_delay_seconds)
 
 
-def on_association_roles_m2m_changed(sender: Any, **kwargs: Any) -> None:  # noqa: ARG001
+def on_association_roles_m2m_changed(sender: Any, **kwargs: Any) -> None:  # noqa: ARG001, C901
     """Handle association role changes and send notifications.
 
     This function is triggered when members are added or removed from association roles.
@@ -157,6 +166,10 @@ def on_association_roles_m2m_changed(sender: Any, **kwargs: Any) -> None:  # noq
         # Process each member being added to the role
         for mid in pk_set:
             _add_member_association_role(exes, instance, mid)
+            if instance.number == 1:
+                mb = Member.objects.filter(pk=mid).first()
+                if mb and mb.email:
+                    _newsletter_set_active(mb.email)
 
 
 def _add_member_association_role(exes: list[Member], instance: AssociationRole, mid: int | str) -> None:
@@ -187,8 +200,8 @@ def _add_member_association_role(exes: list[Member], instance: AssociationRole, 
     # Set language context for proper localization
     activate(mb.language)
     subj = hdr(instance.association) + _("Role approval %(role)s") % {"role": instance.name}
-    url = get_url("manage", instance.association)
-    body = _("Access the management panel <a href= %(url)s'>from here</a>") % {"url": url} + "!"
+    url = get_url(reverse("manage"), instance.association)
+    body = _("Access the management panel <a href= %(url)s'>from here</a>!") % {"url": url}
     my_send_mail(subj, body, mb, instance.association)
 
     # Notify existing executives about the new role assignment
@@ -202,11 +215,11 @@ def _add_member_association_role(exes: list[Member], instance: AssociationRole, 
             "user": mb,
             "role": instance.name,
         }
-        body = _("The user has been assigned the specified role") + "."
+        body = _("The user has been assigned the specified role.")
         my_send_mail(subj, body, m, instance.association)
 
 
-def on_event_roles_m2m_changed(sender: type, **kwargs: Any) -> None:  # noqa: ARG001
+def on_event_roles_m2m_changed(sender: type, **kwargs: Any) -> None:  # noqa: ARG001, C901
     """Handle event role changes and send notifications.
 
     Args:
@@ -261,6 +274,8 @@ def on_event_roles_m2m_changed(sender: type, **kwargs: Any) -> None:  # noqa: AR
             mb.join(instance.event.association)
             # Invalidate cached permissions for the member
             reset_event_links(mb.id, instance.event.association_id)
+            if instance.number == 1 and mb.email:
+                _newsletter_set_active(mb.email)
 
             # Send approval notification to the member
             # Use member's preferred language for personalized communication
@@ -269,8 +284,8 @@ def on_event_roles_m2m_changed(sender: type, **kwargs: Any) -> None:  # noqa: AR
                 "role": instance.name,
                 "event": instance.event,
             }
-            url = get_url(f"{instance.event.slug}/manage/", instance.event.association)
-            body = _("Access the management panel <a href= %(url)s'>from here</a>") % {"url": url} + "!"
+            url = get_url(reverse("manage", kwargs={"event_slug": instance.event.slug}), instance.event.association)
+            body = _("Access the management panel <a href= %(url)s'>from here</a>!") % {"url": url}
             my_send_mail(subj, body, mb, instance.event)
 
             # Notify organizers about the new role assignment
@@ -285,8 +300,22 @@ def on_event_roles_m2m_changed(sender: type, **kwargs: Any) -> None:  # noqa: AR
                     "role": instance.name,
                     "event": instance.event,
                 }
-                body = _("The user has been assigned the specified role") + "."
+                body = _("The user has been assigned the specified role.")
                 my_send_mail(subj, body, m, instance.event)
+
+
+def send_role_invite_email(invite: RoleInvite) -> None:
+    """Send invitation email with redeem link to invited email address."""
+    role = invite.role()
+    association = invite.association
+    activate("en")
+    subj = hdr(association) + _("You have been invited to the role: %(role)s") % {"role": role.name}
+    redeem_url = get_url(reverse("role_invite_redeem", kwargs={"token": invite.token}), association)
+    body = _("You have been invited to join as %(role)s") % {"role": role.name}
+    body += ".<br/><br/>"
+    body += _("Click <a href='%(url)s'>here</a> to accept the invitation") % {"url": redeem_url}
+    body += "."
+    my_send_mail(subj, body, invite.email, association)
 
 
 def bring_friend_instructions(registration: Registration, context: dict) -> None:
@@ -313,7 +342,7 @@ def bring_friend_instructions(registration: Registration, context: dict) -> None
     activate(registration.member.language)
 
     # Build email subject with event header and localized message
-    email_subject = hdr(registration.run.event) + _("Bring a friend to %(event)s") % {"event": registration.run} + "!"
+    email_subject = hdr(registration.run.event) + _("Bring a friend to %(event)s!") % {"event": registration.run}
 
     # Start email body with the user's personal discount code
     email_body = _("Personal code: <b>%(cod)s</b>") % {"cod": registration.uuid}
@@ -325,32 +354,26 @@ def bring_friend_instructions(registration: Registration, context: dict) -> None
         + " "
         + _(
             "Every friend who signs up and uses this code in the 'Discounts' field will "
-            "receive %(amount_to)s %(currency)s off the ticket",
+            "receive %(amount_to)s %(currency)s off the ticket.",
         )
         % {
             "amount_to": context["bring_friend_discount_to"],
             "currency": registration.run.event.association.get_currency_symbol(),
         }
-        + ". "
+        + " "
         # Add information about the user's own discount benefit
-        + _("For each of them, you will receive %(amount_from)s %(currency)s off your own event registration")
+        + _("For each of them, you will receive %(amount_from)s %(currency)s off your own event registration.")
         % {
             "amount_from": context["bring_friend_discount_from"],
             "currency": registration.run.event.association.get_currency_symbol(),
         }
-        + "."
     )
 
     # Add link to check remaining discount availability
-    email_body += (
-        "<br /><br />"
-        + _("Check the available number of discounts <a href='%(url)s'>on this page</a>")
-        % {"url": f"{registration.run.get_slug()}/limitations/"}
-        + "."
-    )
+    email_body += "<br /><br />" + _("Check the available number of discounts <a href='%(url)s'>on this page</a>.") % {
+        "url": f"{registration.run.get_slug()}/limitations/"
+    }
 
-    # Add closing message and send the email
-    email_body += "<br /><br />" + _("See you soon") + "!"
     my_send_mail(email_subject, email_body, registration.member, registration.run)
 
 
@@ -382,7 +405,7 @@ def send_trait_assignment_email(instance: AssignmentTrait) -> None:
     activate(instance.member.language)
 
     # Skip email if character mail is disabled for this event
-    if get_event_config(instance.run.event_id, "mail_character", default_value=False):
+    if get_event_config(instance.run.event_id, "mail_character"):
         return
 
     # Get trait and quest display information for the current run
@@ -400,10 +423,10 @@ def send_trait_assignment_email(instance: AssignmentTrait) -> None:
 
     # Add character access link to the email body
     character_url = get_url(
-        f"{instance.run.get_slug()}/character/your",
+        reverse("character_your", kwargs={"event_slug": instance.run.get_slug()}),
         instance.run.event,
     )
-    body += "<br/><br />" + _("Access your character <a href='%(url)s'>here</a>") % {"url": character_url} + "!"
+    body += "<br/><br />" + _("Access your character <a href='%(url)s'>here</a>!") % {"url": character_url}
 
     # Append custom assignment message if configured for this event
     custom_assignment_message = get_event_text(instance.run.event_id, EventTextType.ASSIGNMENT)
@@ -452,7 +475,7 @@ def mail_confirm_casting(
     }
 
     # Start email body with confirmation message
-    email_body = _("Your preferences have been saved in the system") + ":"
+    email_body = _("Your preferences have been saved in the system:")
 
     # Add selected preferences list to email body
     email_body += "<br /><br />" + "<br />".join(selected_preferences)
@@ -460,7 +483,7 @@ def mail_confirm_casting(
     # Append avoidance preferences if any were specified
     if elements_to_avoid:
         email_body += "<br/><br />"
-        email_body += _("Elements you wish to avoid in the assignment") + ":"
+        email_body += _("Elements you wish to avoid in the assignment:")
         email_body += f" {elements_to_avoid}"
 
     # Send the confirmation email to the member
@@ -488,7 +511,7 @@ def send_character_status_update_email(instance: Character) -> None:
 
     """
     # Early return if character approval feature is disabled for this event
-    if not get_event_config(instance.event_id, "user_character_approval", default_value=False):
+    if not get_event_config(instance.event_id, "user_character_approval"):
         return
 
     # Skip if it has no player
@@ -531,91 +554,38 @@ def send_character_status_update_email(instance: Character) -> None:
 
 
 def notify_organization_exe(
-    notification_generator: callable,
     association: Association,
     context_instance: object,
+    notification_type: str,
 ) -> None:
-    """Send notification to association executives.
-
-    Sends notification emails to either the association's main email address
-    or to all individual executives, depending on configuration. The function
-    activates the appropriate language for each recipient before generating
-    and sending the notification.
+    """Send notification to association executives, with digest mode support.
 
     Args:
-        notification_generator: Callable that generates (subject, body) tuple for the notification.
-              Should accept context_instance as parameter and return (str, str).
         association: Association instance containing executive information and settings.
         context_instance: Context instance passed to notification_generator for generating notification content.
+        notification_type: Notification type for digest queueing (from NotificationType enum)
 
     Returns:
         None
-
-    Side Effects:
-        - Activates language settings for each recipient
-        - Sends notification emails via my_send_mail
-        - May send to main_mail or individual executive emails
-
     """
-    # Check if association has a main email configured
+    # If main_mail is configured first, send do it
     if association.main_mail:
-        # Use executive language for main email notifications
-        activate(get_exec_language(association))
-
-        # Generate subject and body using provided function
-        (subject, body) = notification_generator(context_instance)
-
-        # Send notification to main email address
-        my_send_mail(subject, body, association.main_mail, context_instance)
+        my_send_digest_email_exe(
+            member=None,
+            association=association,
+            instance=context_instance,
+            notification_type=notification_type,
+        )
         return
 
-    # Send individual notifications to each executive
+    # Send to individual executives with their digest preferences
     for executive in get_association_executives(association):
-        # Activate recipient's preferred language
-        activate(executive.language)
-
-        # Generate localized subject and body for this recipient
-        (subject, body) = notification_generator(context_instance)
-
-        # Send personalized notification to executive
-        my_send_mail(subject, body, executive.email, context_instance)
-
-
-def get_exec_language(association: Association) -> str:
-    """Determine the most common language among association executives.
-
-    Analyzes the language preferences of all association executives and returns
-    the most frequently used language code. If no executives are found or no
-    language preferences are set, defaults to English.
-
-    Args:
-        association: Association instance containing executives to analyze
-
-    Returns:
-        str: The language code (e.g., 'en', 'it', 'fr') preferred by the majority
-             of executives, or 'en' if no executives found or no preferences set
-
-    Example:
-        >>> association = Association.objects.get(slug='myorg')
-        >>> lang = get_exec_language(association)
-        >>> print(lang)  # 'it' if most executives prefer Italian
-
-    """
-    # Initialize dictionary to count language occurrences
-    language_counts = {}
-
-    # Iterate through all association executives
-    for executive in get_association_executives(association):
-        executive_language = executive.language
-
-        # Count each language preference
-        if executive_language not in language_counts:
-            language_counts[executive_language] = 1
-        else:
-            language_counts[executive_language] += 1
-
-    # Determine the most common language or default to English
-    return max(language_counts, key=language_counts.get) if language_counts else "en"
+        my_send_digest_email_exe(
+            member=executive,
+            association=association,
+            instance=context_instance,
+            notification_type=notification_type,
+        )
 
 
 def send_support_ticket_email(instance: Any) -> None:
@@ -632,9 +602,9 @@ def send_support_ticket_email(instance: Any) -> None:
 
     # Build email body
     body = f"Ticket ID: {instance.id}<br /><br />"
-    body += f"Email: {instance.email} <br /><br />"
+    body += f"Email: {escape(instance.email)} <br /><br />"
     if instance.member:
-        body += f"User: {instance.member} ({instance.member.email}) <br /><br />"
+        body += f"User: {escape(str(instance.member))} ({escape(instance.member.email)}) <br /><br />"
     body += instance.content
     if instance.screenshot:
         body += f"<br /><br /><img src='http://larpmanager.com/{instance.screenshot_reduced.url}' />"

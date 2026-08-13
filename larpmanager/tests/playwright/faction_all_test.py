@@ -31,13 +31,15 @@ import pytest
 from playwright.sync_api import expect
 
 from larpmanager.tests.utils import (
+    drag_reorder,
     expect_normalized,
     fill_tinymce,
+    get_modal_iframe,
     go_to,
     login_orga,
     login_user,
     logout,
-    submit_confirm,
+    submit_confirm, sidebar, save_modal, _wait_select2_results, topbar,
 )
 
 pytestmark = pytest.mark.e2e
@@ -61,50 +63,53 @@ def test_faction_all(pw_page: Any) -> None:
     go_to(page, live_server, "test/manage")
 
     # Activate Factions and Characters features
-    page.get_by_role("link", name="Features").first.click()
+    sidebar(page, "Features")
     page.get_by_role("checkbox", name="Factions").check()
     page.get_by_role("checkbox", name="Characters").check()
     submit_confirm(page)
 
     # ========== SECTION 2: Create WritingQuestions for Factions ==========
     # Navigate to Factions form (WritingQuestions applicable to factions)
-    go_to(page, live_server, "test/manage/writing/form/faction/")
+    go_to(page, live_server, "test/manage/writing/faction/form/")
 
     # Create PUBLIC WritingQuestion
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("t")  # Text type
-    page.locator("#id_name").fill("Public Faction Question")
-    page.locator("#id_description").fill("This is visible to everyone")
-    page.locator("#id_visibility").select_option("c")  # PUBLIC
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("t")  # Text type
+    edit_iframe.locator("#id_name").fill("Public Faction Question")
+    edit_iframe.locator("#id_description").fill("This is visible to everyone")
+    edit_iframe.locator("#id_visibility").select_option("c")  # PUBLIC
     # Note: applicable is automatically set to FACTION by the form
-    submit_confirm(page)
+    save_modal(page, edit_iframe)
 
     # Create PRIVATE WritingQuestion
     page.get_by_role("link", name="New").click()
-    page.locator("#id_typ").select_option("p")  # Paragraph type
-    page.locator("#id_name").fill("Private Faction Question")
-    page.locator("#id_description").fill("Only visible to assigned members")
-    page.locator("#id_visibility").select_option("e")  # PRIVATE
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#id_typ").select_option("p")  # Paragraph type
+    edit_iframe.locator("#id_name").fill("Private Faction Question")
+    edit_iframe.locator("#id_description").fill("Only visible to assigned members")
+    edit_iframe.locator("#id_visibility").select_option("e")  # PRIVATE
     # Note: applicable is automatically set to FACTION by the form
-    submit_confirm(page)
+    save_modal(page, edit_iframe)
 
     # ========== SECTION 3: Create 9 Factions (3 Primary, 3 Transversal, 3 Secret) ==========
-    page.get_by_role("link", name="Factions").click()
+    sidebar(page, "Factions")
 
     # Helper to create factions
     def create_faction(typ: str, name: str, teaser: str, text: str, public_ans: str, private_ans: str) -> None:
         # Navigate to factions list before creating new one
         go_to(page, live_server, "test/manage/factions/")
         page.get_by_role("link", name="New").click()
-        page.locator("#id_typ").select_option(typ)
-        page.locator("#id_name").fill(name)
-        fill_tinymce(page, "id_teaser", teaser)
-        fill_tinymce(page, "id_text", text)
+        edit_iframe = get_modal_iframe(page)
+        edit_iframe.locator("#id_typ").select_option(typ)
+        edit_iframe.locator("#id_name").fill(name)
+        fill_tinymce(edit_iframe, "id_teaser", teaser)
+        fill_tinymce(edit_iframe, "id_text", text)
 
-        page.locator("#id_que_u8").fill(public_ans)
-        page.locator("#id_que_u9").fill(private_ans)
+        edit_iframe.locator("#id_que_u8").fill(public_ans)
+        edit_iframe.locator("#id_que_u9").fill(private_ans)
 
-        submit_confirm(page)
+        save_modal(page, edit_iframe)
 
     # PRIMARY FACTIONS (typ="s")
     create_faction("s", "Primary Faction 1", "PF1 teaser", "PF1 private text",
@@ -134,20 +139,21 @@ def test_faction_all(pw_page: Any) -> None:
 
     # Helper to create characters with faction assignments
     def create_character(name: str, teaser: str, text: str, faction_names: list) -> None:
-        page.locator("#orga_characters").get_by_role("link", name="Characters").click()
+        sidebar(page, "Characters")
         page.get_by_role("link", name="New").click()
-        page.locator("#id_name").fill(name)
-        fill_tinymce(page, "id_teaser", teaser)
-        fill_tinymce(page, "id_text", text)
+        edit_iframe = get_modal_iframe(page)
+        edit_iframe.locator("#id_name").fill(name)
+        fill_tinymce(edit_iframe, "id_teaser", teaser)
+        fill_tinymce(edit_iframe, "id_text", text)
 
         # Assign factions using select2 widget
         for faction in faction_names:
-            page.get_by_role("searchbox").click()
-            page.get_by_role("searchbox").fill(faction[:5])  # Type first 5 chars
-            page.wait_for_timeout(500)  # Wait for dropdown
-            page.locator(".select2-results__option").filter(has_text=faction).first.click()
+            edit_iframe.get_by_role("searchbox").click()
+            edit_iframe.get_by_role("searchbox").fill(faction[:5])  # Type first 5 chars
+            _wait_select2_results(edit_iframe)
+            edit_iframe.locator(".select2-results__option").filter(has_text=faction).first.click()
 
-        submit_confirm(page)
+        save_modal(page, edit_iframe)
 
     # Character 1: Primary Faction 1 + all 3 Transversals (will be assigned to user@test.it) + 1 Secret
     create_character("Character Alpha", "Alpha teaser", "Alpha private text",
@@ -170,8 +176,8 @@ def test_faction_all(pw_page: Any) -> None:
     go_to(page, live_server, "/")
 
     # Navigate to factions gallery
-    page.get_by_role("link", name="Test Larp").click()
-    page.get_by_role("link", name="Factions").click()
+    topbar(page, "Test Larp")
+    sidebar(page, "Factions")
 
     # Verify PRIMARY and TRANSVERSAL factions are visible
     expect_normalized(page, page.locator("#one"),
@@ -228,10 +234,8 @@ def test_faction_all(pw_page: Any) -> None:
     first_row = page.locator(".writing_list tbody tr").first
     expect(first_row).to_contain_text("Primary Faction 1")
 
-    page.locator(".writing_list tbody tr").get_by_role("link", name="").first.click()
-
-    # Wait for page reload
-    page.wait_for_load_state("networkidle")
+    rows = page.locator(".writing_list tbody tr")
+    drag_reorder(page, rows.nth(1).locator("td.reorder-handle"), rows.nth(0))
 
     # Verify order changed - Primary Faction 2 should now be first
     go_to(page, live_server, "test/manage/factions")
@@ -255,15 +259,16 @@ def test_faction_all(pw_page: Any) -> None:
 
     # Navigate to characters list
     go_to(page, live_server, "/test/manage/")
-    page.get_by_role("link", name="Registrations", exact=True).click()
+    sidebar(page, "Registrations")
     page.get_by_role("link", name="New").click()
-    page.locator("#select2-id_member-container").click()
-    page.get_by_role("searchbox").nth(1).fill("user")
-    page.get_by_role("option", name="User Test - user@test.it").click()
-    page.get_by_role("list").click()
-    page.get_by_role("searchbox").fill("alpha")
-    page.get_by_role("option", name="#2 Character Alpha").click()
-    submit_confirm(page)
+    edit_iframe = get_modal_iframe(page)
+    edit_iframe.locator("#select2-id_member-container").click()
+    edit_iframe.get_by_role("searchbox").nth(1).fill("user")
+    edit_iframe.get_by_role("option", name="User Test - user@test.it").click()
+    edit_iframe.get_by_role("list").click()
+    edit_iframe.get_by_role("searchbox").fill("alpha")
+    edit_iframe.get_by_role("option", name="Character Alpha").click()
+    save_modal(page, edit_iframe)
 
 
     # ========== SECTION 9: Verify Visibility with Assigned Character ==========
@@ -272,7 +277,7 @@ def test_faction_all(pw_page: Any) -> None:
     go_to(page, live_server, "/")
 
     # Navigate to Character Alpha
-    page.get_by_role("link", name="Test Larp").click()
+    topbar(page, "Test Larp")
     page.get_by_role("link", name="Character Alpha").first.click()
 
     # Verify character info are visible
@@ -296,8 +301,6 @@ def test_faction_all(pw_page: Any) -> None:
 
         Primary Faction 1
 
-        Text
-
         PF1 private text
 
         Public Faction Question: PF1 public answer
@@ -305,8 +308,6 @@ def test_faction_all(pw_page: Any) -> None:
         Private Faction Question: PF1 private answer
 
         Transversal Faction 1
-
-        Text
 
         TF1 private text
 
@@ -316,8 +317,6 @@ def test_faction_all(pw_page: Any) -> None:
 
         Transversal Faction 2
 
-        Text
-
         TF2 private text
 
         Public Faction Question: TF2 public answer
@@ -326,8 +325,6 @@ def test_faction_all(pw_page: Any) -> None:
 
         Transversal Faction 3
 
-        Text
-
         TF3 private text
 
         Public Faction Question: TF3 public answer
@@ -335,8 +332,6 @@ def test_faction_all(pw_page: Any) -> None:
         Private Faction Question: TF3 private answer
 
         Secret Faction 1
-
-        Text
 
         SF1 private text
 
@@ -351,7 +346,7 @@ def test_faction_all(pw_page: Any) -> None:
 
     # Go back to character list
     go_to(page, live_server, "/test/")
-
+    sidebar(page, "Gallery")
     # Try to access Character Beta (NOT assigned to user)
     page.get_by_role("link", name="Character Beta").click()
 
@@ -399,4 +394,4 @@ def test_faction_all(pw_page: Any) -> None:
         page.goto(f"{live_server}{link}")
         banner = page.locator("#banner")
         if banner.count() > 0:
-            expect_normalized(page, banner, "404")
+            expect_normalized(page, page.locator("body"), "we couldn't find the page")

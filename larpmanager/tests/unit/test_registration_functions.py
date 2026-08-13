@@ -20,10 +20,15 @@
 
 """Tests for registration accounting functions"""
 
-import pytest
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
+from typing import Any
+from unittest.mock import patch
 
+import pytest
+
+from larpmanager.accounting.base import round_to_nearest_cent
+from larpmanager.accounting.member import get_membership_fee_for_reg
 from larpmanager.accounting.registration import (
     cancel_reg,
     get_date_surcharge,
@@ -33,17 +38,17 @@ from larpmanager.accounting.registration import (
     installment_check,
     quota_check,
     registration_payments_status,
-    round_to_nearest_cent,
 )
-from larpmanager.utils.core.common import get_display_choice
 from larpmanager.models.accounting import (
     AccountingItemDiscount,
+    AccountingItemMembership,
     AccountingItemPayment,
     AccountingItemTransaction,
     Discount,
     DiscountType,
     PaymentChoices,
 )
+from larpmanager.models.association import AssociationConfig
 from larpmanager.models.form import RegistrationChoice
 from larpmanager.models.member import get_user_membership
 from larpmanager.models.registration import (
@@ -53,6 +58,7 @@ from larpmanager.models.registration import (
     TicketTier,
 )
 from larpmanager.tests.unit.base import BaseTestCase
+from larpmanager.utils.core.common import get_display_choice
 
 
 class TestRegistrationCalculationFunctions(BaseTestCase):
@@ -542,9 +548,9 @@ class TestRegistrationUtilityFunctions(BaseTestCase):
 
     def test_round_to_nearest_cent_within_tolerance(self) -> None:
         """Test rounding within tolerance"""
-        result = round_to_nearest_cent(10.52)
+        result = round_to_nearest_cent(10.521)
 
-        self.assertEqual(result, 10.5)
+        self.assertEqual(result, 10.52)
 
     def test_round_to_nearest_cent_exceeds_tolerance(self) -> None:
         """Test rounding exceeds tolerance"""
@@ -749,9 +755,9 @@ class TestInstallmentFallbackLogic(BaseTestCase):
         # Call installment check
         installment_check(registration, alert=30, association_id=association.id)
 
-        # Should set immediate payment (deadline=0)
+        # Should set immediate payment (deadline negative)
         self.assertEqual(registration.quota, Decimal("300.00"))
-        self.assertEqual(registration.deadline, 0)
+        self.assertEqual(registration.deadline, -50)
 
     def test_installment_check_player_paid_enough(self) -> None:
         """Test installment check when player has paid enough for current installment"""
@@ -809,6 +815,55 @@ class TestInstallmentFallbackLogic(BaseTestCase):
         self.assertEqual(registration.quota, Decimal("100.00"))  # 150 - 50
         self.assertIsNotNone(registration.deadline)
         self.assertGreaterEqual(registration.deadline, 0)
+
+    def test_installment_fallback_overdue_with_distant_future(self) -> None:
+        """Test fallback when overdue installments exist alongside distant future ones.
+
+        Regression test: previously quota was incorrectly set to 0 when has_distant_installments
+        was True, even if earlier installments were already past due and unpaid.
+        """
+        member = self.get_member()
+        association = self.get_association()
+        run = self.get_run()
+        ticket = self.ticket(event=run.event, price=Decimal("585.00"))
+        registration = self.create_registration(member=member, run=run, ticket=ticket)
+
+        # Ensure membership has no approval date to avoid interference with deadline calculation
+        membership = get_user_membership(member, association.id)
+        membership.date = None
+        membership.save()
+
+        # Installment 1: overdue (days_deadline negative -> in the past)
+        RegistrationInstallment.objects.create(
+            event=run.event, amount=Decimal("125.00"), days_deadline=-200, order=1, number=1
+        )
+        # Installment 2: overdue (fixed date in the past)
+        RegistrationInstallment.objects.create(
+            event=run.event,
+            amount=Decimal("150.00"),
+            date_deadline=date.today() - timedelta(days=2),
+            order=2,
+            number=2,
+        )
+        # Installment 3: distant future (beyond alert threshold of 30)
+        RegistrationInstallment.objects.create(
+            event=run.event,
+            amount=Decimal("150.00"),
+            date_deadline=date.today() + timedelta(days=59),
+            order=3,
+            number=3,
+        )
+
+        # Player has not paid anything
+        registration.tot_iscr = Decimal("585.00")
+        registration.tot_payed = Decimal("0.00")
+        registration.quota = 0
+
+        installment_check(registration, alert=30, association_id=association.id)
+
+        # Overdue cumulative is 275 (125 + 150); quota should reflect that debt
+        self.assertEqual(registration.quota, Decimal("275.00"))
+        self.assertEqual(registration.deadline, -200)
 
 
 class TestQuotaCheckFallbackLogic(BaseTestCase):
@@ -998,7 +1053,7 @@ class TestQuotaCheckFallbackLogic(BaseTestCase):
         # Quota 2 represents CUMULATIVE 2/3 of total (200€), not just the second installment
         # So should show 199-200€ (cumulative up to quota 2) with immediate deadline
         self.assertIn(registration.quota, [199, Decimal("200.00")])
-        self.assertEqual(registration.deadline, 0)  # Immediate payment
+        self.assertEqual(registration.deadline, -72)  # Immediate payment
 
     def test_quota_check_first_quota_always_shown(self) -> None:
         """Test quota_check shows first quota when within alert threshold"""
@@ -1086,3 +1141,256 @@ class TestQuotaCheckFallbackLogic(BaseTestCase):
         self.assertGreater(registration.quota, Decimal("50.00"))
         self.assertLessEqual(registration.quota, Decimal("200.00"))
         self.assertGreater(registration.deadline, 0)
+
+
+class TestMembershipFeeForReg(BaseTestCase):
+    """Test cases for get_membership_fee_for_reg bundling logic."""
+
+    MEMBERSHIP_FEE = 20
+
+    def _setup(self, event_year: int, separated: bool = False) -> tuple:
+
+        member = self.get_member()
+        association = self.get_association()
+        run = self.get_run()
+
+        run.start = date(event_year, 6, 1)
+        run.end = date(event_year, 6, 2)
+        run.save()
+
+        AssociationConfig.objects.filter(association=association, name="membership_fee_separated").delete()
+        AssociationConfig.objects.filter(association=association, name="membership_fee").delete()
+
+        AssociationConfig.objects.create(
+            association=association,
+            name="membership_fee_separated",
+            value=str(separated),
+        )
+        AssociationConfig.objects.create(
+            association=association,
+            name="membership_fee",
+            value=str(self.MEMBERSHIP_FEE),
+        )
+
+        registration = self.create_registration(member=member, run=run)
+        return association, member, registration
+
+    def test_separated_true_returns_zero(self) -> None:
+        """When membership_fee_separated is True, fee is not bundled."""
+        from django.utils import timezone
+
+        year = timezone.now().year
+        association, _member, registration = self._setup(year, separated=True)
+        result = get_membership_fee_for_reg(association.id, registration.member_id, registration.run, registration)
+        self.assertEqual(result, 0)
+
+    @patch("larpmanager.accounting.member.get_association_features", return_value={"membership": 1})
+    def test_current_year_bundled(self, mock_features: Any) -> None:
+        """Event in current year with separated=False bundles the fee."""
+        from django.utils import timezone
+
+        year = timezone.now().year
+        association, _member, registration = self._setup(year, separated=False)
+        result = get_membership_fee_for_reg(association.id, registration.member_id, registration.run, registration)
+        self.assertEqual(result, self.MEMBERSHIP_FEE)
+
+    @patch("larpmanager.accounting.member.get_association_features", return_value={"membership": 1})
+    def test_next_year_bundled(self, mock_features: Any) -> None:
+        """Event in next year with separated=False bundles the fee."""
+        from django.utils import timezone
+
+        year = timezone.now().year + 1
+        association, _member, registration = self._setup(year, separated=False)
+        result = get_membership_fee_for_reg(association.id, registration.member_id, registration.run, registration)
+        self.assertEqual(result, self.MEMBERSHIP_FEE)
+
+    @patch("larpmanager.accounting.member.get_association_features", return_value={"membership": 1})
+    def test_future_year_bundled(self, mock_features: Any) -> None:
+        """Event two years ahead is still bundled (only past years are excluded)."""
+        from django.utils import timezone
+
+        year = timezone.now().year + 2
+        association, _member, registration = self._setup(year, separated=False)
+        result = get_membership_fee_for_reg(association.id, registration.member_id, registration.run, registration)
+        self.assertEqual(result, self.MEMBERSHIP_FEE)
+
+    def test_already_paid_returns_zero(self) -> None:
+        """Member who already paid membership for event year gets no duplicate charge."""
+        from django.utils import timezone
+
+        year = timezone.now().year
+        association, member, registration = self._setup(year, separated=False)
+        AccountingItemMembership.objects.create(
+            member=member,
+            association=association,
+            year=year,
+            value=self.MEMBERSHIP_FEE,
+        )
+        result = get_membership_fee_for_reg(association.id, registration.member_id, registration.run, registration)
+        self.assertEqual(result, 0)
+
+    def test_no_fee_configured_returns_zero(self) -> None:
+        """When membership_fee is 0, nothing is bundled."""
+        from django.utils import timezone
+
+        year = timezone.now().year
+        association, _member, registration = self._setup(year, separated=False)
+        cfg = AssociationConfig.objects.get(association=association, name="membership_fee")
+        cfg.value = "0"
+        cfg.save()
+        result = get_membership_fee_for_reg(association.id, registration.member_id, registration.run, registration)
+        self.assertEqual(result, 0)
+
+    def test_get_registration_iscr_excludes_membership_fee(self) -> None:
+        """get_registration_iscr never includes the membership fee (tracked separately)."""
+        from django.utils import timezone
+
+        from larpmanager.models.registration import RegistrationTicket
+
+        year = timezone.now().year
+        _association, _member, registration = self._setup(year, separated=False)
+        ticket = RegistrationTicket.objects.create(
+            event=registration.run.event,
+            name="Standard",
+            price=50,
+        )
+        registration.ticket = ticket
+        result = get_registration_iscr(registration)
+        self.assertEqual(result, 50)
+
+    @patch("larpmanager.accounting.member.get_association_features", return_value={})
+    def test_membership_feature_not_enabled_returns_zero(self, mock_features: Any) -> None:
+        """When the membership feature is not enabled, fee is not bundled."""
+        from django.utils import timezone
+
+        year = timezone.now().year
+        association, _member, registration = self._setup(year, separated=False)
+        result = get_membership_fee_for_reg(association.id, registration.member_id, registration.run, registration)
+        self.assertEqual(result, 0)
+
+    @patch("larpmanager.accounting.member.get_association_features", return_value={"membership": 1})
+    def test_membership_feature_enabled_returns_fee(self, mock_features: Any) -> None:
+        """When the membership feature is enabled, fee is bundled."""
+        from django.utils import timezone
+
+        year = timezone.now().year
+        association, _member, registration = self._setup(year, separated=False)
+        result = get_membership_fee_for_reg(association.id, registration.member_id, registration.run, registration)
+        self.assertEqual(result, self.MEMBERSHIP_FEE)
+
+
+@pytest.mark.django_db(transaction=True)
+class TestProcessPaymentMembershipSplit(BaseTestCase):
+    """Tests that _process_payment splits the bundled membership fee out of the
+    registration payment and creates AccountingItemMembership atomically."""
+
+    TICKET_PRICE = 100
+    MEMBERSHIP_FEE = 30
+
+    def setUp(self) -> None:
+        from unittest.mock import patch
+
+        from django.core.cache import cache
+
+        super().setUp()
+        cache.clear()
+        self._features_patcher = patch(
+            "larpmanager.accounting.member.get_association_features",
+            return_value={"membership": 1},
+        )
+        self._features_patcher.start()
+
+    def tearDown(self) -> None:
+        self._features_patcher.stop()
+        super().tearDown()
+
+    def _setup(self, year: int):
+        from datetime import date
+        from decimal import Decimal
+
+        from larpmanager.accounting.member import membership_fee_pending_config_name
+        from larpmanager.models.accounting import PaymentInvoice, PaymentStatus, PaymentType
+        from larpmanager.models.base import PaymentMethod
+        from larpmanager.models.member import MemberConfig
+        from larpmanager.models.registration import RegistrationTicket
+
+        association = self.get_association()
+        member = self.get_member()
+
+        AssociationConfig.objects.filter(association=association, name="membership_fee_separated").delete()
+        AssociationConfig.objects.filter(association=association, name="membership_fee").delete()
+        AssociationConfig.objects.create(association=association, name="membership_fee_separated", value="False")
+        AssociationConfig.objects.create(association=association, name="membership_fee", value=str(self.MEMBERSHIP_FEE))
+
+        run = self.get_run()
+        run.start = date(year, 7, 1)
+        run.end = date(year, 7, 2)
+        run.save()
+        ticket = RegistrationTicket.objects.create(event=run.event, name="T", price=self.TICKET_PRICE)
+        registration = self.create_registration(member=member, run=run, ticket=ticket)
+        registration.tot_iscr = self.TICKET_PRICE
+        registration.tot_payed = 0
+        registration.save()
+
+        # Simulate the invoice created when user submits payment (mc_gross = ticket + membership)
+        method, _ = PaymentMethod.objects.get_or_create(slug="wire", defaults={"name": "Wire"})
+        invoice = PaymentInvoice.objects.create(
+            typ=PaymentType.REGISTRATION,
+            idx=registration.id,
+            member=member,
+            association=association,
+            mc_gross=Decimal(self.TICKET_PRICE + self.MEMBERSHIP_FEE),
+            mc_fee=Decimal(0),
+            status=PaymentStatus.CREATED,
+            causal="test",
+            cod=f"TEST-{registration.id}",
+            method=method,
+        )
+
+        # Simulate the MemberConfig reservation created in set_data_invoice
+        config_name = membership_fee_pending_config_name(association.id, year)
+        MemberConfig.objects.create(member=member, name=config_name, value=str(registration.id))
+
+        return association, member, registration, invoice
+
+    def test_payment_value_reduced_by_membership_fee(self) -> None:
+        """AccountingItemPayment.value equals ticket price only, not ticket+membership."""
+        from django.utils import timezone
+
+        from larpmanager.accounting.payment import _process_payment
+        from larpmanager.models.accounting import AccountingItemPayment
+
+        year = timezone.now().year
+        _association, _member, registration, invoice = self._setup(year)
+        _process_payment(invoice)
+        item = AccountingItemPayment.objects.get(registration=registration)
+        self.assertEqual(item.value, self.TICKET_PRICE)
+
+    def test_membership_item_created_on_payment(self) -> None:
+        """AccountingItemMembership is created when the bundled payment is processed."""
+        from django.utils import timezone
+
+        from larpmanager.accounting.payment import _process_payment
+
+        year = timezone.now().year
+        association, member, _registration, invoice = self._setup(year)
+        _process_payment(invoice)
+        self.assertTrue(
+            AccountingItemMembership.objects.filter(
+                member=member, association=association, year=year, deleted__isnull=True
+            ).exists()
+        )
+
+    def test_member_config_reservation_deleted_after_payment(self) -> None:
+        """MemberConfig reservation is cleaned up once the membership is created."""
+        from django.utils import timezone
+
+        from larpmanager.accounting.payment import _process_payment
+        from larpmanager.accounting.member import membership_fee_pending_config_name
+        from larpmanager.models.member import MemberConfig
+
+        year = timezone.now().year
+        association, member, _registration, invoice = self._setup(year)
+        _process_payment(invoice)
+        config_name = membership_fee_pending_config_name(association.id, year)
+        self.assertFalse(MemberConfig.objects.filter(member=member, name=config_name, deleted__isnull=True).exists())
