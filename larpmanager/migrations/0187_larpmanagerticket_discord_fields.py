@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('larpmanager', '0126_fix_event_slug_unique_constraint'),
+        ('larpmanager', '0186_registrationticket_show_sold'),
     ]
 
     operations = [
