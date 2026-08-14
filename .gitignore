@@ -1,6 +1,7 @@
 ### Custom
 
 .claude/settings.json
+.pi/
 
 media/
 static-prod/
