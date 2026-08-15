@@ -36,6 +36,7 @@ from larpmanager.views.user import (
     miscellanea as views_ums,
     onetime as views_onetime,
     registration as views_ur,
+    ticket as views_ut,
 )
 
 urlpatterns = [
@@ -203,6 +204,16 @@ urlpatterns = [
         "characters/",
         views_um.characters,
         name="characters",
+    ),
+    path(
+        "tickets/",
+        views_ut.tickets,
+        name="tickets",
+    ),
+    path(
+        "tickets/<slug:ticket_uuid>/",
+        views_ut.ticket_detail,
+        name="ticket_detail",
     ),
     path(
         "accounting/",

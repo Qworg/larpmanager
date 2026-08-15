@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% load i18n %}
+{% block title %}
+    {% trans "Tickets" %}
+{% endblock title %}
+{% block info %}
+    {% trans "View your support requests" %}
+{% endblock info %}
+{% block content %}
+    {% include "larpmanager/member/profile_nav.html" %}
+    <div class="user_resize platform">
+        <hr class="no_v20" />
+        <div class="new_v20 no_v22">
+            <a class="btn btn-primary" href="{% url 'ticket' %}">
+                <i class="fa-solid fa-plus"></i> {% trans "New request" %}
+            </a>
+        </div>
+        {% if tickets %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>{% trans "Subject" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Priority" %}</th>
+                        <th>{% trans "Created" %}</th>
+                        {% if is_admin %}<th>{% trans "Member" %}</th>{% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ticket in tickets %}
+                        <tr>
+                            <td>
+                                <a href="{% url 'ticket_detail' ticket.uuid %}">
+                                    {% firstof ticket.subject ticket.reason %}
+                                </a>
+                            </td>
+                            <td>{{ ticket.get_status_display }}</td>
+                            <td>{{ ticket.get_priority_display }}</td>
+                            <td>{{ ticket.created|date:"SHORT_DATE_FORMAT" }}</td>
+                            {% if is_admin %}<td>{{ ticket.member|default:"-" }}</td>{% endif %}
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p>{% trans "You don't have any tickets yet." %}</p>
+        {% endif %}
+    </div>
+{% endblock content %}

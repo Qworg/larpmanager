@@ -53,6 +53,13 @@
                             <a class="sidebar-link" href="{% url 'exe_preferences' %}">{% trans "Preferences" %}</a>
                             <a href="#" class="explain-icon" tog="exe_preferences"><i class="fas fa-question-circle"></i></a>
                         </span>
+                        {% if is_admin %}
+                            <span class="sidebar-link-wrap"
+                                  descr="{% trans "View support tickets" %}">
+                                <a class="sidebar-link" href="{% url 'tickets' %}">{% trans "Tickets" %}</a>
+                                <a href="#" class="explain-icon" tog="tickets"><i class="fas fa-question-circle"></i></a>
+                            </span>
+                        {% endif %}
                     </p>
                     {% for mod, list in association_pms.items %}
                         {% if list %}
@@ -155,6 +162,14 @@
                                     <a class="sidebar-link" href="{% url 'exe_preferences' %}">
                                         <i class="fa-solid fa-sliders"></i>
                                         <span>{% trans "Preferences" %}</span>
+                                    </a>
+                                </span>
+                            {% endif %}
+                            {% if is_admin %}
+                                <span class="sidebar-link-wrap">
+                                    <a class="sidebar-link" href="{% url 'tickets' %}">
+                                        <i class="fa-solid fa-ticket"></i>
+                                        <span>{% trans "Tickets" %}</span>
                                     </a>
                                 </span>
                             {% endif %}

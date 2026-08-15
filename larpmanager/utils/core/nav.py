@@ -428,6 +428,14 @@ def build_profile_nav_items(request: HttpRequest) -> list[dict[str, Any]]:
             active=active == "profile_privacy",
             home=False,
         ),
+        _item(
+            reverse("tickets"),
+            "fa-solid fa-ticket",
+            _("Tickets"),
+            "",
+            active=active == "tickets",
+            home=False,
+        ),
     ]
 
     # Allow opt in to use latest interface version

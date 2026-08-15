@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% load i18n %}
+{% block title %}
+    {% trans "Ticket" %}
+{% endblock title %}
+{% block info %}
+    {% trans "Support request details" %}
+{% endblock info %}
+{% block content %}
+    {% include "larpmanager/member/profile_nav.html" %}
+    <div class="user_resize platform">
+        <hr class="no_v20" />
+        <h2>{% firstof ticket.subject ticket.reason %}</h2>
+        <table>
+            <tbody>
+                <tr>
+                    <th>{% trans "Status" %}</th>
+                    <td>{{ ticket.get_status_display }}</td>
+                </tr>
+                <tr>
+                    <th>{% trans "Priority" %}</th>
+                    <td>{{ ticket.get_priority_display }}</td>
+                </tr>
+                <tr>
+                    <th>{% trans "Created" %}</th>
+                    <td>{{ ticket.created }}</td>
+                </tr>
+                <tr>
+                    <th>{% trans "Last update" %}</th>
+                    <td>{{ ticket.updated }}</td>
+                </tr>
+                {% if ticket.email %}
+                    <tr>
+                        <th>{% trans "Email" %}</th>
+                        <td>{{ ticket.email }}</td>
+                    </tr>
+                {% endif %}
+                <tr>
+                    <th>{% trans "Request" %}</th>
+                    <td>{{ ticket.content|linebreaks }}</td>
+                </tr>
+                {% if ticket.analysis %}
+                    <tr>
+                        <th>{% trans "Analysis" %}</th>
+                        <td>{{ ticket.analysis|linebreaks }}</td>
+                    </tr>
+                {% endif %}
+                {% if ticket.discord_channel_id %}
+                    <tr>
+                        <th>{% trans "Discord channel" %}</th>
+                        <td>
+                            {% if discord_guild_id %}
+                                <a href="https://discord.com/channels/{{ discord_guild_id }}/{{ ticket.discord_channel_id }}"
+                                   target="_blank"
+                                   rel="noopener noreferrer">
+                                    <i class="fa-brands fa-discord"></i> {% trans "Open in Discord" %}
+                                </a>
+                            {% else %}
+                                {{ ticket.discord_channel_id }}
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endif %}
+                {% if ticket.transcript %}
+                    <tr>
+                        <th>{% trans "Transcript" %}</th>
+                        <td>
+                            <div class="ticket-transcript">{{ ticket.transcript|linebreaksbr }}</div>
+                        </td>
+                    </tr>
+                {% elif ticket.discord_channel_id %}
+                    <tr>
+                        <th>{% trans "Discussion" %}</th>
+                        <td>
+                            <p>{% trans "This ticket is open in Discord. Open the channel to follow the conversation." %}</p>
+                        </td>
+                    </tr>
+                {% endif %}
+                {% if ticket.closed_at %}
+                    <tr>
+                        <th>{% trans "Closed" %}</th>
+                        <td>{{ ticket.closed_at }}</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+{% endblock content %}

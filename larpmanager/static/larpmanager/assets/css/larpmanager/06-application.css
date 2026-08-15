@@ -840,3 +840,15 @@ form .plot {
   background-color: rgba(var(--pri-rgb), 0.9);
   color: white;
 }
+
+.ticket-transcript {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+  font-size: 0.9em;
+  line-height: 1.5;
+  padding: 10px;
+  border-radius: 4px;
+  background-color: rgba(var(--pri-rgb), 0.08);
+}

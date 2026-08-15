@@ -22,6 +22,7 @@ from typing import Any, ClassVar
 
 from colorfield.fields import ColorField
 from django.db import models
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from imagekit.models import ImageSpecField
 from imagekit.processors import ResizeToFill, ResizeToFit
@@ -542,6 +543,10 @@ class LarpManagerTicket(UuidMixin, BaseModel):
         if self.subject:
             return f"Ticket #{self.id}: {self.subject}"
         return f"Ticket #{self.id}: {self.reason or 'No reason'}"
+
+    def get_absolute_url(self) -> str:
+        """Return the frontend detail URL for this ticket."""
+        return reverse("ticket_detail", kwargs={"ticket_uuid": self.uuid})
 
 
 class NewsletterStatus(models.TextChoices):
