@@ -10,6 +10,19 @@
     {% include "larpmanager/member/profile_nav.html" %}
     <div class="user_resize platform">
         <hr class="no_v20" />
+        <form method="get" action="{% url 'tickets' %}" class="ticket-search">
+            <input type="search"
+                   name="q"
+                   value="{{ query }}"
+                   placeholder="{% trans 'Search tickets' %}"
+                   aria-label="{% trans 'Search tickets' %}" />
+            <button type="submit" aria-label="{% trans 'Search' %}">
+                <i class="fa-solid fa-magnifying-glass"></i>
+            </button>
+            {% if query %}
+                <a href="{% url 'tickets' %}" class="ticket-search-clear">{% trans "Clear" %}</a>
+            {% endif %}
+        </form>
         <div class="new_v20 no_v22">
             <a class="btn btn-primary" href="{% url 'ticket' %}">
                 <i class="fa-solid fa-plus"></i> {% trans "New request" %}
@@ -42,6 +55,8 @@
                     {% endfor %}
                 </tbody>
             </table>
+        {% elif query %}
+            <p>{% trans "No tickets match your search." %}</p>
         {% else %}
             <p>{% trans "You don't have any tickets yet." %}</p>
         {% endif %}

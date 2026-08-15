@@ -852,3 +852,35 @@ form .plot {
   border-radius: 4px;
   background-color: rgba(var(--pri-rgb), 0.08);
 }
+
+.ticket-search {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  margin-bottom: 1em;
+}
+
+.ticket-search input[type="search"] {
+  flex: 1;
+  max-width: 30em;
+  padding: 0.5em 0.8em;
+  border-radius: 0.3em;
+  font: inherit;
+}
+
+.ticket-search button {
+  padding: 0.5em 0.8em;
+  border: none;
+  border-radius: 0.3em;
+  cursor: pointer;
+  background-color: rgba(var(--pri-rgb), 0.8);
+  color: white;
+}
+
+.ticket-search button:hover {
+  background-color: rgba(var(--pri-rgb), 1);
+}
+
+.ticket-search-clear {
+  font-size: 0.9em;
+}

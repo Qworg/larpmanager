@@ -21,6 +21,8 @@
 from typing import Any, ClassVar
 
 from colorfield.fields import ColorField
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVectorField
 from django.db import models
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
@@ -531,6 +533,8 @@ class LarpManagerTicket(UuidMixin, BaseModel):
         help_text=_("Timestamp when the ticket was closed"),
     )
 
+    search_vector = SearchVectorField(null=True, editable=False)
+
     def show_thumb(self) -> Any:
         """Generate HTML for displaying screenshot thumbnail."""
         if self.screenshot_reduced:
@@ -547,6 +551,11 @@ class LarpManagerTicket(UuidMixin, BaseModel):
     def get_absolute_url(self) -> str:
         """Return the frontend detail URL for this ticket."""
         return reverse("ticket_detail", kwargs={"ticket_uuid": self.uuid})
+
+    class Meta:
+        indexes: ClassVar[list] = [
+            GinIndex(fields=["search_vector"], name="ticket_search_vector_idx"),
+        ]
 
 
 class NewsletterStatus(models.TextChoices):

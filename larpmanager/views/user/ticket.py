@@ -24,6 +24,7 @@ from typing import Any
 
 from django.conf import settings as conf_settings
 from django.contrib.auth.decorators import login_required
+from django.contrib.postgres.search import SearchQuery, SearchRank
 from django.http import Http404, HttpRequest
 from django.shortcuts import get_object_or_404, render
 
@@ -54,7 +55,19 @@ def tickets(request: HttpRequest) -> Any:
     if not context.get("is_admin"):
         queryset = queryset.filter(member=context["member"])
 
-    context["tickets"] = queryset.order_by("-created")
+    query = request.GET.get("q", "").strip()
+    context["query"] = query
+    if query:
+        search_query = SearchQuery(query, config="english")
+        queryset = (
+            queryset.annotate(rank=SearchRank("search_vector", search_query))
+            .filter(search_vector=search_query)
+            .order_by("-rank", "-created")
+        )
+    else:
+        queryset = queryset.order_by("-created")
+
+    context["tickets"] = queryset
     return render(request, "larpmanager/member/tickets.html", context)
 
 
