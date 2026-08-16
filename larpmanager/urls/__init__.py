@@ -37,8 +37,13 @@ from larpmanager.views.api_discord import (
 from larpmanager.views.api_tickets import (
     list_associations,
     ticket_by_channel,
+    ticket_channel_writeback,
     ticket_close,
     ticket_detail,
+    ticket_events_ack,
+    ticket_events_history,
+    ticket_events_outbox,
+    ticket_outbound,
     ticket_reopen,
     tickets_list_create,
 )
@@ -102,6 +107,22 @@ urlpatterns = (
             list_associations,
             name="api_list_associations",
         ),
+        # Event/outbound endpoints must precede the slug catch-all below.
+        path(
+            "api/v1/tickets/events/",
+            ticket_events_outbox,
+            name="api_ticket_events_outbox",
+        ),
+        path(
+            "api/v1/tickets/events/ack/",
+            ticket_events_ack,
+            name="api_ticket_events_ack",
+        ),
+        path(
+            "api/v1/tickets/outbound/",
+            ticket_outbound,
+            name="api_ticket_outbound",
+        ),
         path(
             "api/v1/tickets/",
             tickets_list_create,
@@ -111,6 +132,16 @@ urlpatterns = (
             "api/v1/tickets/<slug:ticket_uuid>/",
             ticket_detail,
             name="api_ticket_detail",
+        ),
+        path(
+            "api/v1/tickets/<slug:ticket_uuid>/events/",
+            ticket_events_history,
+            name="api_ticket_events_history",
+        ),
+        path(
+            "api/v1/tickets/<slug:ticket_uuid>/channel/",
+            ticket_channel_writeback,
+            name="api_ticket_channel_writeback",
         ),
         path(
             "api/v1/tickets/<slug:ticket_uuid>/close/",

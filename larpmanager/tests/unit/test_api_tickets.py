@@ -20,13 +20,20 @@
 """Tests for the ticket REST API endpoints."""
 
 import json
+import threading
 
+import pytest
 from django.core.cache import cache
-from django.test import Client, override_settings
+from django.db import connections
+from django.test import Client, TransactionTestCase, override_settings
 
+from larpmanager.models.association import Association
 from larpmanager.models.base import PublisherApiKey
 from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus
+from larpmanager.models.ticket_event import TicketEvent
+from larpmanager.models.ticket_message import TicketMessage
 from larpmanager.tests.unit.base import BaseTestCase
+from larpmanager.utils.ticket_events import emit_ticket_event
 
 
 class TestTicketAPI(BaseTestCase):
@@ -295,6 +302,36 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["ticket"]["assigned_staff_discord_id"], 999888777)
+
+    def test_patch_subject_emits_channel_update(self):
+        """PATCHing subject emits a channel_update event with the new subject."""
+        ticket = self.create_larpmanager_ticket(subject="old subject")
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"subject": "new subject"}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = TicketEvent.objects.get(ticket=ticket, event_type=TicketEvent.EventType.CHANNEL_UPDATE)
+        self.assertEqual(event.source, TicketEvent.Source.API)
+        self.assertEqual(event.payload["subject"], "new subject")
+
+    def test_patch_returns_version(self):
+        """PATCH response includes the next version for optimistic locking."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=123)
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"status": "working"}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ticket"]["version"], 1)
 
     def test_update_ticket_invalid_status(self):
         """Test that PATCH returns 400 for invalid status."""
@@ -655,3 +692,343 @@ class TestTicketAPI(BaseTestCase):
 
         after = Log.objects.filter(cls="PublisherAPI").count()
         self.assertGreater(after, before)
+
+
+@override_settings(DISCORD_BOT_API_KEYS=["test-bot-key"])
+class TestTicketEventsAPI(BaseTestCase):
+    """Tests for the outbox, ack, history, and outbound endpoints."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        super().setUp()
+        cache.clear()
+        self.client = Client()
+        self.api_key = PublisherApiKey.objects.create(
+            name="Test Key",
+            key="test-api-key-12345",
+            active=True,
+            scopes=["tickets:read", "tickets:write"],
+        )
+        self.headers = {"HTTP_X_API_KEY": "test-api-key-12345"}
+        self.bot_headers = {"HTTP_X_API_KEY": "test-bot-key"}
+
+    def test_outbox_cursor_pagination(self):
+        """Outbox returns only unacked source=api events in id order; since does not filter."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=111)
+        first = emit_ticket_event(
+            ticket, TicketEvent.EventType.STATUS_CHANGED, source="api", from_status="open", to_status="working"
+        )
+        second = emit_ticket_event(
+            ticket, TicketEvent.EventType.STATUS_CHANGED, source="api", from_status="working", to_status="done"
+        )
+        emit_ticket_event(
+            ticket, TicketEvent.EventType.STATUS_CHANGED, source="discord", from_status="open", to_status="working"
+        )
+
+        response = self.client.get("/api/v1/tickets/events/?since=0&limit=10", **self.bot_headers)
+        self.assertEqual(response.status_code, 200)
+        ids = [event["id"] for event in response.json()["events"]]
+        self.assertEqual(ids, [first.id, second.id])
+
+        # ``since`` is accepted for backward-compat but does not filter; the NULL
+        # predicates alone drive delivery, so the still-unacked first event is
+        # re-delivered even with since=first.id (at-least-once).
+        response = self.client.get(f"/api/v1/tickets/events/?since={first.id}&limit=1", **self.bot_headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([event["id"] for event in response.json()["events"]], [first.id])
+
+    def test_ack_idempotent(self):
+        """Test that acking an event twice is harmless and idempotent."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=112)
+        event = emit_ticket_event(
+            ticket, TicketEvent.EventType.STATUS_CHANGED, source="api", from_status="open", to_status="working"
+        )
+
+        response = self.client.post(
+            "/api/v1/tickets/events/ack/",
+            data=json.dumps({"ids": [event.id]}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["acked"], 1)
+
+        event.refresh_from_db()
+        self.assertIsNotNone(event.acked_at)
+        self.assertIsNotNone(event.applied_at)
+
+        response = self.client.post(
+            "/api/v1/tickets/events/ack/",
+            data=json.dumps({"ids": [event.id]}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        event.refresh_from_db()
+        self.assertIsNotNone(event.acked_at)
+
+    def test_ack_batch(self):
+        """Test that multiple event ids can be acked in a single request."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=113)
+        events = [
+            emit_ticket_event(
+                ticket, TicketEvent.EventType.STATUS_CHANGED, source="api", from_status="open", to_status="working"
+            )
+            for _ in range(3)
+        ]
+        ids = [event.id for event in events]
+
+        response = self.client.post(
+            "/api/v1/tickets/events/ack/",
+            data=json.dumps({"ids": ids}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["acked"], 3)
+
+        for event in events:
+            event.refresh_from_db()
+            self.assertIsNotNone(event.applied_at)
+            self.assertIsNotNone(event.acked_at)
+
+    def test_outbound_upsert_atomic(self):
+        """Test that a repeated outbound post upserts rather than duplicating."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=222)
+        payload = {
+            "discord_channel_id": 222,
+            "discord_message_id": 123456789,
+            "author_discord_id": 42,
+            "author_name": "Alice",
+            "content": "hello",
+            "sent_at": "2026-01-01T00:00:00+00:00",
+            "attachments": [],
+            "is_bot": False,
+        }
+
+        response = self.client.post(
+            "/api/v1/tickets/outbound/", data=json.dumps(payload), content_type="application/json", **self.bot_headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(TicketMessage.objects.filter(discord_message_id=123456789).count(), 1)
+
+        payload["content"] = "updated"
+        response = self.client.post(
+            "/api/v1/tickets/outbound/", data=json.dumps(payload), content_type="application/json", **self.bot_headers
+        )
+        self.assertEqual(response.status_code, 200)
+
+        messages = TicketMessage.objects.filter(discord_message_id=123456789)
+        self.assertEqual(messages.count(), 1)
+        self.assertEqual(messages.first().content, "updated")
+        self.assertIsNotNone(messages.first().search_vector)
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.last_synced_message_id, 123456789)
+        self.assertEqual(ticket.version, 0)
+
+    def test_event_source_split(self):
+        """Test that the outbox excludes source=discord but history includes all sources."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=333)
+        api_event = emit_ticket_event(
+            ticket, TicketEvent.EventType.STATUS_CHANGED, source="api", from_status="open", to_status="working"
+        )
+        discord_event = emit_ticket_event(
+            ticket, TicketEvent.EventType.STATUS_CHANGED, source="discord", from_status="open", to_status="working"
+        )
+
+        response = self.client.get("/api/v1/tickets/events/?since=0&limit=10", **self.bot_headers)
+        self.assertEqual(response.status_code, 200)
+        outbox_ids = [event["id"] for event in response.json()["events"]]
+        self.assertEqual(outbox_ids, [api_event.id])
+        self.assertNotIn(discord_event.id, outbox_ids)
+
+        response = self.client.get(f"/api/v1/tickets/{ticket.uuid}/events/", **self.headers)
+        self.assertEqual(response.status_code, 200)
+        history_ids = [event["id"] for event in response.json()["events"]]
+        self.assertEqual(set(history_ids), {api_event.id, discord_event.id})
+
+    def test_version_bump_on_patch(self):
+        """Test that a PATCH mutation bumps the optimistic-lock version."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=444)
+        self.assertEqual(ticket.version, 0)
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"status": "working", "priority": "high"}),
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(response.status_code, 200)
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.version, 1)
+
+    def test_outbox_cursor_no_stranding(self):
+        """Acked higher ids must not strand a lower un-applied event."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=114)
+        events = [
+            emit_ticket_event(
+                ticket, TicketEvent.EventType.STATUS_CHANGED, source="api", from_status="open", to_status="working"
+            )
+            for _ in range(3)
+        ]
+        low, mid, high = events
+
+        # Ack the two highest ids only, leaving the lowest un-applied.
+        response = self.client.post(
+            "/api/v1/tickets/events/ack/",
+            data=json.dumps({"ids": [mid.id, high.id]}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # A fresh poll with since=high.id must still return the stranded low event.
+        response = self.client.get(f"/api/v1/tickets/events/?since={high.id}&limit=10", **self.bot_headers)
+        self.assertEqual(response.status_code, 200)
+        ids = [event["id"] for event in response.json()["events"]]
+        self.assertIn(low.id, ids)
+        self.assertNotIn(mid.id, ids)
+        self.assertNotIn(high.id, ids)
+
+    def test_history_endpoint_soft_deleted(self):
+        """History is still returned after a ticket is soft-deleted."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=445)
+        event = emit_ticket_event(
+            ticket, TicketEvent.EventType.STATUS_CHANGED, source="api", from_status="open", to_status="working"
+        )
+
+        response = self.client.delete(f"/api/v1/tickets/{ticket.uuid}/", **self.headers)
+        self.assertEqual(response.status_code, 200)
+
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.deleted)
+
+        response = self.client.get(f"/api/v1/tickets/{ticket.uuid}/events/", **self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(event.id, [e["id"] for e in response.json()["events"]])
+
+    def test_ack_ids_cap(self):
+        """Acking more than 1000 ids is rejected with 400."""
+        response = self.client.post(
+            "/api/v1/tickets/events/ack/",
+            data=json.dumps({"ids": list(range(1001))}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_outbound_author_name_too_long(self):
+        """Outbound author_name over 255 chars is rejected with 400."""
+        self.create_larpmanager_ticket(discord_channel_id=446)
+        payload = {
+            "discord_channel_id": 446,
+            "discord_message_id": 11223344,
+            "author_name": "x" * 256,
+            "content": "hello",
+            "attachments": [],
+            "is_bot": False,
+        }
+        response = self.client.post(
+            "/api/v1/tickets/outbound/", data=json.dumps(payload), content_type="application/json", **self.bot_headers
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(TicketMessage.objects.filter(discord_message_id=11223344).count(), 0)
+
+    def test_outbound_is_bot_string_false(self):
+        """A string "false" for is_bot is parsed as False, not True."""
+        self.create_larpmanager_ticket(discord_channel_id=447)
+        payload = {
+            "discord_channel_id": 447,
+            "discord_message_id": 55667788,
+            "author_name": "Bob",
+            "content": "hello",
+            "attachments": [],
+            "is_bot": "false",
+        }
+        response = self.client.post(
+            "/api/v1/tickets/outbound/", data=json.dumps(payload), content_type="application/json", **self.bot_headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(TicketMessage.objects.get(discord_message_id=55667788).is_bot)
+
+    def test_channel_writeback_endpoint(self):
+        """Bot key writes discord_channel_id without bumping version; scoped key is forbidden."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=666)
+        self.assertEqual(ticket.version, 0)
+
+        response = self.client.post(
+            f"/api/v1/tickets/{ticket.uuid}/channel/",
+            data=json.dumps({"discord_channel_id": 777}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ticket"]["discord_channel_id"], 777)
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.discord_channel_id, 777)
+        self.assertEqual(ticket.version, 0)
+
+        response = self.client.post(
+            f"/api/v1/tickets/{ticket.uuid}/channel/",
+            data=json.dumps({"discord_channel_id": 888}),
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(response.status_code, 403)
+
+
+@override_settings(DISCORD_BOT_API_KEYS=["test-bot-key"])
+@pytest.mark.django_db(transaction=True)
+class TestTicketOutboundConcurrency(TransactionTestCase):
+    """Concurrency tests need committed data, hence TransactionTestCase."""
+
+    def test_outbound_concurrent_duplicate(self):
+        """Test that two concurrent posts of one message id collapse to one row."""
+        cache.clear()
+        association = Association.objects.create(name="Concurrent Org", slug="concurrent-org", main_mail="c@example.com")
+        LarpManagerTicket.objects.create(
+            association=association,
+            reason="Test",
+            content="content",
+            status=TicketStatus.OPEN,
+            priority=TicketPriority.LOW,
+            discord_channel_id=555,
+        )
+
+        barrier = threading.Barrier(2)
+        statuses = []
+
+        def do_post():
+            connections.close_all()
+            client = Client()
+            barrier.wait()
+            response = client.post(
+                "/api/v1/tickets/outbound/",
+                data=json.dumps(
+                    {
+                        "discord_channel_id": 555,
+                        "discord_message_id": 999888777,
+                        "author_discord_id": 1,
+                        "author_name": "User",
+                        "content": "concurrent",
+                        "sent_at": "2026-01-01T00:00:00+00:00",
+                        "attachments": [],
+                        "is_bot": False,
+                    }
+                ),
+                content_type="application/json",
+                HTTP_X_API_KEY="test-bot-key",
+            )
+            statuses.append(response.status_code)
+
+        threads = [threading.Thread(target=do_post) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sorted(statuses), [200, 200])
+        self.assertEqual(TicketMessage.objects.filter(discord_message_id=999888777).count(), 1)

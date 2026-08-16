@@ -535,6 +535,12 @@ class LarpManagerTicket(UuidMixin, BaseModel):
 
     search_vector = SearchVectorField(null=True, editable=False)
 
+    # Optimistic-lock stamp, incremented only by user/API mutations (D8).
+    version = models.PositiveIntegerField(default=0)
+
+    # Reconnect watermark for Discord message backfill (W11).
+    last_synced_message_id = models.BigIntegerField(null=True, blank=True)
+
     def show_thumb(self) -> Any:
         """Generate HTML for displaying screenshot thumbnail."""
         if self.screenshot_reduced:

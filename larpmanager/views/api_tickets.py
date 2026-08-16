@@ -33,10 +33,14 @@ import logging
 from typing import Any
 
 from django.conf import settings
+from django.contrib.postgres.search import SearchVector
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
+from django.db.models import F, Value
+from django.db.models.functions import Coalesce, Greatest
 from django.http import HttpRequest, JsonResponse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 from django_ratelimit import ALL
@@ -45,7 +49,10 @@ from django_ratelimit.decorators import ratelimit
 
 from larpmanager.models.association import Association
 from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus
+from larpmanager.models.ticket_event import TicketEvent
+from larpmanager.models.ticket_message import TicketMessage
 from larpmanager.utils.publication.api import log_api_access
+from larpmanager.utils.ticket_events import emit_ticket_event
 from larpmanager.views.api_discord import TicketAuth, get_member_by_discord_id, validate_ticket_api_key
 
 logger = logging.getLogger(__name__)
@@ -55,6 +62,10 @@ MAX_SUBJECT_LENGTH = 255
 MAX_CONTENT_LENGTH = 5000
 MAX_EMAIL_LENGTH = 254
 MAX_TRANSCRIPT_LENGTH = 1_000_000
+MAX_MESSAGE_CONTENT_LENGTH = 2000
+MAX_MESSAGE_ATTACHMENTS = 10
+MAX_AUTHOR_NAME_LENGTH = 255
+MAX_ACK_IDS = 1000
 
 
 def _rate_limited_response(request: HttpRequest, view_func: Any, rate: str) -> JsonResponse:
@@ -96,6 +107,84 @@ def _length_error(field: str, value: Any, max_length: int) -> JsonResponse | Non
     return None
 
 
+def _parse_bool(value: Any) -> bool | None:
+    """Parse a JSON boolean or a "true"/"false" string; return None when invalid."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    return None
+
+
+def _event_source(auth: TicketAuth | None) -> str:
+    """Derive the TicketEvent source from the authenticating key (D10)."""
+    return "discord" if auth is not None and auth.is_bot_key else "api"
+
+
+def _require_bot_key(auth: TicketAuth | None) -> JsonResponse | None:
+    """Return a 403 response unless the request authenticated with a bot key."""
+    if auth is None or not auth.is_bot_key:
+        return JsonResponse({"error": "bot key required"}, status=403)
+    return None
+
+
+def event_to_dict(event: TicketEvent) -> dict[str, Any]:
+    """Serialize a TicketEvent for the outbox and history endpoints."""
+    return {
+        "id": event.id,
+        "ticket_uuid": str(event.ticket.uuid),
+        "event_type": event.event_type,
+        "source": event.source,
+        "from_status": event.from_status,
+        "to_status": event.to_status,
+        "actor_discord_id": event.actor_discord_id,
+        "actor_member_uuid": str(event.actor_member.uuid) if event.actor_member else None,
+        "payload": event.payload,
+        "created": event.created.isoformat() if event.created else None,
+        "applied_at": event.applied_at.isoformat() if event.applied_at else None,
+        "acked_at": event.acked_at.isoformat() if event.acked_at else None,
+        "attempts": event.attempts,
+        "last_error": event.last_error,
+    }
+
+
+def message_to_dict(message: TicketMessage) -> dict[str, Any]:
+    """Serialize a TicketMessage for the outbound endpoint response."""
+    return {
+        "uuid": str(message.uuid),
+        "ticket_uuid": str(message.ticket.uuid),
+        "discord_message_id": message.discord_message_id,
+        "author_discord_id": message.author_discord_id,
+        "author_name": message.author_name,
+        "content": message.content,
+        "attachments": message.attachments,
+        "is_bot": message.is_bot,
+        "sent_at": message.sent_at.isoformat() if message.sent_at else None,
+    }
+
+
+def _upsert_ticket_message(discord_message_id: int, defaults: dict[str, Any]) -> TicketMessage:
+    """Atomically upsert a TicketMessage on discord_message_id (conflict = update)."""
+    try:
+        with transaction.atomic():
+            message, created = TicketMessage.objects.get_or_create(
+                discord_message_id=discord_message_id,
+                defaults=defaults,
+            )
+            if not created:
+                for field, value in defaults.items():
+                    setattr(message, field, value)
+                message.save()
+    except IntegrityError:
+        # A concurrent insert won the race; fetch and update the committed row.
+        with transaction.atomic():
+            message = TicketMessage.objects.get(discord_message_id=discord_message_id)
+            for field, value in defaults.items():
+                setattr(message, field, value)
+            message.save()
+    return message
+
+
 def ticket_to_dict(ticket: LarpManagerTicket, auth: TicketAuth | None = None) -> dict[str, Any]:
     """Convert a ticket model to a dictionary for JSON response.
 
@@ -114,6 +203,7 @@ def ticket_to_dict(ticket: LarpManagerTicket, auth: TicketAuth | None = None) ->
         "content": ticket.content,
         "status": ticket.status,
         "priority": ticket.priority,
+        "version": ticket.version,
         "discord_channel_id": ticket.discord_channel_id,
         "discord_creator_id": ticket.discord_creator_id,
         "assigned_staff_discord_id": ticket.assigned_staff_discord_id,
@@ -338,21 +428,33 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
     member = get_member_by_discord_id(discord_creator_id_int)
 
     try:
-        ticket = LarpManagerTicket.objects.create(
-            association=association,
-            member=member,
-            discord_channel_id=discord_channel_id_int,
-            discord_creator_id=discord_creator_id_int,
-            subject=data.get("subject", ""),
-            reason=data.get("reason", "Discord Support"),
-            content=data.get("content", ""),
-            email=data.get("email", member.email if member else None),
-            priority=priority,
-            status=TicketStatus.OPEN,
-        )
+        with transaction.atomic():
+            ticket = LarpManagerTicket.objects.create(
+                association=association,
+                member=member,
+                discord_channel_id=discord_channel_id_int,
+                discord_creator_id=discord_creator_id_int,
+                subject=data.get("subject", ""),
+                reason=data.get("reason", "Discord Support"),
+                content=data.get("content", ""),
+                email=data.get("email", member.email if member else None),
+                priority=priority,
+                status=TicketStatus.OPEN,
+            )
+            emit_ticket_event(
+                ticket,
+                TicketEvent.EventType.CREATED,
+                source=_event_source(auth),
+                actor_discord_id=discord_creator_id_int,
+                payload={
+                    "ticket_uuid": str(ticket.uuid),
+                    "subject": ticket.subject,
+                    "association_uuid": str(association.uuid),
+                    "discord_creator_id": discord_creator_id_int,
+                },
+            )
     except IntegrityError:
         return JsonResponse({"error": "ticket already exists for this channel"}, status=409)
-
     logger.info("Created ticket %s via Discord API", ticket.uuid)
 
     return JsonResponse({"ticket": ticket_to_dict(ticket, auth)}, status=201)
@@ -431,6 +533,11 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
             if error is not None:
                 return error
 
+        old_status = ticket.status
+        old_priority = ticket.priority
+        old_assigned_staff = ticket.assigned_staff_discord_id
+        old_subject = ticket.subject
+
         if "status" in data:
             new_status = data["status"]
             if new_status not in TicketStatus.values:
@@ -458,14 +565,63 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
         if "content" in data:
             ticket.content = data["content"]
 
-        ticket.save()
+        source = _event_source(auth)
+        new_status = data.get("status", old_status)
+        new_priority = data.get("priority", old_priority)
+        assigned_staff = ticket.assigned_staff_discord_id
+
+        with transaction.atomic():
+            ticket.version = F("version") + 1
+            ticket.save()
+
+            if "status" in data and new_status != old_status:
+                emit_ticket_event(
+                    ticket,
+                    TicketEvent.EventType.STATUS_CHANGED,
+                    source=source,
+                    from_status=old_status,
+                    to_status=new_status,
+                    payload={"to_status": new_status},
+                )
+            if "priority" in data and new_priority != old_priority:
+                emit_ticket_event(
+                    ticket,
+                    TicketEvent.EventType.PRIORITY_CHANGED,
+                    source=source,
+                    payload={"to_priority": new_priority, "from_priority": old_priority},
+                )
+            if "assigned_staff_discord_id" in data and assigned_staff != old_assigned_staff:
+                emit_ticket_event(
+                    ticket,
+                    TicketEvent.EventType.ASSIGNED,
+                    source=source,
+                    payload={"assigned_staff_discord_id": assigned_staff},
+                )
+            if "subject" in data and data["subject"] != old_subject:
+                emit_ticket_event(
+                    ticket,
+                    TicketEvent.EventType.CHANNEL_UPDATE,
+                    source=source,
+                    payload={"subject": data["subject"]},
+                )
+
+        ticket.refresh_from_db(fields=["version"])
         logger.info("Updated ticket %s via Discord API", ticket.uuid)
 
         return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
 
     # DELETE: soft delete the ticket
-    ticket.deleted = timezone.now()
-    ticket.save()
+    with transaction.atomic():
+        ticket.deleted = timezone.now()
+        ticket.version = F("version") + 1
+        # keep_deleted=True prevents SafeDeleteModel.save() from resetting deleted.
+        ticket.save(keep_deleted=True)
+        emit_ticket_event(
+            ticket,
+            TicketEvent.EventType.DELETED,
+            source=_event_source(auth),
+            payload={},
+        )
     logger.info("Deleted ticket %s via Discord API", ticket.uuid)
     return JsonResponse({"success": True})
 
@@ -520,10 +676,24 @@ def ticket_close(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
         ticket.transcript = data["transcript"]
 
     # Close the ticket
+    old_status = ticket.status
     ticket.status = TicketStatus.DONE
     ticket.closed_at = timezone.now()
-    ticket.save()
 
+    with transaction.atomic():
+        ticket.version = F("version") + 1
+        ticket.save()
+
+        emit_ticket_event(
+            ticket,
+            TicketEvent.EventType.CLOSED,
+            source=_event_source(auth),
+            from_status=old_status,
+            to_status=TicketStatus.DONE,
+            payload={},
+        )
+
+    ticket.refresh_from_db(fields=["version"])
     logger.info("Closed ticket %s via Discord API", ticket.uuid)
 
     return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
@@ -564,11 +734,76 @@ def ticket_reopen(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
         return JsonResponse({"error": "Ticket is not closed, cannot reopen"}, status=400)
 
     # Reopen the ticket
+    old_status = ticket.status
     ticket.status = TicketStatus.OPEN
     ticket.closed_at = None
-    ticket.save()
 
+    with transaction.atomic():
+        ticket.version = F("version") + 1
+        ticket.save()
+
+        emit_ticket_event(
+            ticket,
+            TicketEvent.EventType.REOPENED,
+            source=_event_source(auth),
+            from_status=old_status,
+            to_status=TicketStatus.OPEN,
+            payload={},
+        )
+
+    ticket.refresh_from_db(fields=["version"])
     logger.info("Reopened ticket %s via Discord API", ticket.uuid)
+
+    return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@ratelimit(key="ip", rate="30/m", method="POST", block=False)
+@ratelimit(key="header:x-api-key", rate="30/m", method="POST", block=False)
+def ticket_channel_writeback(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noqa: PLR0911
+    """Write back the Discord channel id after the bot applies a channel_create.
+
+    Bot-key-only. The write is done via QuerySet.update() so the optimistic-lock
+    ``version`` is NOT bumped (background write, D8); a history-only marker is
+    emitted so the write-back is visible in ticket history but never in the outbox.
+
+    """
+    auth, error_response = validate_ticket_api_key(request)
+    if error_response is not None:
+        return error_response
+    bot_error = _require_bot_key(auth)
+    if bot_error is not None:
+        return bot_error
+    if getattr(request, "limited", False):
+        return _rate_limited_response(request, ticket_channel_writeback, "30/m")
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    try:
+        discord_channel_id = int(data.get("discord_channel_id"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "discord_channel_id must be an integer"}, status=400)
+
+    try:
+        ticket = LarpManagerTicket.objects.select_related("association", "member").get(
+            uuid=ticket_uuid, deleted__isnull=True
+        )
+    except (LarpManagerTicket.DoesNotExist, ValidationError):
+        return JsonResponse({"error": "Ticket not found"}, status=404)
+
+    LarpManagerTicket.objects.filter(pk=ticket.pk).update(discord_channel_id=discord_channel_id)
+    ticket.refresh_from_db(fields=["discord_channel_id"])
+
+    emit_ticket_event(
+        ticket,
+        TicketEvent.EventType.CHANNEL_SYNCED,
+        source=_event_source(auth),
+        payload={"ticket_uuid": str(ticket.uuid), "discord_channel_id": discord_channel_id},
+    )
 
     return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
 
@@ -603,3 +838,200 @@ def ticket_by_channel(request: HttpRequest, channel_id: int) -> JsonResponse:
         return JsonResponse({"error": "Ticket not found"}, status=404)
 
     return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
+
+
+@require_GET
+@ratelimit(key="ip", rate="120/m", method="GET", block=False)
+@ratelimit(key="header:x-api-key", rate="120/m", method="GET", block=False)
+def ticket_events_outbox(request: HttpRequest) -> JsonResponse:
+    """Return undelivered ``source=api`` events for the bot outbox cursor.
+
+    Query params:
+        since: Accepted for backward compatibility but ignored for filtering.
+        limit: Maximum number of events to return (default 100, capped at 1000).
+
+    """
+    auth, error_response = validate_ticket_api_key(request)
+    if error_response is not None:
+        return error_response
+    bot_error = _require_bot_key(auth)
+    if bot_error is not None:
+        return bot_error
+    if getattr(request, "limited", False):
+        return _rate_limited_response(request, ticket_events_outbox, "120/m")
+
+    try:
+        since = int(request.GET.get("since", 0))
+        limit = int(request.GET.get("limit", 100))
+    except ValueError:
+        return JsonResponse({"error": "invalid cursor"}, status=400)
+    if since < 0 or limit < 0:
+        return JsonResponse({"error": "invalid cursor"}, status=400)
+    limit = min(limit, 1000)
+
+    # The outbox is defined purely by the NULL predicates: an event stays in the
+    # outbox until it has been both applied and acked. ``since`` is accepted for
+    # backward compatibility but is deliberately NOT used to filter, because
+    # ``id > since`` strands any lower-id event that was never applied (a batch
+    # ack can advance the cursor past an in-flight, un-applied event).
+    events = (
+        TicketEvent.objects.filter(
+            source=TicketEvent.Source.API,
+            applied_at__isnull=True,
+            acked_at__isnull=True,
+        )
+        .select_related("ticket", "actor_member")
+        .order_by("id")[:limit]
+    )
+    return JsonResponse({"events": [event_to_dict(event) for event in events]})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@ratelimit(key="ip", rate="120/m", method="POST", block=False)
+@ratelimit(key="header:x-api-key", rate="120/m", method="POST", block=False)
+def ticket_events_ack(request: HttpRequest) -> JsonResponse:  # noqa: PLR0911
+    """Batch-ack outbox events (idempotent; the server writes applied_at too)."""
+    auth, error_response = validate_ticket_api_key(request)
+    if error_response is not None:
+        return error_response
+    bot_error = _require_bot_key(auth)
+    if bot_error is not None:
+        return bot_error
+    if getattr(request, "limited", False):
+        return _rate_limited_response(request, ticket_events_ack, "120/m")
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    ids = data.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(event_id, int) for event_id in ids):
+        return JsonResponse({"error": "ids must be a list of integers"}, status=400)
+    if len(ids) > MAX_ACK_IDS:
+        return JsonResponse({"error": "too many ids"}, status=400)
+
+    now = timezone.now()
+    updated = TicketEvent.objects.filter(id__in=ids, source=TicketEvent.Source.API).update(
+        acked_at=now,
+        applied_at=now,
+    )
+    return JsonResponse({"acked": updated})
+
+
+@require_GET
+@ratelimit(key="ip", rate="120/m", method="GET", block=False)
+@ratelimit(key="header:x-api-key", rate="120/m", method="GET", block=False)
+def ticket_events_history(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
+    """Return full ticket-scoped event history (all sources, ordered by id)."""
+    auth, error_response = validate_ticket_api_key(request, required_scope="tickets:read")
+    if error_response is not None:
+        return error_response
+    if getattr(request, "limited", False):
+        return _rate_limited_response(request, ticket_events_history, "120/m")
+
+    # History must be available even for soft-deleted tickets; the default manager
+    # hides soft-deleted rows, so use all_objects and drop the deleted__isnull filter.
+    queryset = _scoped_queryset(LarpManagerTicket.all_objects.all(), auth)
+    try:
+        ticket = queryset.get(uuid=ticket_uuid)
+    except (LarpManagerTicket.DoesNotExist, ValidationError):
+        return JsonResponse({"error": "Ticket not found"}, status=404)
+
+    events = TicketEvent.objects.filter(ticket=ticket).select_related("ticket", "actor_member").order_by("id")
+    return JsonResponse({"events": [event_to_dict(event) for event in events]})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@ratelimit(key="ip", rate="120/m", method="POST", block=False)
+@ratelimit(key="header:x-api-key", rate="120/m", method="POST", block=False)
+def ticket_outbound(request: HttpRequest) -> JsonResponse:  # noqa: C901, PLR0911, PLR0912
+    """Persist a Discord-originated message (idempotent upsert on discord_message_id).
+
+    Validation: discord_channel_id must resolve to a live ticket (404); content over
+    2000 chars or more than 10 attachments are rejected (400). The upsert is atomic
+    on discord_message_id, so a conflicting message is a success (200).
+
+    """
+    auth, error_response = validate_ticket_api_key(request)
+    if error_response is not None:
+        return error_response
+    bot_error = _require_bot_key(auth)
+    if bot_error is not None:
+        return bot_error
+    if getattr(request, "limited", False):
+        return _rate_limited_response(request, ticket_outbound, "120/m")
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    try:
+        discord_channel_id = int(data.get("discord_channel_id"))
+        discord_message_id = int(data.get("discord_message_id"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "discord_channel_id and discord_message_id must be integers"}, status=400)
+
+    content = data.get("content", "")
+    if not isinstance(content, str) or len(content) > MAX_MESSAGE_CONTENT_LENGTH:
+        return JsonResponse({"error": "content too long"}, status=400)
+
+    attachments = data.get("attachments", [])
+    if not isinstance(attachments, list) or len(attachments) > MAX_MESSAGE_ATTACHMENTS:
+        return JsonResponse({"error": "too many attachments"}, status=400)
+
+    author_name = data.get("author_name", "")
+    if not isinstance(author_name, str) or len(author_name) > MAX_AUTHOR_NAME_LENGTH:
+        return JsonResponse({"error": "author_name too long"}, status=400)
+
+    is_bot = _parse_bool(data.get("is_bot", False))
+    if is_bot is None:
+        return JsonResponse({"error": "is_bot must be a boolean"}, status=400)
+
+    ticket = LarpManagerTicket.objects.filter(discord_channel_id=discord_channel_id, deleted__isnull=True).first()
+    if ticket is None:
+        return JsonResponse({"error": "Ticket not found"}, status=404)
+
+    sent_at_dt = None
+    sent_at = data.get("sent_at")
+    if sent_at:
+        sent_at_dt = parse_datetime(sent_at)
+        if sent_at_dt is None:
+            return JsonResponse({"error": "invalid sent_at"}, status=400)
+
+    author_discord_id = data.get("author_discord_id")
+    if author_discord_id is not None:
+        try:
+            author_discord_id = int(author_discord_id)
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "invalid author_discord_id"}, status=400)
+
+    defaults = {
+        "ticket": ticket,
+        "author_discord_id": author_discord_id,
+        "author_name": author_name,
+        "content": content,
+        "attachments": attachments,
+        "is_bot": is_bot,
+        "sent_at": sent_at_dt,
+    }
+
+    message = _upsert_ticket_message(discord_message_id, defaults)
+
+    # Populate the per-message search vector (content + author_name).
+    TicketMessage.objects.filter(pk=message.pk).update(
+        search_vector=SearchVector("content", "author_name", config="english")
+    )
+
+    # Advance the reconnect watermark without bumping version (QuerySet.update).
+    LarpManagerTicket.objects.filter(pk=ticket.pk).update(
+        last_synced_message_id=Greatest(
+            Coalesce(F("last_synced_message_id"), Value(0)),
+            Value(discord_message_id),
+        )
+    )
+
+    return JsonResponse({"message": message_to_dict(message)})
