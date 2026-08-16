@@ -331,6 +331,15 @@ class PublisherApiKey(BaseModel):
 
     usage_count = models.PositiveIntegerField(default=0)
 
+    scopes = models.JSONField(default=list, blank=True)
+
+    association = models.ForeignKey(
+        "larpmanager.Association",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+
     def save(self, *args: Any, **kwargs: Any) -> None:
         """Generate a secure random key if one doesn't exist, then save the instance."""
         if not self.key:

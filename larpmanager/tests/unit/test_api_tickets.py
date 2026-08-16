@@ -21,7 +21,8 @@
 
 import json
 
-from django.test import Client
+from django.core.cache import cache
+from django.test import Client, override_settings
 
 from larpmanager.models.base import PublisherApiKey
 from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus
@@ -34,11 +35,13 @@ class TestTicketAPI(BaseTestCase):
     def setUp(self):
         """Set up test fixtures."""
         super().setUp()
+        cache.clear()
         self.client = Client()
         self.api_key = PublisherApiKey.objects.create(
             name="Test Key",
             key="test-api-key-12345",
             active=True,
+            scopes=["tickets:read", "tickets:write"],
         )
         self.headers = {"HTTP_X_API_KEY": "test-api-key-12345"}
 
@@ -408,3 +411,247 @@ class TestTicketAPI(BaseTestCase):
         data = response.json()
         self.assertIn("associations", data)
         self.assertGreater(len(data["associations"]), 0)
+
+    @override_settings(DISCORD_BOT_API_KEYS=["rate-limit-test-key"])
+    def test_429_retry_after(self):
+        """Test that exceeding the rate limit returns 429 with Retry-After."""
+        association = self.get_association()
+        headers = {"HTTP_X_API_KEY": "rate-limit-test-key"}
+        for index in range(5):
+            response = self.client.post(
+                "/api/v1/tickets/",
+                data=json.dumps({
+                    "association_uuid": str(association.uuid),
+                    "discord_creator_id": 424242,
+                    "discord_channel_id": 7000 + index,
+                }),
+                content_type="application/json",
+                **headers,
+            )
+            self.assertEqual(response.status_code, 201)
+
+        response = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({
+                "association_uuid": str(association.uuid),
+                "discord_creator_id": 424242,
+                "discord_channel_id": 7999,
+            }),
+            content_type="application/json",
+            **headers,
+        )
+
+        self.assertEqual(response.status_code, 429)
+        data = response.json()
+        self.assertEqual(data["error"], "rate limited")
+        self.assertGreaterEqual(data["retry_after"], 1)
+        self.assertIn("Retry-After", response.headers)
+
+    def test_401_before_429(self):
+        """Test that unauthenticated requests return 401 even when rate limited."""
+        for _attempt in range(6):
+            response = self.client.post(
+                "/api/v1/tickets/",
+                data=json.dumps({}),
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 401)
+
+    def test_non_numeric_400(self):
+        """Test that a non-numeric list filter returns 400."""
+        self.create_larpmanager_ticket(discord_creator_id=12345, discord_channel_id=111)
+
+        response = self.client.get(
+            "/api/v1/tickets/?discord_creator_id=abc",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid discord_creator_id")
+
+    def test_malformed_close_400_no_mutation(self):
+        """Test that malformed JSON on close returns 400 without closing."""
+        ticket = self.create_larpmanager_ticket(status=TicketStatus.OPEN, discord_channel_id=123)
+
+        response = self.client.post(
+            f"/api/v1/tickets/{ticket.uuid}/close/",
+            data="{invalid json",
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+        self.assertIsNone(ticket.closed_at)
+
+    def test_transcript_in_patch_400(self):
+        """Test that PATCH with transcript returns 400."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=123)
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"transcript": "should not be writable"}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_cap_enforcement(self):
+        """Test that creating a 6th open ticket for a creator returns 400."""
+        association = self.get_association()
+        for index in range(5):
+            self.create_larpmanager_ticket(
+                discord_creator_id=555000,
+                discord_channel_id=2000 + index,
+            )
+
+        response = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({
+                "association_uuid": str(association.uuid),
+                "discord_creator_id": 555000,
+                "discord_channel_id": 3000,
+            }),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertEqual(data["error"], "ticket cap exceeded")
+        self.assertEqual(data["max_open_tickets"], 5)
+
+    @override_settings(DISCORD_BOT_API_KEYS=["pii-bot-key"])
+    def test_pii_gating(self):
+        """Test that ticket email is exposed only to the bot key or members:read scope."""
+        ticket = self.create_larpmanager_ticket(
+            discord_channel_id=111,
+            email="requester@example.com",
+        )
+
+        bot_response = self.client.get(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            HTTP_X_API_KEY="pii-bot-key",
+        )
+        self.assertEqual(bot_response.status_code, 200)
+        self.assertEqual(bot_response.json()["ticket"]["email"], "requester@example.com")
+
+        publisher_response = self.client.get(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            **self.headers,
+        )
+        self.assertEqual(publisher_response.status_code, 200)
+        self.assertNotIn("email", publisher_response.json()["ticket"])
+
+        # Positive case: a publisher key with members:read scope does get the email.
+        PublisherApiKey.objects.create(
+            name="Members Read Key",
+            key="members-read-key",
+            active=True,
+            scopes=["tickets:read", "members:read"],
+        )
+        members_read_response = self.client.get(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            HTTP_X_API_KEY="members-read-key",
+        )
+        self.assertEqual(members_read_response.status_code, 200)
+        self.assertEqual(members_read_response.json()["ticket"]["email"], "requester@example.com")
+
+    def test_scope_enforcement(self):
+        """Test that a read-only key can GET but not PATCH or DELETE."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=123)
+        PublisherApiKey.objects.create(
+            name="Read Only",
+            key="read-only-key",
+            active=True,
+            scopes=["tickets:read"],
+        )
+        headers = {"HTTP_X_API_KEY": "read-only-key"}
+
+        response = self.client.get(f"/api/v1/tickets/{ticket.uuid}/", **headers)
+        self.assertEqual(response.status_code, 200)
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"status": "working"}),
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.delete(f"/api/v1/tickets/{ticket.uuid}/", **headers)
+        self.assertEqual(response.status_code, 403)
+
+    @override_settings(DISCORD_TICKET_API_ALLOW_PUBLISHER_FALLBACK=False)
+    def test_fallback_deprecation_flag(self):
+        """Test that a legacy scope-less publisher key is rejected when the fallback is off."""
+        PublisherApiKey.objects.create(
+            name="Legacy Key",
+            key="legacy-key",
+            active=True,
+        )
+
+        response = self.client.get("/api/v1/tickets/", HTTP_X_API_KEY="legacy-key")
+        self.assertEqual(response.status_code, 401)
+
+    def test_association_scope_isolation(self):
+        """Test that an association-scoped key cannot see another association's ticket."""
+        assoc_a = self.get_association()
+        assoc_b = self.create_association(name="Other Association", slug="other-association")
+        ticket_a = self.create_larpmanager_ticket(association=assoc_a, discord_channel_id=111)
+        ticket_b = self.create_larpmanager_ticket(association=assoc_b, discord_channel_id=222)
+
+        PublisherApiKey.objects.create(
+            name="Scoped Key",
+            key="scoped-key",
+            active=True,
+            scopes=["tickets:read"],
+            association=assoc_a,
+        )
+        headers = {"HTTP_X_API_KEY": "scoped-key"}
+
+        response = self.client.get(f"/api/v1/tickets/{ticket_a.uuid}/", **headers)
+        self.assertEqual(response.status_code, 200)
+
+        response = self.client.get(f"/api/v1/tickets/{ticket_b.uuid}/", **headers)
+        self.assertEqual(response.status_code, 404)
+
+    def test_create_duplicate_channel_id(self):
+        """Test that POST with a duplicate discord_channel_id returns the existing ticket."""
+        association = self.get_association()
+        existing = self.create_larpmanager_ticket(discord_channel_id=987654321, association=association)
+
+        response = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({
+                "association_uuid": str(association.uuid),
+                "discord_creator_id": 123456789,
+                "discord_channel_id": 987654321,
+                "subject": "Duplicate",
+            }),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ticket"]["uuid"], str(existing.uuid))
+
+    def test_non_uuid_slug_404(self):
+        """Test that a non-UUID slug returns 404 rather than 500."""
+        response = self.client.get("/api/v1/tickets/not-a-uuid/", **self.headers)
+        self.assertEqual(response.status_code, 404)
+
+    def test_audit_log_presence(self):
+        """Test that every ticket API call records an audit log entry."""
+        from larpmanager.models.miscellanea import Log
+
+        ticket = self.create_larpmanager_ticket(discord_channel_id=123)
+        before = Log.objects.filter(cls="PublisherAPI").count()
+
+        response = self.client.get(f"/api/v1/tickets/{ticket.uuid}/", **self.headers)
+        self.assertEqual(response.status_code, 200)
+
+        after = Log.objects.filter(cls="PublisherAPI").count()
+        self.assertGreater(after, before)

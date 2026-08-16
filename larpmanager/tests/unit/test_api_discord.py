@@ -40,6 +40,7 @@ class TestDiscordAPI(BaseTestCase):
             name="Test Key",
             key="test-api-key-12345",
             active=True,
+            scopes=["tickets:write"],
         )
         self.headers = {"HTTP_X_API_KEY": "test-api-key-12345"}
 
@@ -190,12 +191,12 @@ class TestDiscordAPI(BaseTestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_validate_bot_api_key_with_param(self):
-        """Test that ?api_key= param validates correctly."""
+        """Test that ?api_key= query-string auth is ignored (header-only)."""
         response = self.client.get(
             "/api/v1/discord/member/123456789/?api_key=test-api-key-12345",
         )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 401)
 
     def test_validate_bot_api_key_invalid(self):
         """Test that invalid key returns 401."""
@@ -205,3 +206,20 @@ class TestDiscordAPI(BaseTestCase):
         )
 
         self.assertEqual(response.status_code, 401)
+
+    def test_unlink_requires_write_scope(self):
+        """Test that a read-only key cannot unlink a Discord account."""
+        self.create_discord_linked_member(discord_id=123456789)
+        PublisherApiKey.objects.create(
+            name="Read Only Key",
+            key="read-only-discord-key",
+            active=True,
+            scopes=["tickets:read"],
+        )
+
+        response = self.client.get(
+            "/api/v1/discord/unlink/?discord_id=123456789",
+            HTTP_X_API_KEY="read-only-discord-key",
+        )
+
+        self.assertEqual(response.status_code, 403)

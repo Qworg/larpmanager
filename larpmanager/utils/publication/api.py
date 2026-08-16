@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.core.exceptions import ObjectDoesNotExist
 from django.http import HttpRequest, JsonResponse
 from django.utils import timezone
@@ -47,7 +48,13 @@ def get_client_ip(request: HttpRequest) -> str:
     return x_forwarded_for_header.split(",")[0] if x_forwarded_for_header else request.META.get("REMOTE_ADDR")
 
 
-def log_api_access(api_key: PublisherApiKey, request: HttpRequest, response_status: int, events_count: int = 0) -> None:
+def log_api_access(
+    api_key: PublisherApiKey | None,
+    request: HttpRequest,
+    response_status: int,
+    events_count: int = 0,
+    action: str = "",
+) -> None:
     """Log API access details to the system log and update API key usage statistics.
 
     Creates a log entry with comprehensive API request metadata including IP address,
@@ -56,10 +63,12 @@ def log_api_access(api_key: PublisherApiKey, request: HttpRequest, response_stat
     error does not propagate to avoid breaking the API response.
 
     Args:
-        api_key: The PublisherApiKey instance used for this API request
+        api_key: The PublisherApiKey instance used for this API request, or None
+            for bot-key or failed-auth attempts.
         request: The HTTP request object containing client metadata
         response_status: HTTP response status code (e.g., 200, 404, 500)
         events_count: Number of events returned in the API response (default: 0)
+        action: Short label describing the endpoint action (default: empty)
 
     Returns:
         None. Errors are logged and admins are notified, but exceptions are suppressed.
@@ -68,15 +77,25 @@ def log_api_access(api_key: PublisherApiKey, request: HttpRequest, response_stat
     try:
         # Get or create a system member for API logging
         # This ensures all API logs are associated with a consistent system user
-        system_member, _created = Member.objects.get_or_create(
+        system_user, _created_user = User.objects.get_or_create(
             username="api_system",
             defaults={"email": "api@larpmanager.com", "first_name": "API", "last_name": "System"},
+        )
+        system_member, _created_member = Member.objects.get_or_create(
+            user=system_user,
+            defaults={
+                "email": system_user.email or "api@larpmanager.com",
+                "search": "",
+                "name": "API",
+                "surname": "System",
+            },
         )
 
         # Build comprehensive log data dictionary
         log_data = {
-            "api_key_id": api_key.id,
-            "api_key_name": api_key.name,
+            "api_key_id": api_key.id if api_key else None,
+            "api_key_name": api_key.name if api_key else "bot",
+            "action": action,
             "ip_address": get_client_ip(request),
             "user_agent": request.META.get("HTTP_USER_AGENT", ""),
             "referer": request.META.get("HTTP_REFERER", ""),
@@ -86,12 +105,18 @@ def log_api_access(api_key: PublisherApiKey, request: HttpRequest, response_stat
         }
 
         # Create log entry in database
-        Log.objects.create(member=system_member, eid=api_key.id, cls="PublisherAPI", dct=json.dumps(log_data), dl=False)
+        Log.objects.create(
+            member=system_member,
+            eid=api_key.id if api_key else 0,
+            cls="PublisherAPI",
+            dct=json.dumps(log_data),
+        )
 
         # Update API key usage statistics
-        api_key.last_used = timezone.now()
-        api_key.usage_count += 1
-        api_key.save()
+        if api_key is not None:
+            api_key.last_used = timezone.now()
+            api_key.usage_count += 1
+            api_key.save()
 
     except Exception as err:  # noqa: BLE001 - Logging must never disrupt API functionality
         # Log errors to admin notification system but don't break API functionality
