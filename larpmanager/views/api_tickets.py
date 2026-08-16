@@ -33,11 +33,11 @@ import logging
 from typing import Any
 
 from django.conf import settings
-from django.contrib.postgres.search import SearchVector
+from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import F, Value
-from django.db.models.functions import Coalesce, Greatest
+from django.db.models import Case, F, Prefetch, Q, Subquery, TextField, Value, When
+from django.db.models.functions import Cast, Coalesce, Concat, Greatest
 from django.http import HttpRequest, JsonResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -48,7 +48,7 @@ from django_ratelimit.core import get_usage
 from django_ratelimit.decorators import ratelimit
 
 from larpmanager.models.association import Association
-from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus
+from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus, render_transcript_line
 from larpmanager.models.ticket_event import TicketEvent
 from larpmanager.models.ticket_message import TicketMessage
 from larpmanager.utils.publication.api import log_api_access
@@ -163,8 +163,11 @@ def message_to_dict(message: TicketMessage) -> dict[str, Any]:
     }
 
 
-def _upsert_ticket_message(discord_message_id: int, defaults: dict[str, Any]) -> TicketMessage:
-    """Atomically upsert a TicketMessage on discord_message_id (conflict = update)."""
+def _upsert_ticket_message(discord_message_id: int, defaults: dict[str, Any]) -> tuple[TicketMessage, bool]:
+    """Atomically upsert a TicketMessage on discord_message_id (conflict = update).
+
+    Returns the persisted message and whether it was newly created.
+    """
     try:
         with transaction.atomic():
             message, created = TicketMessage.objects.get_or_create(
@@ -182,7 +185,8 @@ def _upsert_ticket_message(discord_message_id: int, defaults: dict[str, Any]) ->
             for field, value in defaults.items():
                 setattr(message, field, value)
             message.save()
-    return message
+        created = False
+    return message, created
 
 
 def ticket_to_dict(ticket: LarpManagerTicket, auth: TicketAuth | None = None) -> dict[str, Any]:
@@ -220,7 +224,7 @@ def ticket_to_dict(ticket: LarpManagerTicket, auth: TicketAuth | None = None) ->
         }
         if ticket.member
         else None,
-        "transcript": ticket.transcript,
+        "transcript": ticket.build_transcript(),
         "created_at": ticket.created.isoformat() if ticket.created else None,
         "updated_at": ticket.updated.isoformat() if ticket.updated else None,
         "closed_at": ticket.closed_at.isoformat() if ticket.closed_at else None,
@@ -278,6 +282,7 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
         - status: Filter by status (open, working, done)
         - association_uuid: Filter by association
         - discord_creator_id: Filter by creator's Discord ID
+        - q: Full-text search over ticket fields and message contents
         - limit: Max results (default 50)
         - offset: Pagination offset (default 0)
 
@@ -304,6 +309,9 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
         queryset = _scoped_queryset(
             LarpManagerTicket.objects.filter(deleted__isnull=True)
             .select_related("association", "member")
+            .prefetch_related(
+                Prefetch("messages", queryset=TicketMessage.objects.order_by(Coalesce("sent_at", "created"), "id"))
+            )
             .order_by("-created"),
             auth,
         )
@@ -335,6 +343,16 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
         discord_only = request.GET.get("discord_only", "false").lower() == "true"
         if discord_only:
             queryset = queryset.filter(discord_channel_id__isnull=False)
+
+        query = request.GET.get("q", "").strip()
+        if query:
+            search_query = SearchQuery(query, config="english")
+            message_ticket_ids = TicketMessage.objects.filter(search_vector=search_query).values("ticket_id")
+            queryset = (
+                queryset.annotate(rank=Coalesce(SearchRank(F("search_vector"), search_query), Value(0.0)))
+                .filter(Q(search_vector=search_query) | Q(id__in=Subquery(message_ticket_ids)))
+                .order_by("-rank", "-created")
+            )
 
         try:
             limit = min(int(request.GET.get("limit", 50)), 100)
@@ -491,7 +509,11 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
 
     if request.method == "GET":
         queryset = _scoped_queryset(
-            LarpManagerTicket.objects.filter(deleted__isnull=True).select_related("association", "member"),
+            LarpManagerTicket.objects.filter(deleted__isnull=True)
+            .select_related("association", "member")
+            .prefetch_related(
+                Prefetch("messages", queryset=TicketMessage.objects.order_by(Coalesce("sent_at", "created"), "id"))
+            ),
             auth,
         )
         try:
@@ -668,8 +690,12 @@ def ticket_close(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
     else:
         data = {}
 
-    # Update transcript if provided
-    if "transcript" in data:
+    # Persist a close-time transcript only when the ticket has zero TicketMessage
+    # rows. The scrape is backfill-only: once per-message rows exist, they are
+    # authoritative and must never be overwritten (W2 close precedence). The
+    # length check is inside the guard so a legacy bot's oversized transcript on
+    # an already-row'd ticket is ignored rather than rejected (400).
+    if "transcript" in data and not TicketMessage.objects.filter(ticket=ticket).exists():
         error = _length_error("transcript", data["transcript"], MAX_TRANSCRIPT_LENGTH)
         if error is not None:
             return error
@@ -943,6 +969,49 @@ def ticket_events_history(request: HttpRequest, ticket_uuid: str) -> JsonRespons
     return JsonResponse({"events": [event_to_dict(event) for event in events]})
 
 
+@require_GET
+@ratelimit(key="ip", rate="120/m", method="GET", block=False)
+@ratelimit(key="header:x-api-key", rate="120/m", method="GET", block=False)
+def ticket_transcript(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
+    """Return the rendered transcript plus per-message rows for a ticket.
+
+    Bot keys and ``tickets:read`` staff keys may access it (mirrors
+    ``ticket_events_history``). Messages are returned oldest first; a NULL
+    ``sent_at`` sorts by ``created`` (Coalesce).
+
+    """
+    auth, error_response = validate_ticket_api_key(request, required_scope="tickets:read")
+    if error_response is not None:
+        return error_response
+    if getattr(request, "limited", False):
+        return _rate_limited_response(request, ticket_transcript, "120/m")
+
+    # History-style lookup so the transcript remains available for soft-deleted
+    # tickets, matching ticket_events_history.
+    queryset = _scoped_queryset(LarpManagerTicket.all_objects.all(), auth)
+    try:
+        ticket = queryset.get(uuid=ticket_uuid)
+    except (LarpManagerTicket.DoesNotExist, ValidationError):
+        return JsonResponse({"error": "Ticket not found"}, status=404)
+
+    messages = TicketMessage.objects.filter(ticket=ticket).order_by(Coalesce("sent_at", "created"), "id")
+    return JsonResponse(
+        {
+            "transcript": ticket.build_transcript(),
+            "messages": [
+                {
+                    "discord_message_id": message.discord_message_id,
+                    "author_name": message.author_name,
+                    "content": message.content,
+                    "sent_at": message.sent_at.isoformat() if message.sent_at else None,
+                    "is_bot": message.is_bot,
+                }
+                for message in messages
+            ],
+        }
+    )
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @ratelimit(key="ip", rate="120/m", method="POST", block=False)
@@ -951,8 +1020,10 @@ def ticket_outbound(request: HttpRequest) -> JsonResponse:  # noqa: C901, PLR091
     """Persist a Discord-originated message (idempotent upsert on discord_message_id).
 
     Validation: discord_channel_id must resolve to a live ticket (404); content over
-    2000 chars or more than 10 attachments are rejected (400). The upsert is atomic
-    on discord_message_id, so a conflicting message is a success (200).
+    2000 chars or more than 10 attachments are rejected (400). ``deleted: true``
+    soft-deletes the matching message and acks (200) without content validation or
+    the search-vector/watermark/transcript steps. The upsert is atomic on
+    discord_message_id, so a conflicting message is a success (200).
 
     """
     auth, error_response = validate_ticket_api_key(request)
@@ -975,6 +1046,21 @@ def ticket_outbound(request: HttpRequest) -> JsonResponse:  # noqa: C901, PLR091
     except (ValueError, TypeError):
         return JsonResponse({"error": "discord_channel_id and discord_message_id must be integers"}, status=400)
 
+    deleted = data.get("deleted", False)
+    if not isinstance(deleted, bool):
+        return JsonResponse({"error": "deleted must be a boolean"}, status=400)
+
+    ticket = LarpManagerTicket.objects.filter(discord_channel_id=discord_channel_id, deleted__isnull=True).first()
+    if ticket is None:
+        return JsonResponse({"error": "Ticket not found"}, status=404)
+
+    if deleted:
+        # Soft-delete the matching message (SafeDelete) and ack. The 404 check
+        # above still applies; content/author validation and the snapshot,
+        # search-vector, and watermark steps are intentionally skipped here.
+        TicketMessage.objects.filter(ticket=ticket, discord_message_id=discord_message_id).delete()
+        return JsonResponse({"deleted": True})
+
     content = data.get("content", "")
     if not isinstance(content, str) or len(content) > MAX_MESSAGE_CONTENT_LENGTH:
         return JsonResponse({"error": "content too long"}, status=400)
@@ -990,10 +1076,6 @@ def ticket_outbound(request: HttpRequest) -> JsonResponse:  # noqa: C901, PLR091
     is_bot = _parse_bool(data.get("is_bot", False))
     if is_bot is None:
         return JsonResponse({"error": "is_bot must be a boolean"}, status=400)
-
-    ticket = LarpManagerTicket.objects.filter(discord_channel_id=discord_channel_id, deleted__isnull=True).first()
-    if ticket is None:
-        return JsonResponse({"error": "Ticket not found"}, status=404)
 
     sent_at_dt = None
     sent_at = data.get("sent_at")
@@ -1019,12 +1101,33 @@ def ticket_outbound(request: HttpRequest) -> JsonResponse:  # noqa: C901, PLR091
         "sent_at": sent_at_dt,
     }
 
-    message = _upsert_ticket_message(discord_message_id, defaults)
+    message, created = _upsert_ticket_message(discord_message_id, defaults)
 
     # Populate the per-message search vector (content + author_name).
     TicketMessage.objects.filter(pk=message.pk).update(
-        search_vector=SearchVector("content", "author_name", config="english")
+        search_vector=SearchVector(
+            Cast("content", TextField()),
+            Cast("author_name", TextField()),
+            config="english",
+        )
     )
+
+    if created:
+        # Append the rendered line to the transcript snapshot atomically. F()
+        # reads the committed value under the row lock, so concurrent appends
+        # never lose a line, and version is not bumped (D8). Case/When avoids
+        # the leading newline the first append would otherwise prepend to a NULL
+        # (or empty) transcript snapshot.
+        line = render_transcript_line(message)
+        LarpManagerTicket.objects.filter(pk=ticket.pk).update(
+            transcript=Case(
+                When(
+                    Q(transcript__isnull=True) | Q(transcript=""),
+                    then=Value(line, output_field=TextField()),
+                ),
+                default=Concat(F("transcript"), Value("\n" + line), output_field=TextField()),
+            ),
+        )
 
     # Advance the reconnect watermark without bumping version (QuerySet.update).
     LarpManagerTicket.objects.filter(pk=ticket.pk).update(

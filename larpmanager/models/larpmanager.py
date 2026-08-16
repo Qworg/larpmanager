@@ -24,6 +24,7 @@ from colorfield.fields import ColorField
 from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVectorField
 from django.db import models
+from django.db.models.functions import Coalesce
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from imagekit.models import ImageSpecField
@@ -434,6 +435,12 @@ class LarpManagerText(BaseModel):
         return f"{self.name}: {self.value[:50]}..."
 
 
+def render_transcript_line(message: Any) -> str:
+    """Render a single TicketMessage as a ``[timestamp] username content`` line."""
+    timestamp = message.sent_at or message.created
+    return f"[{timestamp:%Y-%m-%d %H:%M:%S}] {message.author_name} {message.content}"
+
+
 class LarpManagerTicket(UuidMixin, BaseModel):
     """Model for managing support tickets and requests.
 
@@ -546,6 +553,26 @@ class LarpManagerTicket(UuidMixin, BaseModel):
         if self.screenshot_reduced:
             # noinspection PyUnresolvedReferences
             return show_thumb(100, self.screenshot_reduced.url)
+        return ""
+
+    def build_transcript(self) -> str:
+        """Render the transcript from authoritative TicketMessage rows (oldest first).
+
+        NULL ``sent_at`` rows sort by ``created`` (Coalesce), then ``id``. Legacy
+        tickets that predate per-message persistence (no reconnect watermark) fall
+        back to the stored ``transcript`` snapshot. A ticket that HAS had outbound
+        messages but currently has zero live rows returns an empty string so a
+        soft-deleted transcript is never resurrected from the snapshot.
+        """
+        messages = self.messages.all()
+        if not isinstance(messages, list):
+            # Non-prefetched path (single-ticket views): order in the database.
+            messages = messages.order_by(Coalesce("sent_at", "created"), "id")
+        messages = list(messages)
+        if messages:
+            return "\n".join(render_transcript_line(message) for message in messages)
+        if self.last_synced_message_id is None:
+            return self.transcript or ""
         return ""
 
     def __str__(self) -> str:

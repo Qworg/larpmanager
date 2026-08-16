@@ -21,6 +21,7 @@
 
 import json
 import threading
+from datetime import UTC, datetime
 
 import pytest
 from django.core.cache import cache
@@ -150,6 +151,41 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(data["total"], 5)
         self.assertEqual(data["limit"], 2)
         self.assertEqual(data["offset"], 0)
+
+    def test_build_transcript_format(self):
+        """build_transcript renders [timestamp] username content rows oldest-first."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=123987)
+        TicketMessage.objects.create(
+            ticket=ticket,
+            discord_message_id=1001,
+            author_name="Alice",
+            content="first message",
+            sent_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+        )
+        TicketMessage.objects.create(
+            ticket=ticket,
+            discord_message_id=1002,
+            author_name="Bob",
+            content="second message",
+            sent_at=datetime(2026, 1, 1, 12, 1, 0, tzinfo=UTC),
+        )
+
+        transcript = ticket.build_transcript()
+
+        self.assertEqual(
+            transcript,
+            "[2026-01-01 12:00:00] Alice first message\n[2026-01-01 12:01:00] Bob second message",
+        )
+
+    def test_title_search(self):
+        """?q= matches a word in the ticket title via the ticket search vector."""
+        ticket = self.create_larpmanager_ticket(subject="Zephyr Billing Question", discord_channel_id=321321)
+
+        response = self.client.get("/api/v1/tickets/?q=zephyr", **self.headers)
+
+        self.assertEqual(response.status_code, 200)
+        uuids = [ticket_data["uuid"] for ticket_data in response.json()["tickets"]]
+        self.assertEqual(uuids, [str(ticket.uuid)])
 
     def test_create_ticket_success(self):
         """Test that POST creates ticket with all fields."""
@@ -827,6 +863,133 @@ class TestTicketEventsAPI(BaseTestCase):
         self.assertEqual(ticket.last_synced_message_id, 123456789)
         self.assertEqual(ticket.version, 0)
 
+    def test_snapshot_append_atomic(self):
+        """Two outbound messages append two rendered lines; an edit does not duplicate."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=555)
+        base = {
+            "discord_channel_id": 555,
+            "discord_message_id": 1001,
+            "author_name": "Alice",
+            "content": "first message",
+            "sent_at": "2026-01-01T00:00:00+00:00",
+            "attachments": [],
+            "is_bot": False,
+        }
+        response = self.client.post(
+            "/api/v1/tickets/outbound/", data=json.dumps(base), content_type="application/json", **self.bot_headers
+        )
+        self.assertEqual(response.status_code, 200)
+
+        second = dict(
+            base,
+            discord_message_id=1002,
+            author_name="Bob",
+            content="second message",
+            sent_at="2026-01-01T00:01:00+00:00",
+        )
+        response = self.client.post(
+            "/api/v1/tickets/outbound/", data=json.dumps(second), content_type="application/json", **self.bot_headers
+        )
+        self.assertEqual(response.status_code, 200)
+
+        ticket.refresh_from_db()
+        self.assertIn("[2026-01-01 00:00:00] Alice first message", ticket.transcript)
+        self.assertIn("[2026-01-01 00:01:00] Bob second message", ticket.transcript)
+
+        # Re-posting the first message as an edit must not append a duplicate line.
+        edited = dict(base, content="first message edited")
+        response = self.client.post(
+            "/api/v1/tickets/outbound/", data=json.dumps(edited), content_type="application/json", **self.bot_headers
+        )
+        self.assertEqual(response.status_code, 200)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.transcript.count("Alice first message"), 1)
+        self.assertNotIn("first message edited", ticket.transcript)
+
+    def test_snapshot_does_not_bump_version(self):
+        """An outbound message append does not bump the optimistic-lock version."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=666)
+        self.assertEqual(ticket.version, 0)
+
+        response = self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({
+                "discord_channel_id": 666,
+                "discord_message_id": 2001,
+                "author_name": "Carol",
+                "content": "hello",
+                "sent_at": "2026-01-02T00:00:00+00:00",
+                "attachments": [],
+                "is_bot": False,
+            }),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.version, 0)
+        self.assertIsNotNone(ticket.transcript)
+
+    def test_message_search_open_ticket(self):
+        """?q= finds a word from a message in an OPEN ticket via message search_vector."""
+        ticket = self.create_larpmanager_ticket(
+            subject="Unrelated subject", discord_channel_id=777, status=TicketStatus.OPEN
+        )
+        response = self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({
+                "discord_channel_id": 777,
+                "discord_message_id": 3001,
+                "author_name": "Carol",
+                "content": "please check the xylophone inventory",
+                "sent_at": "2026-01-02T00:00:00+00:00",
+                "attachments": [],
+                "is_bot": False,
+            }),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+
+        response = self.client.get("/api/v1/tickets/?q=xylophone", **self.headers)
+        self.assertEqual(response.status_code, 200)
+        uuids = [ticket_data["uuid"] for ticket_data in response.json()["tickets"]]
+        self.assertIn(str(ticket.uuid), uuids)
+
+    def test_close_does_not_truncate_snapshot(self):
+        """Close ignores a transcript body when the ticket already has message rows."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=888, status=TicketStatus.OPEN)
+        self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({
+                "discord_channel_id": 888,
+                "discord_message_id": 4001,
+                "author_name": "Dave",
+                "content": "keep me",
+                "sent_at": "2026-01-03T00:00:00+00:00",
+                "attachments": [],
+                "is_bot": False,
+            }),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        ticket.refresh_from_db()
+        before = ticket.transcript
+        self.assertIsNotNone(before)
+
+        response = self.client.post(
+            f"/api/v1/tickets/{ticket.uuid}/close/",
+            data=json.dumps({"transcript": "# TRUNCATED"}),
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(response.status_code, 200)
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.transcript, before)
+        self.assertNotIn("TRUNCATED", ticket.transcript)
+
     def test_event_source_split(self):
         """Test that the outbox excludes source=discord but history includes all sources."""
         ticket = self.create_larpmanager_ticket(discord_channel_id=333)
@@ -978,6 +1141,128 @@ class TestTicketEventsAPI(BaseTestCase):
             **self.headers,
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_delete_handler(self):
+        """A deleted:true outbound soft-deletes the message and acks (200)."""
+        self.create_larpmanager_ticket(discord_channel_id=910)
+        self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({
+                "discord_channel_id": 910,
+                "discord_message_id": 9001,
+                "author_name": "Alice",
+                "content": "to be deleted",
+                "attachments": [],
+                "is_bot": False,
+            }),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(TicketMessage.objects.filter(discord_message_id=9001).count(), 1)
+
+        response = self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({"discord_channel_id": 910, "discord_message_id": 9001, "deleted": True}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["deleted"])
+
+        # Soft-deleted: hidden from the default manager, present in all_objects.
+        self.assertFalse(TicketMessage.objects.filter(discord_message_id=9001).exists())
+        deleted_message = TicketMessage.all_objects.get(discord_message_id=9001)
+        self.assertIsNotNone(deleted_message.deleted)
+
+        # A non-bool deleted value is rejected before any lookup.
+        response = self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({"discord_channel_id": 910, "discord_message_id": 9002, "deleted": "true"}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 400)
+
+        # An unknown channel still 404s on the delete branch.
+        response = self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({"discord_channel_id": 999999999, "discord_message_id": 9003, "deleted": True}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_transcript_endpoint(self):
+        """GET /tickets/<uuid>/transcript/ returns transcript and rows oldest-first."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=920)
+        for message_id, author, content, sent_at, is_bot in [
+            (9101, "Alice", "first", "2026-01-01T00:00:00+00:00", False),
+            (9102, "Bob", "second", "2026-01-01T00:01:00+00:00", True),
+        ]:
+            response = self.client.post(
+                "/api/v1/tickets/outbound/",
+                data=json.dumps({
+                    "discord_channel_id": 920,
+                    "discord_message_id": message_id,
+                    "author_name": author,
+                    "content": content,
+                    "sent_at": sent_at,
+                    "attachments": [],
+                    "is_bot": is_bot,
+                }),
+                content_type="application/json",
+                **self.bot_headers,
+            )
+            self.assertEqual(response.status_code, 200)
+
+        response = self.client.get(f"/api/v1/tickets/{ticket.uuid}/transcript/", **self.headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("[2026-01-01 00:00:00] Alice first", data["transcript"])
+        self.assertIn("[2026-01-01 00:01:00] Bob second", data["transcript"])
+        self.assertEqual([message["discord_message_id"] for message in data["messages"]], [9101, 9102])
+        self.assertEqual(data["messages"][0]["author_name"], "Alice")
+        self.assertFalse(data["messages"][0]["is_bot"])
+        self.assertTrue(data["messages"][1]["is_bot"])
+
+        # Bot keys are also allowed.
+        bot_response = self.client.get(f"/api/v1/tickets/{ticket.uuid}/transcript/", **self.bot_headers)
+        self.assertEqual(bot_response.status_code, 200)
+
+    def test_no_fallback_after_delete(self):
+        """A ticket that had messages but now has zero live rows returns '' not the snapshot."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=930, transcript="legacy snapshot")
+        self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({
+                "discord_channel_id": 930,
+                "discord_message_id": 9201,
+                "author_name": "Alice",
+                "content": "will be deleted",
+                "attachments": [],
+                "is_bot": False,
+            }),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+
+        # The watermark is now set; deleting the only message leaves zero live rows.
+        self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({"discord_channel_id": 930, "discord_message_id": 9201, "deleted": True}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.last_synced_message_id)
+        self.assertEqual(ticket.build_transcript(), "")
+
+    def test_legacy_transcript_fallback(self):
+        """A legacy ticket with no watermark still falls back to the stored snapshot."""
+        ticket = self.create_larpmanager_ticket(transcript="legacy snapshot")
+        self.assertIsNone(ticket.last_synced_message_id)
+        self.assertEqual(ticket.build_transcript(), "legacy snapshot")
 
 
 @override_settings(DISCORD_BOT_API_KEYS=["test-bot-key"])

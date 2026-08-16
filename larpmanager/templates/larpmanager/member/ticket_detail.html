@@ -61,11 +61,11 @@
                         </td>
                     </tr>
                 {% endif %}
-                {% if ticket.transcript %}
+                {% if ticket.build_transcript %}
                     <tr>
                         <th>{% trans "Transcript" %}</th>
                         <td>
-                            <div class="ticket-transcript">{{ ticket.transcript|linebreaksbr }}</div>
+                            <div class="ticket-transcript">{{ ticket.build_transcript|linebreaksbr }}</div>
                         </td>
                     </tr>
                 {% elif ticket.discord_channel_id %}

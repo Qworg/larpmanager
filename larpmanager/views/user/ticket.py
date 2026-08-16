@@ -25,10 +25,13 @@ from typing import Any
 from django.conf import settings as conf_settings
 from django.contrib.auth.decorators import login_required
 from django.contrib.postgres.search import SearchQuery, SearchRank
+from django.db.models import F, Q, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.http import Http404, HttpRequest
 from django.shortcuts import get_object_or_404, render
 
 from larpmanager.models.larpmanager import LarpManagerTicket
+from larpmanager.models.ticket_message import TicketMessage
 from larpmanager.utils.core.base import get_context
 
 
@@ -59,9 +62,10 @@ def tickets(request: HttpRequest) -> Any:
     context["query"] = query
     if query:
         search_query = SearchQuery(query, config="english")
+        message_ticket_ids = TicketMessage.objects.filter(search_vector=search_query).values("ticket_id")
         queryset = (
-            queryset.annotate(rank=SearchRank("search_vector", search_query))
-            .filter(search_vector=search_query)
+            queryset.annotate(rank=Coalesce(SearchRank(F("search_vector"), search_query), Value(0.0)))
+            .filter(Q(search_vector=search_query) | Q(id__in=Subquery(message_ticket_ids)))
             .order_by("-rank", "-created")
         )
     else:

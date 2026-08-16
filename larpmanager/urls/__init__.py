@@ -45,6 +45,7 @@ from larpmanager.views.api_tickets import (
     ticket_events_outbox,
     ticket_outbound,
     ticket_reopen,
+    ticket_transcript,
     tickets_list_create,
 )
 from larpmanager.views.user import event as views_ue
@@ -137,6 +138,11 @@ urlpatterns = (
             "api/v1/tickets/<slug:ticket_uuid>/events/",
             ticket_events_history,
             name="api_ticket_events_history",
+        ),
+        path(
+            "api/v1/tickets/<slug:ticket_uuid>/transcript/",
+            ticket_transcript,
+            name="api_ticket_transcript",
         ),
         path(
             "api/v1/tickets/<slug:ticket_uuid>/channel/",
