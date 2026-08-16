@@ -729,6 +729,27 @@ class TestTicketAPI(BaseTestCase):
         after = Log.objects.filter(cls="PublisherAPI").count()
         self.assertGreater(after, before)
 
+    def test_unauthorized_web_get_logs_denial(self):
+        """A non-admin member GETting another member's ticket 404s and logs access_denied."""
+        from django.contrib.auth import get_user_model
+
+        user_model = get_user_model()
+        requester = user_model.objects.get(username="user@test.it")
+        owner = user_model.objects.get(username="player@test.it")
+        ticket = self.create_larpmanager_ticket(member=owner.member)
+
+        self.client.force_login(requester)
+        response = self.client.get(f"/tickets/{ticket.uuid}/")
+
+        self.assertEqual(response.status_code, 404)
+        event = TicketEvent.objects.get(ticket=ticket, event_type=TicketEvent.EventType.ACCESS_DENIED)
+        self.assertEqual(event.source, TicketEvent.Source.API)
+        self.assertEqual(event.actor_member, requester.member)
+        self.assertEqual(event.payload["path"], f"/tickets/{ticket.uuid}/")
+        self.assertIn("ip", event.payload)
+        self.assertIsNotNone(event.applied_at)
+        self.assertIsNotNone(event.acked_at)
+
 
 @override_settings(DISCORD_BOT_API_KEYS=["test-bot-key"])
 class TestTicketEventsAPI(BaseTestCase):
@@ -1010,6 +1031,32 @@ class TestTicketEventsAPI(BaseTestCase):
         self.assertEqual(response.status_code, 200)
         history_ids = [event["id"] for event in response.json()["events"]]
         self.assertEqual(set(history_ids), {api_event.id, discord_event.id})
+
+    def test_history_on_api_mutation(self):
+        """A PATCH status change emits a history event with actor and from/to status."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=334, assigned_staff_discord_id=424242)
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"status": "working"}),
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(response.status_code, 200)
+
+        response = self.client.get(f"/api/v1/tickets/{ticket.uuid}/events/", **self.headers)
+        self.assertEqual(response.status_code, 200)
+        status_events = [
+            event
+            for event in response.json()["events"]
+            if event["event_type"] == TicketEvent.EventType.STATUS_CHANGED
+        ]
+        self.assertEqual(len(status_events), 1)
+        event = status_events[0]
+        self.assertEqual(event["from_status"], TicketStatus.OPEN)
+        self.assertEqual(event["to_status"], TicketStatus.WORKING)
+        self.assertEqual(event["actor_discord_id"], 424242)
+        self.assertEqual(event["actor"], "424242")
 
     def test_version_bump_on_patch(self):
         """Test that a PATCH mutation bumps the optimistic-lock version."""

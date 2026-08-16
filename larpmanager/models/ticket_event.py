@@ -97,3 +97,11 @@ class TicketEvent(models.Model):
     def __str__(self) -> str:
         """Return a readable event summary."""
         return f"TicketEvent #{self.id} {self.event_type} ({self.source})"
+
+    def actor_display(self) -> str | None:
+        """Return a human-readable actor label (member name or discord id)."""
+        if self.actor_member_id:
+            return self.actor_member.display_member()
+        if self.actor_discord_id is not None:
+            return str(self.actor_discord_id)
+        return None

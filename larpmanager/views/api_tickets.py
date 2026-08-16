@@ -121,6 +121,15 @@ def _event_source(auth: TicketAuth | None) -> str:
     return "discord" if auth is not None and auth.is_bot_key else "api"
 
 
+def _actor_discord_id(ticket: LarpManagerTicket) -> int | None:
+    """Resolve the acting actor for key-authenticated mutations.
+
+    Key-based API auth carries no authenticated member, so the ticket's
+    responsible staff (``assigned_staff_discord_id``) is recorded as the actor.
+    """
+    return ticket.assigned_staff_discord_id
+
+
 def _require_bot_key(auth: TicketAuth | None) -> JsonResponse | None:
     """Return a 403 response unless the request authenticated with a bot key."""
     if auth is None or not auth.is_bot_key:
@@ -137,6 +146,7 @@ def event_to_dict(event: TicketEvent) -> dict[str, Any]:
         "source": event.source,
         "from_status": event.from_status,
         "to_status": event.to_status,
+        "actor": event.actor_display(),
         "actor_discord_id": event.actor_discord_id,
         "actor_member_uuid": str(event.actor_member.uuid) if event.actor_member else None,
         "payload": event.payload,
@@ -464,6 +474,7 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
                 TicketEvent.EventType.CREATED,
                 source=_event_source(auth),
                 actor_discord_id=discord_creator_id_int,
+                actor_member=member,
                 payload={
                     "ticket_uuid": str(ticket.uuid),
                     "subject": ticket.subject,
@@ -603,6 +614,7 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
                     source=source,
                     from_status=old_status,
                     to_status=new_status,
+                    actor_discord_id=_actor_discord_id(ticket),
                     payload={"to_status": new_status},
                 )
             if "priority" in data and new_priority != old_priority:
@@ -610,6 +622,7 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
                     ticket,
                     TicketEvent.EventType.PRIORITY_CHANGED,
                     source=source,
+                    actor_discord_id=_actor_discord_id(ticket),
                     payload={"to_priority": new_priority, "from_priority": old_priority},
                 )
             if "assigned_staff_discord_id" in data and assigned_staff != old_assigned_staff:
@@ -617,6 +630,7 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
                     ticket,
                     TicketEvent.EventType.ASSIGNED,
                     source=source,
+                    actor_discord_id=assigned_staff,
                     payload={"assigned_staff_discord_id": assigned_staff},
                 )
             if "subject" in data and data["subject"] != old_subject:
@@ -624,6 +638,7 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
                     ticket,
                     TicketEvent.EventType.CHANNEL_UPDATE,
                     source=source,
+                    actor_discord_id=_actor_discord_id(ticket),
                     payload={"subject": data["subject"]},
                 )
 
@@ -642,6 +657,7 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
             ticket,
             TicketEvent.EventType.DELETED,
             source=_event_source(auth),
+            actor_discord_id=_actor_discord_id(ticket),
             payload={},
         )
     logger.info("Deleted ticket %s via Discord API", ticket.uuid)
@@ -716,6 +732,7 @@ def ticket_close(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
             source=_event_source(auth),
             from_status=old_status,
             to_status=TicketStatus.DONE,
+            actor_discord_id=_actor_discord_id(ticket),
             payload={},
         )
 
@@ -774,6 +791,7 @@ def ticket_reopen(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
             source=_event_source(auth),
             from_status=old_status,
             to_status=TicketStatus.OPEN,
+            actor_discord_id=_actor_discord_id(ticket),
             payload={},
         )
 

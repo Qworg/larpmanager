@@ -853,6 +853,11 @@ form .plot {
   background-color: rgba(var(--pri-rgb), 0.08);
 }
 
+.ticket-history {
+  margin-top: 1.5em;
+  width: 100%;
+}
+
 .ticket-search {
   display: flex;
   gap: 0.5em;

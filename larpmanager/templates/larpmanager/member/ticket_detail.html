@@ -84,5 +84,34 @@
                 {% endif %}
             </tbody>
         </table>
+        {% if ticket_events %}
+            <h2>{% trans "History" %}</h2>
+            <table class="ticket-history">
+                <thead>
+                    <tr>
+                        <th>{% trans "When" %}</th>
+                        <th>{% trans "Actor" %}</th>
+                        <th>{% trans "Event" %}</th>
+                        <th>{% trans "Status" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for event in ticket_events %}
+                        <tr>
+                            <td>{{ event.created }}</td>
+                            <td>{{ event.actor_display|default_if_none:"-" }}</td>
+                            <td>{{ event.get_event_type_display }}</td>
+                            <td>
+                                {% if event.from_status or event.to_status %}
+                                    {{ event.from_status|default:"-" }} <i class="fa-solid fa-arrow-right"></i> {{ event.to_status|default:"-" }}
+                                {% else %}
+                                    -
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
     </div>
 {% endblock content %}

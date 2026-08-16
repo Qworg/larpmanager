@@ -28,11 +28,14 @@ from django.contrib.postgres.search import SearchQuery, SearchRank
 from django.db.models import F, Q, Subquery, Value
 from django.db.models.functions import Coalesce
 from django.http import Http404, HttpRequest
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import render
 
 from larpmanager.models.larpmanager import LarpManagerTicket
+from larpmanager.models.ticket_event import TicketEvent
 from larpmanager.models.ticket_message import TicketMessage
 from larpmanager.utils.core.base import get_context
+from larpmanager.utils.publication.api import get_client_ip
+from larpmanager.utils.ticket_events import emit_ticket_event
 
 
 @login_required
@@ -94,15 +97,26 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> Any:
     """
     context = get_context(request)
 
-    ticket = get_object_or_404(
-        LarpManagerTicket,
-        uuid=ticket_uuid,
-        association_id=context["association_id"],
+    ticket = (
+        LarpManagerTicket.objects.filter(uuid=ticket_uuid, association_id=context["association_id"])
+        .select_related("member")
+        .first()
     )
 
+    if ticket is None:
+        raise Http404
+
     if not context.get("is_admin") and ticket.member != context["member"]:
+        emit_ticket_event(
+            ticket,
+            TicketEvent.EventType.ACCESS_DENIED,
+            source=TicketEvent.Source.API,
+            actor_member=context.get("member"),
+            payload={"path": request.path, "ip": get_client_ip(request)},
+        )
         raise Http404
 
     context["ticket"] = ticket
+    context["ticket_events"] = ticket.events.select_related("actor_member").order_by("created", "id")
     context["discord_guild_id"] = getattr(conf_settings, "DISCORD_GUILD_ID", None)
     return render(request, "larpmanager/member/ticket_detail.html", context)
