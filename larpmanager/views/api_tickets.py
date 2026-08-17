@@ -220,6 +220,7 @@ def ticket_to_dict(ticket: LarpManagerTicket, auth: TicketAuth | None = None) ->
         "priority": ticket.priority,
         "version": ticket.version,
         "discord_channel_id": ticket.discord_channel_id,
+        "last_synced_message_id": ticket.last_synced_message_id,
         "discord_creator_id": ticket.discord_creator_id,
         "assigned_staff_discord_id": ticket.assigned_staff_discord_id,
         "association": {
