@@ -161,6 +161,30 @@
                     </form>
                 {% endif %}
             </div>
+            <div class="ticket-transcript-links">
+                <h2>{% trans "Shareable transcript link" %}</h2>
+                <form method="post" action="{% url 'ticket_transcript_link_create' ticket.uuid %}">
+                    {% csrf_token %}
+                    <button type="submit" class="ticket-link-create-btn">{% trans "Create shareable link" %}</button>
+                </form>
+                {% if transcript_links %}
+                    <ul>
+                        {% for item in transcript_links %}
+                            <li>
+                                <span class="ticket-link-url">{{ item.absolute_url }}</span>
+                                <span class="ticket-link-meta">
+                                    {% blocktrans with remaining=item.remaining_opens %}{{ remaining }} opens left{% endblocktrans %}
+                                </span>
+                                <form method="post" action="{% url 'ticket_transcript_link_revoke' ticket.uuid %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="token" value="{{ item.object.token }}" />
+                                    <button type="submit" class="ticket-link-revoke-btn">{% trans "Revoke" %}</button>
+                                </form>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+            </div>
         {% endif %}
         {% if ticket_events %}
             <h2>{% trans "History" %}</h2>

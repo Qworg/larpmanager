@@ -26,5 +26,6 @@ so the app registry discovers them (see apps.py, which also imports
 
 from larpmanager.models.ticket_event import TicketEvent
 from larpmanager.models.ticket_message import TicketMessage
+from larpmanager.models.ticket_transcript_link import TicketTranscriptLink
 
-__all__ = ["TicketEvent", "TicketMessage"]
+__all__ = ["TicketEvent", "TicketMessage", "TicketTranscriptLink"]

@@ -241,6 +241,21 @@ urlpatterns = [
         name="ticket_messages",
     ),
     path(
+        "tickets/<slug:ticket_uuid>/transcript-link/",
+        views_ut.ticket_transcript_link_create,
+        name="ticket_transcript_link_create",
+    ),
+    path(
+        "tickets/<slug:ticket_uuid>/transcript-link/revoke/",
+        views_ut.ticket_transcript_link_revoke,
+        name="ticket_transcript_link_revoke",
+    ),
+    path(
+        "transcript/<str:token>/",
+        views_ut.transcript_share,
+        name="transcript_share",
+    ),
+    path(
         "accounting/",
         views_ua.accounting,
         name="accounting",

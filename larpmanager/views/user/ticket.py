@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import timedelta
 from typing import Any
 
 from django.conf import settings as conf_settings
@@ -30,12 +32,14 @@ from django.db.models import Count, F, Q, Subquery, Value
 from django.db.models.functions import Coalesce
 from django.http import Http404, HttpRequest, JsonResponse
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus
 from larpmanager.models.ticket_event import TicketEvent
 from larpmanager.models.ticket_message import TicketMessage
+from larpmanager.models.ticket_transcript_link import TicketTranscriptLink
 from larpmanager.utils.auth.permission import has_association_permission
 from larpmanager.utils.core.base import get_context
 from larpmanager.utils.publication.api import get_client_ip
@@ -46,6 +50,12 @@ ACTIVE_TICKET_STATUSES = (TicketStatus.OPEN, TicketStatus.WORKING)
 
 # Shown when a staff member submits a stale form (optimistic-lock conflict, D8).
 CONCURRENT_EDIT_MESSAGE = "This ticket was modified by someone else. Review the latest changes and retry."
+
+# Shareable transcript link defaults (D5): 24h TTL, capped opens.
+TRANSCRIPT_LINK_TTL = timedelta(hours=24)
+TRANSCRIPT_LINK_MAX_OPENS = 5
+
+logger = logging.getLogger(__name__)
 
 
 def filter_tickets_by_status(queryset: Any, status: str) -> Any:
@@ -142,7 +152,23 @@ def _ticket_detail_context(request: HttpRequest, context: dict, ticket: LarpMana
     context["priority_choices"] = TicketPriority.choices
     context["ticket_messages"] = list(ticket.messages.order_by(Coalesce("sent_at", "created"), "id"))
     context["last_message_id"] = context["ticket_messages"][-1].id if context["ticket_messages"] else 0
+    context["transcript_links"] = _active_transcript_links(request, ticket) if context["can_manage_tickets"] else []
     return context
+
+
+def _active_transcript_links(request: HttpRequest, ticket: LarpManagerTicket) -> list[dict[str, Any]]:
+    """Return active transcript links with their absolute share URLs."""
+    links = ticket.transcript_links.filter(expires_at__gt=timezone.now(), open_count__lt=F("max_opens")).order_by(
+        "-created"
+    )
+    return [
+        {
+            "object": link,
+            "absolute_url": request.build_absolute_uri(reverse("transcript_share", kwargs={"token": link.token})),
+            "remaining_opens": link.max_opens - link.open_count,
+        }
+        for link in links
+    ]
 
 
 def _is_ticket_staff(request: HttpRequest, context: dict) -> bool:
@@ -483,3 +509,82 @@ def ticket_messages(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
             ]
         }
     )
+
+
+@login_required
+def transcript_share(request: HttpRequest, token: str) -> Any:
+    """Render a read-only transcript for a valid, unexpired share link.
+
+    The token is association-scoped: both the link and its ticket must belong to
+    the request's association. Expired, exhausted, revoked, and soft-deleted
+    links all 404, and each successful open is logged and counted.
+    """
+    context = get_context(request)
+    link = TicketTranscriptLink.objects.select_related("ticket").filter(token=token).first()
+    if link is None:
+        raise Http404
+
+    # Association scope: a token never leaks a transcript across tenants.
+    if link.association_id != context["association_id"] or link.ticket.association_id != context["association_id"]:
+        raise Http404
+
+    if link.is_expired():
+        raise Http404
+
+    # Atomically consume one open; a link exhausted by a concurrent reader 404s.
+    updated = TicketTranscriptLink.objects.filter(pk=link.pk, open_count__lt=F("max_opens")).update(
+        open_count=F("open_count") + 1
+    )
+    if updated == 0:
+        raise Http404
+
+    member = context.get("member")
+    logger.info(
+        "transcript link opened",
+        extra={
+            "token": token,
+            "link_id": link.id,
+            "ticket_id": link.ticket_id,
+            "association_id": context["association_id"],
+            "member_id": member.id if member else None,
+        },
+    )
+
+    context["ticket"] = link.ticket
+    context["ticket_messages"] = list(link.ticket.messages.order_by(Coalesce("sent_at", "created"), "id"))
+    context["transcript"] = link.ticket.build_transcript()
+    return render(request, "larpmanager/member/transcript_share.html", context)
+
+
+@login_required
+@require_POST
+def ticket_transcript_link_create(request: HttpRequest, ticket_uuid: str) -> Any:
+    """Create a shareable transcript link for a ticket as staff."""
+    context = get_context(request)
+    ticket = _get_ticket_for_staff(request, context, ticket_uuid)
+
+    link = TicketTranscriptLink.objects.create(
+        ticket=ticket,
+        created_by=context.get("member"),
+        expires_at=timezone.now() + TRANSCRIPT_LINK_TTL,
+        max_opens=TRANSCRIPT_LINK_MAX_OPENS,
+        association_id=context["association_id"],
+    )
+    logger.info(
+        "transcript link created",
+        extra={"ticket_id": ticket.id, "link_id": link.id, "member_id": link.created_by_id},
+    )
+    return redirect("ticket_detail", ticket_uuid=ticket.uuid)
+
+
+@login_required
+@require_POST
+def ticket_transcript_link_revoke(request: HttpRequest, ticket_uuid: str) -> Any:
+    """Revoke (soft-delete) a shareable transcript link for a ticket as staff."""
+    context = get_context(request)
+    ticket = _get_ticket_for_staff(request, context, ticket_uuid)
+
+    token = request.POST.get("token", "").strip()
+    if token:
+        TicketTranscriptLink.objects.filter(ticket=ticket, token=token).delete()
+    return redirect("ticket_detail", ticket_uuid=ticket.uuid)

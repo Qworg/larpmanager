@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% load i18n %}
+{% block title %}
+    {% trans "Ticket transcript" %}
+{% endblock title %}
+{% block info %}
+    {% trans "Shared ticket transcript" %}
+{% endblock info %}
+{% block content %}
+    <div class="user_resize platform">
+        <h2>{% firstof ticket.subject ticket.reason %}</h2>
+        <table>
+            <tbody>
+                <tr>
+                    <th>{% trans "Status" %}</th>
+                    <td>{{ ticket.get_status_display }}</td>
+                </tr>
+                <tr>
+                    <th>{% trans "Created" %}</th>
+                    <td>{{ ticket.created }}</td>
+                </tr>
+                {% if ticket_messages %}
+                    <tr>
+                        <th>{% trans "Transcript" %}</th>
+                        <td>
+                            <div class="ticket-transcript">
+                                {% for message in ticket_messages %}
+                                    <div class="ticket-message{% if message.is_bot %} ticket-message-bot{% endif %}">
+                                        <span class="ticket-message-meta">{{ message.author_name }} - {{ message.sent_at|default:message.created }}</span>
+                                        <span class="ticket-message-content">{{ message.content }}</span>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        </td>
+                    </tr>
+                {% elif transcript %}
+                    <tr>
+                        <th>{% trans "Transcript" %}</th>
+                        <td>
+                            <div class="ticket-transcript">{{ transcript|linebreaksbr }}</div>
+                        </td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+{% endblock content %}
