@@ -216,6 +216,31 @@ urlpatterns = [
         name="ticket_detail",
     ),
     path(
+        "tickets/<slug:ticket_uuid>/update/",
+        views_ut.ticket_update,
+        name="ticket_update",
+    ),
+    path(
+        "tickets/<slug:ticket_uuid>/close/",
+        views_ut.ticket_close,
+        name="ticket_close",
+    ),
+    path(
+        "tickets/<slug:ticket_uuid>/reopen/",
+        views_ut.ticket_reopen,
+        name="ticket_reopen",
+    ),
+    path(
+        "tickets/<slug:ticket_uuid>/state/",
+        views_ut.ticket_state,
+        name="ticket_state",
+    ),
+    path(
+        "tickets/<slug:ticket_uuid>/messages/",
+        views_ut.ticket_messages,
+        name="ticket_messages",
+    ),
+    path(
         "accounting/",
         views_ua.accounting,
         name="accounting",

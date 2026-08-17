@@ -304,6 +304,16 @@ def _database_has_tables() -> bool:
         if count == 0:
             return False
 
+        # Under --no-migrations pytest-django runs syncdb, which creates empty
+        # app tables (no fixture data, no RunSQL triggers such as the
+        # search_vector trigger) and no django_migrations table. Only the
+        # test_db.sql dump records applied migrations, so its absence means the
+        # dump was never loaded. Check the catalog rather than the table so we
+        # don't hold a lock that would block clean_db's DROP SCHEMA ... CASCADE.
+        cursor.execute("SELECT to_regclass('public.django_migrations')")
+        if cursor.fetchone()[0] is None:
+            return False
+
     return True
 
 

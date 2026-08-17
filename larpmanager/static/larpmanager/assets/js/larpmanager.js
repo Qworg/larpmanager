@@ -16,7 +16,93 @@ function stop_spinner() {
     $('body').removeClass('noscroll');
 }
 
+// ========== Ticket live refresh (D3) ==========
+
+// Fallback display labels for status/priority codes when the state endpoint
+// does not return localized *_display values.
+var TICKET_STATUS_LABELS = {open: 'Open', working: 'Working', done: 'Done'};
+var TICKET_PRIORITY_LABELS = {low: 'Low', medium: 'Medium', high: 'High'};
+
+// Append a single transcript message row to the transcript container.
+function appendTicketMessage(transcript, message) {
+    var wrap = document.createElement('div');
+    wrap.className = 'ticket-message' + (message.is_bot ? ' ticket-message-bot' : '');
+
+    var meta = document.createElement('span');
+    meta.className = 'ticket-message-meta';
+    meta.textContent = message.author_name + ' - ' + (message.sent_at || '');
+
+    var content = document.createElement('span');
+    content.className = 'ticket-message-content';
+    content.textContent = message.content;
+
+    wrap.appendChild(meta);
+    wrap.appendChild(content);
+    transcript.appendChild(wrap);
+}
+
+// Poll a single ticket root: refresh status/priority and, on a detail page,
+// fetch any transcript messages that arrived after the last seen id.
+window.lmTicketPoll = function(root) {
+    var stateUrl = root.getAttribute('data-state-url');
+    if (!stateUrl) return;
+
+    fetch(stateUrl, {headers: {'X-Requested-With': 'XMLHttpRequest'}, credentials: 'same-origin'})
+        .then(function(resp) { return resp.ok ? resp.json() : null; })
+        .then(function(state) {
+            if (!state) return;
+
+            var statusEl = root.querySelector('[data-ticket-status]');
+            if (statusEl) {
+                statusEl.textContent = state.status_display || TICKET_STATUS_LABELS[state.status] || state.status;
+                statusEl.setAttribute('data-ticket-status', state.status);
+            }
+            var priorityEl = root.querySelector('[data-ticket-priority]');
+            if (priorityEl) {
+                priorityEl.textContent = state.priority_display || TICKET_PRIORITY_LABELS[state.priority] || state.priority;
+                priorityEl.setAttribute('data-ticket-priority', state.priority);
+            }
+            var versionEl = root.querySelector('[data-ticket-version]');
+            if (versionEl) versionEl.textContent = state.version;
+
+            var transcript = root.querySelector('[data-last-message-id]');
+            var messagesUrl = root.getAttribute('data-messages-url');
+            if (transcript && messagesUrl && state.last_message_id != null) {
+                var lastSeen = parseInt(transcript.getAttribute('data-last-message-id') || '0', 10);
+                if (state.last_message_id > lastSeen) {
+                    fetch(messagesUrl + '?after=' + encodeURIComponent(lastSeen), {
+                        headers: {'X-Requested-With': 'XMLHttpRequest'},
+                        credentials: 'same-origin'
+                    })
+                        .then(function(resp) { return resp.ok ? resp.json() : null; })
+                        .then(function(data) {
+                            if (!data || !data.messages) return;
+                            data.messages.forEach(function(message) {
+                                appendTicketMessage(transcript, message);
+                                if (message.id > lastSeen) lastSeen = message.id;
+                            });
+                            transcript.setAttribute('data-last-message-id', lastSeen);
+                        });
+                }
+            }
+        });
+};
+
+function startTicketPollers() {
+    var roots = document.querySelectorAll('[data-ticket-poller]');
+    if (!roots.length) return;
+
+    roots.forEach(function(root) {
+        if (root.getAttribute('data-ticket-polling') === '1') return;
+        root.setAttribute('data-ticket-polling', '1');
+        window.lmTicketPoll(root);
+        setInterval(function() { window.lmTicketPoll(root); }, 5000);
+    });
+}
+
 window.addEventListener('DOMContentLoaded', function() {
+
+startTicketPollers();
 
 // Remove info bar / registration status blocks left empty by conditional template content, to avoid stray padding.
 $('#info_bar, .reg_status').each(function() {

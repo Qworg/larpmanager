@@ -26,6 +26,10 @@ from django.core.management.base import BaseCommand
 from larpmanager.management.commands.utils import check_branch, check_virtualenv
 from larpmanager.models.association import Association, AssociationSkin
 from larpmanager.models.base import Feature
+from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus
+
+# Discord channel id reserved for the seeded member-less API ticket (W4 fixture).
+SEED_UNLINKED_TICKET_CHANNEL_ID = 888999
 
 
 class Command(BaseCommand):
@@ -79,5 +83,21 @@ class Command(BaseCommand):
         for association in Association.objects.all():
             association.features.add(feature)
             association.save()
+
+        # Seed a member-less API ticket (W4): visible to staff, owned by no member,
+        # mirroring the Discord API create flow which blocks member-less creation.
+        association = Association.objects.first()
+        if association is not None and not LarpManagerTicket.objects.filter(
+            discord_channel_id=SEED_UNLINKED_TICKET_CHANNEL_ID
+        ).exists():
+            LarpManagerTicket.objects.create(
+                association=association,
+                member=None,
+                reason="Unlinked Discord ticket",
+                content="Created via the Discord API without a linked member.",
+                status=TicketStatus.OPEN,
+                priority=TicketPriority.LOW,
+                discord_channel_id=SEED_UNLINKED_TICKET_CHANNEL_ID,
+            )
 
         self.stdout.write("All done.")

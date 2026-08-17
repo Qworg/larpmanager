@@ -889,3 +889,80 @@ form .plot {
 .ticket-search-clear {
   font-size: 0.9em;
 }
+
+.ticket-status-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  margin-bottom: 1em;
+}
+
+.ticket-status-tab {
+  padding: 0.4em 0.9em;
+  border-radius: 0.3em;
+  border: 1px solid rgba(var(--pri-rgb), 0.4);
+  color: rgba(var(--pri-rgb), 1);
+  text-decoration: none;
+}
+
+.ticket-status-tab.active {
+  background-color: rgba(var(--pri-rgb), 1);
+  color: white;
+}
+
+.ticket-message {
+  padding: 0.4em 0;
+  border-bottom: 1px solid rgba(var(--pri-rgb), 0.1);
+}
+
+.ticket-message-meta {
+  display: block;
+  font-weight: bold;
+  color: rgba(var(--pri-rgb), 0.8);
+  margin-bottom: 0.2em;
+}
+
+.ticket-message-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ticket-message-bot .ticket-message-content {
+  opacity: 0.85;
+}
+
+.ticket-conflict {
+  margin-bottom: 1em;
+}
+
+.ticket-actions {
+  margin-top: 1.5em;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1em;
+  align-items: flex-start;
+}
+
+.ticket-update-form {
+  flex: 1;
+  min-width: 16em;
+}
+
+.ticket-update-form label {
+  display: block;
+  font-weight: bold;
+  margin-bottom: 0.2em;
+}
+
+.ticket-update-form select,
+.ticket-update-form input[type="text"],
+.ticket-update-form textarea {
+  width: 100%;
+  max-width: 30em;
+  margin-bottom: 0.6em;
+}
+
+.ticket-close-btn,
+.ticket-reopen-btn {
+  margin-top: 0.3em;
+}

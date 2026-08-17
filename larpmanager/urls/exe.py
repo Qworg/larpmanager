@@ -29,6 +29,7 @@ from larpmanager.views.exe import (
     event as views_ee,
     member as views_em,
     miscellanea as views_ems,
+    ticket as views_et,
 )
 
 urlpatterns = [
@@ -36,6 +37,11 @@ urlpatterns = [
         "manage/",
         views_mg.manage,
         name="manage",
+    ),
+    path(
+        "manage/tickets/",
+        views_et.exe_tickets,
+        name="exe_tickets",
     ),
     path(
         "manage/cache/",

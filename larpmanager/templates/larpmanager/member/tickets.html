@@ -10,7 +10,22 @@
     {% include "larpmanager/member/profile_nav.html" %}
     <div class="user_resize platform">
         <hr class="no_v20" />
+        <div class="ticket-status-tabs">
+            <a class="ticket-status-tab{% if status == 'active' %} active{% endif %}"
+               href="{% url 'tickets' %}?status=active{% if query %}&q={{ query|urlencode }}{% endif %}">
+                {% trans "Active" %}{% if counts.active %} ({{ counts.active }}){% endif %}
+            </a>
+            <a class="ticket-status-tab{% if status == 'all' %} active{% endif %}"
+               href="{% url 'tickets' %}?status=all{% if query %}&q={{ query|urlencode }}{% endif %}">
+                {% trans "All" %}{% if counts.total %} ({{ counts.total }}){% endif %}
+            </a>
+            <a class="ticket-status-tab{% if status == 'done' %} active{% endif %}"
+               href="{% url 'tickets' %}?status=done{% if query %}&q={{ query|urlencode }}{% endif %}">
+                {% trans "Done" %}{% if counts.done %} ({{ counts.done }}){% endif %}
+            </a>
+        </div>
         <form method="get" action="{% url 'tickets' %}" class="ticket-search">
+            <input type="hidden" name="status" value="{{ status }}" />
             <input type="search"
                    name="q"
                    value="{{ query }}"
@@ -20,7 +35,7 @@
                 <i class="fa-solid fa-magnifying-glass"></i>
             </button>
             {% if query %}
-                <a href="{% url 'tickets' %}" class="ticket-search-clear">{% trans "Clear" %}</a>
+                <a href="{% url 'tickets' %}?status={{ status }}" class="ticket-search-clear">{% trans "Clear" %}</a>
             {% endif %}
         </form>
         <div class="new_v20 no_v22">

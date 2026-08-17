@@ -60,9 +60,10 @@ class TestTicketAPI(BaseTestCase):
 
     def test_list_tickets_with_valid_api_key(self):
         """Test that GET /tickets/ returns ticket list with valid API key."""
-        ticket = self.create_larpmanager_ticket(discord_channel_id=123456789)
+        association = self.create_association(name="List Org", slug="list-org")
+        ticket = self.create_larpmanager_ticket(association=association, discord_channel_id=123456789)
 
-        response = self.client.get("/api/v1/tickets/", **self.headers)
+        response = self.client.get(f"/api/v1/tickets/?association_uuid={association.uuid}", **self.headers)
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -72,10 +73,11 @@ class TestTicketAPI(BaseTestCase):
 
     def test_list_tickets_filter_by_status(self):
         """Test that ?status= filter works correctly."""
-        self.create_larpmanager_ticket(status=TicketStatus.OPEN, discord_channel_id=111)
-        self.create_larpmanager_ticket(status=TicketStatus.DONE, discord_channel_id=222)
+        association = self.create_association(name="Status Org", slug="status-org")
+        self.create_larpmanager_ticket(association=association, status=TicketStatus.OPEN, discord_channel_id=111)
+        self.create_larpmanager_ticket(association=association, status=TicketStatus.DONE, discord_channel_id=222)
 
-        response = self.client.get("/api/v1/tickets/?status=open", **self.headers)
+        response = self.client.get(f"/api/v1/tickets/?association_uuid={association.uuid}&status=open", **self.headers)
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -117,11 +119,12 @@ class TestTicketAPI(BaseTestCase):
 
     def test_list_tickets_filter_discord_only(self):
         """Test that ?discord_only=true filters correctly."""
-        self.create_larpmanager_ticket(discord_channel_id=111)  # Has channel
-        self.create_larpmanager_ticket(discord_channel_id=None)  # No channel
+        association = self.create_association(name="Discord Org", slug="discord-org")
+        self.create_larpmanager_ticket(association=association, discord_channel_id=111)  # Has channel
+        self.create_larpmanager_ticket(association=association, discord_channel_id=None)  # No channel
 
         response = self.client.get(
-            "/api/v1/tickets/?discord_only=true",
+            f"/api/v1/tickets/?association_uuid={association.uuid}&discord_only=true",
             **self.headers,
         )
 
@@ -132,16 +135,18 @@ class TestTicketAPI(BaseTestCase):
 
     def test_list_tickets_pagination(self):
         """Test that ?limit= and ?offset= work correctly."""
+        association = self.create_association(name="Pagination Org", slug="pagination-org")
         # Create 5 tickets
         for i in range(5):
             self.create_larpmanager_ticket(
+                association=association,
                 subject=f"Ticket {i}",
                 discord_channel_id=100 + i,
             )
 
         # Get first 2
         response = self.client.get(
-            "/api/v1/tickets/?limit=2&offset=0",
+            f"/api/v1/tickets/?association_uuid={association.uuid}&limit=2&offset=0",
             **self.headers,
         )
 

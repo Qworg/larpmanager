@@ -1639,6 +1639,19 @@
     dependencies: []
 - model: larpmanager.feature
   fields:
+    name: Tickets
+    descr: Internal pseudo-feature for the support ticket staff dashboard
+    slug: exe_tickets
+    overall: true
+    placeholder: true
+    order: 0
+    after_text: ''
+    after_link: ''
+    hidden: true
+    module: null
+    dependencies: []
+- model: larpmanager.feature
+  fields:
     name: Guilds
     descr: Enables 'Guilds', player-created groups of characters with a self-managed
       admin, invite and text

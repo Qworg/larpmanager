@@ -813,3 +813,17 @@ body.floating_iframe .inner {
     grid-template-columns: 1fr;
   }
 }
+
+.ticket-dashboard {
+  width: 100%;
+}
+
+.ticket-dashboard th,
+.ticket-dashboard td {
+  padding: 0.4em 0.6em;
+}
+
+.ticket-dashboard [data-ticket-status],
+.ticket-dashboard [data-ticket-priority] {
+  text-transform: capitalize;
+}

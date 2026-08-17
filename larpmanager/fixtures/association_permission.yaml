@@ -562,3 +562,15 @@
     icon: circle-up
     feature: exe_version_upgrade
     module: organization
+- model: larpmanager.associationpermission
+  fields:
+    name: Tickets
+    descr: Manage support tickets
+    slug: exe_tickets
+    number: 3
+    config: null
+    active_if: null
+    hidden: false
+    icon: headset
+    feature: exe_tickets
+    module: miscellany

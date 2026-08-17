@@ -8,18 +8,25 @@
 {% endblock info %}
 {% block content %}
     {% include "larpmanager/member/profile_nav.html" %}
-    <div class="user_resize platform">
+    <div class="user_resize platform"
+         data-ticket-poller
+         data-ticket-uuid="{{ ticket.uuid }}"
+         data-state-url="{% url 'ticket_state' ticket.uuid %}"
+         data-messages-url="{% url 'ticket_messages' ticket.uuid %}">
         <hr class="no_v20" />
+        {% if error %}
+            <div class="errorlist ticket-conflict">{% trans error %}</div>
+        {% endif %}
         <h2>{% firstof ticket.subject ticket.reason %}</h2>
         <table>
             <tbody>
                 <tr>
                     <th>{% trans "Status" %}</th>
-                    <td>{{ ticket.get_status_display }}</td>
+                    <td data-ticket-status="{{ ticket.status }}">{{ ticket.get_status_display }}</td>
                 </tr>
                 <tr>
                     <th>{% trans "Priority" %}</th>
-                    <td>{{ ticket.get_priority_display }}</td>
+                    <td data-ticket-priority="{{ ticket.priority }}">{{ ticket.get_priority_display }}</td>
                 </tr>
                 <tr>
                     <th>{% trans "Created" %}</th>
@@ -45,6 +52,12 @@
                         <td>{{ ticket.analysis|linebreaks }}</td>
                     </tr>
                 {% endif %}
+                {% if ticket.assigned_staff_discord_id %}
+                    <tr>
+                        <th>{% trans "Assigned staff" %}</th>
+                        <td>{{ ticket.assigned_staff_discord_id }}</td>
+                    </tr>
+                {% endif %}
                 {% if ticket.discord_channel_id %}
                     <tr>
                         <th>{% trans "Discord channel" %}</th>
@@ -61,11 +74,27 @@
                         </td>
                     </tr>
                 {% endif %}
-                {% if ticket.build_transcript %}
+                {% if ticket_messages %}
                     <tr>
                         <th>{% trans "Transcript" %}</th>
                         <td>
-                            <div class="ticket-transcript">{{ ticket.build_transcript|linebreaksbr }}</div>
+                            <div class="ticket-transcript"
+                                 id="ticket-transcript"
+                                 data-last-message-id="{{ last_message_id }}">
+                                {% for message in ticket_messages %}
+                                    <div class="ticket-message{% if message.is_bot %} ticket-message-bot{% endif %}">
+                                        <span class="ticket-message-meta">{{ message.author_name }} - {{ message.sent_at|default:message.created }}</span>
+                                        <span class="ticket-message-content">{{ message.content }}</span>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        </td>
+                    </tr>
+                {% elif ticket.build_transcript %}
+                    <tr>
+                        <th>{% trans "Transcript" %}</th>
+                        <td>
+                            <div class="ticket-transcript" id="ticket-transcript" data-last-message-id="0">{{ ticket.build_transcript|linebreaksbr }}</div>
                         </td>
                     </tr>
                 {% elif ticket.discord_channel_id %}
@@ -84,6 +113,55 @@
                 {% endif %}
             </tbody>
         </table>
+        {% if can_manage_tickets %}
+            <div class="ticket-actions">
+                <form method="post" action="{% url 'ticket_update' ticket.uuid %}" class="ticket-update-form">
+                    {% csrf_token %}
+                    <input type="hidden" name="base_version" value="{{ ticket.version }}" />
+                    <p>
+                        <label for="id_status">{% trans "Status" %}</label>
+                        <select name="status" id="id_status">
+                            {% for value, label in status_choices %}
+                                <option value="{{ value }}"{% if ticket.status == value %} selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </p>
+                    <p>
+                        <label for="id_priority">{% trans "Priority" %}</label>
+                        <select name="priority" id="id_priority">
+                            {% for value, label in priority_choices %}
+                                <option value="{{ value }}"{% if ticket.priority == value %} selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </p>
+                    <p>
+                        <label for="id_assigned_staff_discord_id">{% trans "Assigned staff Discord ID" %}</label>
+                        <input type="text"
+                               name="assigned_staff_discord_id"
+                               id="id_assigned_staff_discord_id"
+                               value="{{ ticket.assigned_staff_discord_id|default:'' }}" />
+                    </p>
+                    <p>
+                        <label for="id_analysis">{% trans "Analysis" %}</label>
+                        <textarea name="analysis" id="id_analysis" rows="4">{{ ticket.analysis }}</textarea>
+                    </p>
+                    <button type="submit">{% trans "Save" %}</button>
+                </form>
+                {% if ticket.status != 'done' %}
+                    <form method="post" action="{% url 'ticket_close' ticket.uuid %}">
+                        {% csrf_token %}
+                        <input type="hidden" name="base_version" value="{{ ticket.version }}" />
+                        <button type="submit" class="ticket-close-btn">{% trans "Close ticket" %}</button>
+                    </form>
+                {% else %}
+                    <form method="post" action="{% url 'ticket_reopen' ticket.uuid %}">
+                        {% csrf_token %}
+                        <input type="hidden" name="base_version" value="{{ ticket.version }}" />
+                        <button type="submit" class="ticket-reopen-btn">{% trans "Reopen ticket" %}</button>
+                    </form>
+                {% endif %}
+            </div>
+        {% endif %}
         {% if ticket_events %}
             <h2>{% trans "History" %}</h2>
             <table class="ticket-history">

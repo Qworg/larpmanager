@@ -1,0 +1,76 @@
+{% extends "utils.html" %}
+{% load i18n %}
+{% block title %}
+    {% trans "Tickets" %} - {% trans "Organization" %}
+{% endblock title %}
+{% block info %}
+    {% trans "Manage support tickets for the organization" %}
+{% endblock info %}
+{% block content %}
+    <div class="ticket-status-tabs">
+        <a class="ticket-status-tab{% if status == 'active' %} active{% endif %}"
+           href="{% url 'exe_tickets' %}?status=active{% if query %}&q={{ query|urlencode }}{% endif %}">
+            {% trans "Active" %}{% if counts.active %} ({{ counts.active }}){% endif %}
+        </a>
+        <a class="ticket-status-tab{% if status == 'all' %} active{% endif %}"
+           href="{% url 'exe_tickets' %}?status=all{% if query %}&q={{ query|urlencode }}{% endif %}">
+            {% trans "All" %}{% if counts.total %} ({{ counts.total }}){% endif %}
+        </a>
+        <a class="ticket-status-tab{% if status == 'done' %} active{% endif %}"
+           href="{% url 'exe_tickets' %}?status=done{% if query %}&q={{ query|urlencode }}{% endif %}">
+            {% trans "Done" %}{% if counts.done %} ({{ counts.done }}){% endif %}
+        </a>
+    </div>
+    <form method="get" action="{% url 'exe_tickets' %}" class="ticket-search">
+        <input type="hidden" name="status" value="{{ status }}" />
+        <input type="search"
+               name="q"
+               value="{{ query }}"
+               placeholder="{% trans 'Search tickets' %}"
+               aria-label="{% trans 'Search tickets' %}" />
+        <button type="submit" aria-label="{% trans 'Search' %}">
+            <i class="fa-solid fa-magnifying-glass"></i>
+        </button>
+        {% if query %}
+            <a href="{% url 'exe_tickets' %}?status={{ status }}" class="ticket-search-clear">{% trans "Clear" %}</a>
+        {% endif %}
+    </form>
+    {% if tickets %}
+        <div data-ticket-poller>
+            <table class="ticket-dashboard">
+                <thead>
+                    <tr>
+                        <th>{% trans "Subject" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Priority" %}</th>
+                        <th>{% trans "Assigned" %}</th>
+                        <th>{% trans "Member" %}</th>
+                        <th>{% trans "Created" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for ticket in tickets %}
+                        <tr data-ticket-poller
+                            data-ticket-uuid="{{ ticket.uuid }}"
+                            data-state-url="{% url 'ticket_state' ticket.uuid %}">
+                            <td>
+                                <a href="{% url 'ticket_detail' ticket.uuid %}">
+                                    {% firstof ticket.subject ticket.reason %}
+                                </a>
+                            </td>
+                            <td data-ticket-status="{{ ticket.status }}">{{ ticket.get_status_display }}</td>
+                            <td data-ticket-priority="{{ ticket.priority }}">{{ ticket.get_priority_display }}</td>
+                            <td>{{ ticket.assigned_staff_discord_id|default:"-" }}</td>
+                            <td>{{ ticket.member|default:"-" }}</td>
+                            <td>{{ ticket.created|date:"SHORT_DATE_FORMAT" }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% elif query %}
+        <p>{% trans "No tickets match your search." %}</p>
+    {% else %}
+        <p>{% trans "There are no tickets yet." %}</p>
+    {% endif %}
+{% endblock content %}
