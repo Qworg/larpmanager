@@ -548,6 +548,18 @@ class LarpManagerTicket(UuidMixin, BaseModel):
     # Reconnect watermark for Discord message backfill (W11).
     last_synced_message_id = models.BigIntegerField(null=True, blank=True)
 
+    # Client-supplied idempotency key for API ticket creation (W6). Unique so a
+    # replayed create returns the existing ticket instead of creating a second.
+    idempotency_key = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        unique=True,
+        db_index=True,
+        verbose_name=_("Idempotency Key"),
+        help_text=_("Client-supplied key used to deduplicate API ticket creation"),
+    )
+
     def show_thumb(self) -> Any:
         """Generate HTML for displaying screenshot thumbnail."""
         if self.screenshot_reduced:

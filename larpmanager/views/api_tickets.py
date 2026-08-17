@@ -66,6 +66,7 @@ MAX_MESSAGE_CONTENT_LENGTH = 2000
 MAX_MESSAGE_ATTACHMENTS = 10
 MAX_AUTHOR_NAME_LENGTH = 255
 MAX_ACK_IDS = 1000
+MAX_IDEMPOTENCY_KEY_LENGTH = 255
 
 
 def _rate_limited_response(request: HttpRequest, view_func: Any, rate: str) -> JsonResponse:
@@ -297,8 +298,9 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
         - offset: Pagination offset (default 0)
 
     POST: Create a new ticket
-        Required: association_uuid, discord_creator_id, discord_channel_id
-        Optional: subject, content, email, priority
+        Required: association_uuid, discord_creator_id
+        Optional: discord_channel_id, subject, content, email, priority,
+            client_uuid (idempotency key; the Idempotency-Key header wins)
 
     Args:
         request: HTTP request object
@@ -396,10 +398,16 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
     discord_creator_id = data.get("discord_creator_id")
     discord_channel_id = data.get("discord_channel_id")
 
-    if not all([association_uuid, discord_creator_id, discord_channel_id]):
-        return JsonResponse(
-            {"error": "Missing required fields: association_uuid, discord_creator_id, discord_channel_id"}, status=400
-        )
+    if not all([association_uuid, discord_creator_id]):
+        return JsonResponse({"error": "Missing required fields: association_uuid, discord_creator_id"}, status=400)
+
+    # Idempotency key: the Idempotency-Key header wins over client_uuid (7a).
+    idempotency_key = request.headers.get("Idempotency-Key") or data.get("client_uuid")
+    if idempotency_key is not None and not isinstance(idempotency_key, str):
+        return JsonResponse({"error": "idempotency key must be a string"}, status=400)
+    error = _length_error("idempotency_key", idempotency_key, MAX_IDEMPOTENCY_KEY_LENGTH)
+    if error is not None:
+        return error
 
     for field, value, max_length in [
         ("subject", data.get("subject"), MAX_SUBJECT_LENGTH),
@@ -415,10 +423,12 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
     except (ValueError, TypeError):
         return JsonResponse({"error": "invalid discord_creator_id"}, status=400)
 
-    try:
-        discord_channel_id_int = int(discord_channel_id)
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "invalid discord_channel_id"}, status=400)
+    discord_channel_id_int = None
+    if discord_channel_id is not None and discord_channel_id != "":
+        try:
+            discord_channel_id_int = int(discord_channel_id)
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "invalid discord_channel_id"}, status=400)
 
     priority = data.get("priority", TicketPriority.LOW)
     if priority not in TicketPriority.values:
@@ -432,14 +442,24 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
     if auth.association is not None and association.pk != auth.association.pk:
         return JsonResponse({"error": "Forbidden"}, status=403)
 
+    # Idempotent create (7a): a known idempotency key returns the existing ticket.
+    if idempotency_key:
+        existing_ticket = LarpManagerTicket.objects.filter(
+            idempotency_key=idempotency_key,
+            deleted__isnull=True,
+        ).first()
+        if existing_ticket is not None:
+            return JsonResponse({"ticket": ticket_to_dict(existing_ticket, auth)})
+
     # Idempotent create: return an existing live ticket for the same channel.
-    existing_ticket = LarpManagerTicket.objects.filter(
-        discord_channel_id=discord_channel_id_int,
-        association=association,
-        deleted__isnull=True,
-    ).first()
-    if existing_ticket is not None:
-        return JsonResponse({"ticket": ticket_to_dict(existing_ticket, auth)})
+    if discord_channel_id_int is not None:
+        existing_ticket = LarpManagerTicket.objects.filter(
+            discord_channel_id=discord_channel_id_int,
+            association=association,
+            deleted__isnull=True,
+        ).first()
+        if existing_ticket is not None:
+            return JsonResponse({"ticket": ticket_to_dict(existing_ticket, auth)})
 
     max_open_tickets = getattr(settings, "MAX_OPEN_TICKETS_PER_CREATOR", 5)
     open_ticket_count = (
@@ -462,6 +482,7 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
                 member=member,
                 discord_channel_id=discord_channel_id_int,
                 discord_creator_id=discord_creator_id_int,
+                idempotency_key=idempotency_key or None,
                 subject=data.get("subject", ""),
                 reason=data.get("reason", "Discord Support"),
                 content=data.get("content", ""),
@@ -482,8 +503,34 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
                     "discord_creator_id": discord_creator_id_int,
                 },
             )
+            # Without a channel id the bot must create the Discord channel and
+            # write it back via POST /channel/; the caller polls until populated.
+            if discord_channel_id_int is None:
+                emit_ticket_event(
+                    ticket,
+                    TicketEvent.EventType.CHANNEL_CREATE,
+                    source=TicketEvent.Source.API,
+                    payload={
+                        "ticket_uuid": str(ticket.uuid),
+                        "subject": ticket.subject,
+                        "association_uuid": str(association.uuid),
+                        "discord_creator_id": discord_creator_id_int,
+                    },
+                )
     except IntegrityError:
-        return JsonResponse({"error": "ticket already exists for this channel"}, status=409)
+        # A concurrent create with the same idempotency key or channel won the
+        # race; return the committed ticket rather than a 409.
+        if idempotency_key:
+            existing_ticket = LarpManagerTicket.objects.filter(idempotency_key=idempotency_key).first()
+            if existing_ticket is not None:
+                return JsonResponse({"ticket": ticket_to_dict(existing_ticket, auth)})
+        if discord_channel_id_int is not None:
+            existing_ticket = LarpManagerTicket.objects.filter(
+                discord_channel_id=discord_channel_id_int, association=association
+            ).first()
+            if existing_ticket is not None:
+                return JsonResponse({"ticket": ticket_to_dict(existing_ticket, auth)})
+        return JsonResponse({"error": "ticket already exists"}, status=409)
     logger.info("Created ticket %s via Discord API", ticket.uuid)
 
     return JsonResponse({"ticket": ticket_to_dict(ticket, auth)}, status=201)
@@ -647,7 +694,7 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
 
         return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
 
-    # DELETE: soft delete the ticket
+    # DELETE: soft delete the ticket and archive its Discord channel.
     with transaction.atomic():
         ticket.deleted = timezone.now()
         ticket.version = F("version") + 1
@@ -660,6 +707,15 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
             actor_discord_id=_actor_discord_id(ticket),
             payload={},
         )
+        # A live channel must be archived by the bot so no orphan remains (7c).
+        if ticket.discord_channel_id is not None:
+            emit_ticket_event(
+                ticket,
+                TicketEvent.EventType.CHANNEL_ARCHIVE,
+                source=TicketEvent.Source.API,
+                actor_discord_id=_actor_discord_id(ticket),
+                payload={"discord_channel_id": ticket.discord_channel_id},
+            )
     logger.info("Deleted ticket %s via Discord API", ticket.uuid)
     return JsonResponse({"success": True})
 

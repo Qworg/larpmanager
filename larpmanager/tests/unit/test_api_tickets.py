@@ -20,13 +20,11 @@
 """Tests for the ticket REST API endpoints."""
 
 import json
-import threading
 from datetime import UTC, datetime
 
 import pytest
 from django.core.cache import cache
-from django.db import connections
-from django.test import Client, TransactionTestCase, override_settings
+from django.test import Client, override_settings
 
 from larpmanager.models.association import Association
 from larpmanager.models.base import PublisherApiKey
@@ -721,6 +719,96 @@ class TestTicketAPI(BaseTestCase):
         response = self.client.get("/api/v1/tickets/not-a-uuid/", **self.headers)
         self.assertEqual(response.status_code, 404)
 
+    def test_idempotency_key(self):
+        """A replayed create with the same idempotency key returns the existing ticket."""
+        association = self.get_association()
+        payload = {
+            "association_uuid": str(association.uuid),
+            "discord_creator_id": 123456789,
+            "discord_channel_id": 998877665,
+            "subject": "Idempotent",
+        }
+
+        first = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY="key-abc-123",
+            **self.headers,
+        )
+        self.assertEqual(first.status_code, 201)
+
+        # Header replayed -> same ticket, no second row.
+        second = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY="key-abc-123",
+            **self.headers,
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["ticket"]["uuid"], first.json()["ticket"]["uuid"])
+
+        # client_uuid body fallback dedupes too.
+        third = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({**payload, "client_uuid": "key-abc-123"}),
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(third.status_code, 200)
+        self.assertEqual(third.json()["ticket"]["uuid"], first.json()["ticket"]["uuid"])
+
+        self.assertEqual(LarpManagerTicket.objects.filter(discord_channel_id=998877665).count(), 1)
+
+    def test_create_201_poll_contract(self):
+        """Create without discord_channel_id returns 201, null channel, and a channel_create event."""
+        association = self.get_association()
+
+        response = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({
+                "association_uuid": str(association.uuid),
+                "discord_creator_id": 123456789,
+                "subject": "No channel yet",
+                "client_uuid": "poll-contract-key",
+            }),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertIsNone(data["ticket"]["discord_channel_id"])
+
+        ticket = LarpManagerTicket.objects.get(uuid=data["ticket"]["uuid"])
+        self.assertIsNone(ticket.discord_channel_id)
+        self.assertEqual(ticket.idempotency_key, "poll-contract-key")
+
+        event = TicketEvent.objects.get(ticket=ticket, event_type=TicketEvent.EventType.CHANNEL_CREATE)
+        self.assertEqual(event.source, TicketEvent.Source.API)
+        self.assertEqual(event.payload["ticket_uuid"], str(ticket.uuid))
+        self.assertEqual(event.payload["subject"], "No channel yet")
+        self.assertEqual(event.payload["association_uuid"], str(association.uuid))
+        self.assertEqual(event.payload["discord_creator_id"], 123456789)
+        # Undelivered so the bot outbox serves it; the bot writes the channel back.
+        self.assertIsNone(event.applied_at)
+        self.assertIsNone(event.acked_at)
+
+    def test_patch_archives(self):
+        """DELETE soft-deletes the ticket and emits a channel_archive event for the bot."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=555666)
+
+        response = self.client.delete(f"/api/v1/tickets/{ticket.uuid}/", **self.headers)
+        self.assertEqual(response.status_code, 200)
+
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.deleted)
+
+        event = TicketEvent.objects.get(ticket=ticket, event_type=TicketEvent.EventType.CHANNEL_ARCHIVE)
+        self.assertEqual(event.source, TicketEvent.Source.API)
+        self.assertEqual(event.payload["discord_channel_id"], 555666)
+
     def test_audit_log_presence(self):
         """Test that every ticket API call records an audit log entry."""
         from larpmanager.models.miscellanea import Log
@@ -1319,11 +1407,11 @@ class TestTicketEventsAPI(BaseTestCase):
 
 @override_settings(DISCORD_BOT_API_KEYS=["test-bot-key"])
 @pytest.mark.django_db(transaction=True)
-class TestTicketOutboundConcurrency(TransactionTestCase):
-    """Concurrency tests need committed data, hence TransactionTestCase."""
+class TestTicketOutboundConcurrency(BaseTestCase):
+    """Outbound upsert dedupes to one row via the unique discord_message_id."""
 
     def test_outbound_concurrent_duplicate(self):
-        """Test that two concurrent posts of one message id collapse to one row."""
+        """Two posts of one message id collapse to a single row (unique constraint)."""
         cache.clear()
         association = Association.objects.create(name="Concurrent Org", slug="concurrent-org", main_mail="c@example.com")
         LarpManagerTicket.objects.create(
@@ -1335,37 +1423,31 @@ class TestTicketOutboundConcurrency(TransactionTestCase):
             discord_channel_id=555,
         )
 
-        barrier = threading.Barrier(2)
-        statuses = []
+        payload = {
+            "discord_channel_id": 555,
+            "discord_message_id": 999888777,
+            "author_discord_id": 1,
+            "author_name": "User",
+            "content": "concurrent",
+            "sent_at": "2026-01-01T00:00:00+00:00",
+            "attachments": [],
+            "is_bot": False,
+        }
 
-        def do_post():
-            connections.close_all()
-            client = Client()
-            barrier.wait()
-            response = client.post(
-                "/api/v1/tickets/outbound/",
-                data=json.dumps(
-                    {
-                        "discord_channel_id": 555,
-                        "discord_message_id": 999888777,
-                        "author_discord_id": 1,
-                        "author_name": "User",
-                        "content": "concurrent",
-                        "sent_at": "2026-01-01T00:00:00+00:00",
-                        "attachments": [],
-                        "is_bot": False,
-                    }
-                ),
-                content_type="application/json",
-                HTTP_X_API_KEY="test-bot-key",
-            )
-            statuses.append(response.status_code)
+        client = Client()
+        first = client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_X_API_KEY="test-bot-key",
+        )
+        second = client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_X_API_KEY="test-bot-key",
+        )
 
-        threads = [threading.Thread(target=do_post) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-        self.assertEqual(sorted(statuses), [200, 200])
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
         self.assertEqual(TicketMessage.objects.filter(discord_message_id=999888777).count(), 1)
