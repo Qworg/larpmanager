@@ -296,7 +296,7 @@ class TestTicketAPI(BaseTestCase):
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"status": "working"}),
+            data=json.dumps({"version": 0, "status": "working"}),
             content_type="application/json",
             **self.headers,
         )
@@ -318,7 +318,7 @@ class TestTicketAPI(BaseTestCase):
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"priority": "high"}),
+            data=json.dumps({"version": 0, "priority": "high"}),
             content_type="application/json",
             **self.headers,
         )
@@ -333,7 +333,7 @@ class TestTicketAPI(BaseTestCase):
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"assigned_staff_discord_id": 999888777}),
+            data=json.dumps({"version": 0, "assigned_staff_discord_id": 999888777}),
             content_type="application/json",
             **self.headers,
         )
@@ -348,7 +348,7 @@ class TestTicketAPI(BaseTestCase):
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"subject": "new subject"}),
+            data=json.dumps({"version": 0, "subject": "new subject"}),
             content_type="application/json",
             **self.headers,
         )
@@ -364,7 +364,7 @@ class TestTicketAPI(BaseTestCase):
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"status": "working"}),
+            data=json.dumps({"version": 0, "status": "working"}),
             content_type="application/json",
             **self.headers,
         )
@@ -372,13 +372,43 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["ticket"]["version"], 1)
 
+    def test_patch_version_required(self):
+        """PATCH without a version returns 400."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=123)
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"status": "working"}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "version required")
+
+    def test_patch_version_409(self):
+        """PATCH with a stale version returns 409 with the current version."""
+        ticket = self.create_larpmanager_ticket(discord_channel_id=123)
+        ticket.version = 3
+        ticket.save(update_fields=["version"])
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"version": 2, "status": "working"}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["current_version"], 3)
+
     def test_update_ticket_invalid_status(self):
         """Test that PATCH returns 400 for invalid status."""
         ticket = self.create_larpmanager_ticket(discord_channel_id=123)
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"status": "invalid_status"}),
+            data=json.dumps({"version": 0, "status": "invalid_status"}),
             content_type="application/json",
             **self.headers,
         )
@@ -651,7 +681,7 @@ class TestTicketAPI(BaseTestCase):
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"status": "working"}),
+            data=json.dumps({"version": 0, "status": "working"}),
             content_type="application/json",
             **headers,
         )
@@ -1131,7 +1161,7 @@ class TestTicketEventsAPI(BaseTestCase):
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"status": "working"}),
+            data=json.dumps({"version": 0, "status": "working"}),
             content_type="application/json",
             **self.headers,
         )
@@ -1158,7 +1188,7 @@ class TestTicketEventsAPI(BaseTestCase):
 
         response = self.client.patch(
             f"/api/v1/tickets/{ticket.uuid}/",
-            data=json.dumps({"status": "working", "priority": "high"}),
+            data=json.dumps({"version": 0, "status": "working", "priority": "high"}),
             content_type="application/json",
             **self.headers,
         )

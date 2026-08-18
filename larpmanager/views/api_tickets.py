@@ -597,7 +597,7 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON body"}, status=400)
 
-        allowed_fields = {"status", "priority", "assigned_staff_discord_id", "subject", "content"}
+        allowed_fields = {"status", "priority", "assigned_staff_discord_id", "subject", "content", "version"}
         read_only_fields = {"transcript", "analysis"}
         body_fields = set(data.keys())
         if body_fields & read_only_fields:
@@ -605,6 +605,16 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
         unknown_fields = body_fields - allowed_fields
         if unknown_fields:
             return JsonResponse({"error": f"invalid fields: {', '.join(sorted(unknown_fields))}"}, status=400)
+
+        # Optimistic lock (D8): PATCH must carry the current version.
+        if "version" not in data:
+            return JsonResponse({"error": "version required"}, status=400)
+        try:
+            base_version = int(data["version"])
+        except (ValueError, TypeError):
+            return JsonResponse({"error": "version must be an integer"}, status=400)
+        if base_version != ticket.version:
+            return JsonResponse({"error": "concurrent edit", "current_version": ticket.version}, status=409)
 
         for field, value, max_length in [
             ("subject", data.get("subject"), MAX_SUBJECT_LENGTH),
