@@ -26,17 +26,17 @@ from typing import Any
 
 from django.conf import settings as conf_settings
 from django.contrib.auth.decorators import login_required
-from django.contrib.postgres.search import SearchQuery, SearchRank
+from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
 from django.db import transaction
-from django.db.models import Count, F, Q, Subquery, Value
-from django.db.models.functions import Coalesce
+from django.db.models import Case, Count, F, Q, Subquery, TextField, Value, When
+from django.db.models.functions import Cast, Coalesce, Concat
 from django.http import Http404, HttpRequest, JsonResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus
+from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus, render_transcript_line
 from larpmanager.models.ticket_event import TicketEvent
 from larpmanager.models.ticket_message import TicketMessage
 from larpmanager.models.ticket_transcript_link import TicketTranscriptLink
@@ -50,6 +50,7 @@ ACTIVE_TICKET_STATUSES = (TicketStatus.OPEN, TicketStatus.WORKING)
 
 # Shown when a staff member submits a stale form (optimistic-lock conflict, D8).
 CONCURRENT_EDIT_MESSAGE = "This ticket was modified by someone else. Review the latest changes and retry."
+MAX_REPLY_LENGTH = 2000
 
 # Shareable transcript link defaults (D5): 24h TTL, capped opens.
 TRANSCRIPT_LINK_TTL = timedelta(hours=24)
@@ -453,6 +454,59 @@ def ticket_reopen(request: HttpRequest, ticket_uuid: str) -> Any:
             actor_member=context.get("member"),
             payload={},
         )
+
+    return redirect("ticket_detail", ticket_uuid=ticket.uuid)
+
+
+@login_required
+@require_POST
+def ticket_reply(request: HttpRequest, ticket_uuid: str) -> Any:
+    """Post a web reply to a ticket; persist it and push it to Discord (outbox)."""
+    context = get_context(request)
+    ticket = _get_ticket_accessible(request, context, ticket_uuid)
+
+    content = (request.POST.get("content") or "").strip()
+    if not content:
+        return _render_detail_with_error(request, context, ticket, "Reply cannot be empty", status=400)
+    if len(content) > MAX_REPLY_LENGTH:
+        return _render_detail_with_error(request, context, ticket, "Reply is too long", status=400)
+
+    member = context.get("member")
+    author_name = str(member) if member else request.user.username
+
+    message = TicketMessage.objects.create(
+        ticket=ticket,
+        discord_message_id=None,
+        author_discord_id=None,
+        author_name=author_name,
+        content=content,
+        is_bot=False,
+        sent_at=timezone.now(),
+    )
+
+    TicketMessage.objects.filter(pk=message.pk).update(
+        search_vector=SearchVector(
+            Cast("content", TextField()),
+            Cast("author_name", TextField()),
+            config="english",
+        )
+    )
+
+    line = render_transcript_line(message)
+    LarpManagerTicket.objects.filter(pk=ticket.pk).update(
+        transcript=Case(
+            When(Q(transcript__isnull=True) | Q(transcript=""), then=Value(line, output_field=TextField())),
+            default=Concat(F("transcript"), Value("\n" + line), output_field=TextField()),
+        ),
+    )
+
+    emit_ticket_event(
+        ticket,
+        TicketEvent.EventType.REPLY,
+        source=TicketEvent.Source.API,
+        actor_member=member,
+        payload={"content": content, "author_name": author_name},
+    )
 
     return redirect("ticket_detail", ticket_uuid=ticket.uuid)
 

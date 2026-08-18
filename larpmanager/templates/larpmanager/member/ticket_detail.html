@@ -113,6 +113,14 @@
                 {% endif %}
             </tbody>
         </table>
+        <div class="ticket-reply">
+            <h2>{% trans "Reply" %}</h2>
+            <form method="post" action="{% url 'ticket_reply' ticket.uuid %}">
+                {% csrf_token %}
+                <textarea name="content" rows="3" placeholder="{% trans 'Write a reply...' %}" required></textarea>
+                <button type="submit" class="btn btn-primary">{% trans "Send reply" %}</button>
+            </form>
+        </div>
         {% if can_manage_tickets %}
             <div class="ticket-actions">
                 <form method="post" action="{% url 'ticket_update' ticket.uuid %}" class="ticket-update-form">

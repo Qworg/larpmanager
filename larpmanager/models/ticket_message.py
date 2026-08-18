@@ -40,7 +40,7 @@ class TicketMessage(UuidMixin, BaseModel):
 
     ticket = models.ForeignKey(LarpManagerTicket, on_delete=models.CASCADE, related_name="messages")
 
-    discord_message_id = models.BigIntegerField(unique=True)
+    discord_message_id = models.BigIntegerField(unique=True, null=True, blank=True)
 
     author_discord_id = models.BigIntegerField(null=True, blank=True)
 

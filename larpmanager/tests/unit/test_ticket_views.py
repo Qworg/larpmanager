@@ -233,6 +233,21 @@ class TestTicketViews(BaseTestCase):
             TicketEvent.objects.filter(ticket=ticket, event_type=TicketEvent.EventType.STATUS_CHANGED).exists()
         )
 
+    @patch("larpmanager.views.user.ticket.get_context")
+    def test_reply_creates_message_and_event(self, mock_get_context):
+        """A web reply persists a TicketMessage and emits a REPLY event."""
+        association = self.get_association()
+        member = self.create_member()
+        mock_get_context.return_value = self._staff_context(association, member=member)
+        ticket = self.create_larpmanager_ticket(association=association, member=member)
+
+        request = self._make_request("post", f"/tickets/{ticket.uuid}/reply/", {"content": "Hello from the web"})
+        response = ticket_views.ticket_reply(request, str(ticket.uuid))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(TicketMessage.objects.filter(ticket=ticket, content="Hello from the web").exists())
+        self.assertTrue(TicketEvent.objects.filter(ticket=ticket, event_type=TicketEvent.EventType.REPLY).exists())
+
     @patch("larpmanager.views.user.ticket.has_association_permission", return_value=False)
     def test_memberless_user_cannot_access_member_none_ticket(self, _mock_perm):
         """A member-less actor must not open member=None tickets (None == None guard)."""
