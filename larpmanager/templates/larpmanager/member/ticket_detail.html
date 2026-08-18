@@ -120,7 +120,7 @@
                     <input type="hidden" name="base_version" value="{{ ticket.version }}" />
                     <p>
                         <label for="id_status">{% trans "Status" %}</label>
-                        <select name="status" id="id_status">
+                        <select name="status" id="id_status" onchange="this.form.submit()">
                             {% for value, label in status_choices %}
                                 <option value="{{ value }}"{% if ticket.status == value %} selected{% endif %}>{{ label }}</option>
                             {% endfor %}
@@ -128,7 +128,7 @@
                     </p>
                     <p>
                         <label for="id_priority">{% trans "Priority" %}</label>
-                        <select name="priority" id="id_priority">
+                        <select name="priority" id="id_priority" onchange="this.form.submit()">
                             {% for value, label in priority_choices %}
                                 <option value="{{ value }}"{% if ticket.priority == value %} selected{% endif %}>{{ label }}</option>
                             {% endfor %}
