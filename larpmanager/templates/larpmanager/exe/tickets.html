@@ -20,6 +20,10 @@
            href="{% url 'exe_tickets' %}?status=done{% if query %}&q={{ query|urlencode }}{% endif %}">
             {% trans "Done" %}{% if counts.done %} ({{ counts.done }}){% endif %}
         </a>
+        <a class="ticket-status-tab{% if stranded == 'true' %} active{% endif %}"
+           href="{% url 'exe_tickets' %}?stranded=true{% if query %}&q={{ query|urlencode }}{% endif %}">
+            {% trans "Stranded" %}
+        </a>
     </div>
     <form method="get" action="{% url 'exe_tickets' %}" class="ticket-search">
         <input type="hidden" name="status" value="{{ status }}" />

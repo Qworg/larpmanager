@@ -298,6 +298,25 @@ class TestTicketAPI(BaseTestCase):
         self.assertIsNone(ticket.discord_channel_id)
         self.assertTrue(TicketEvent.objects.filter(ticket=ticket, event_type=TicketEvent.EventType.STRANDED).exists())
 
+    def test_unstrand_ticket(self):
+        """Un-strand emits a channel_create event and clears the stranded flag."""
+        association = self.get_association()
+        ticket = self.create_larpmanager_ticket(association=association, stranded=True, discord_channel_id=None)
+
+        response = self.client.post(
+            f"/api/v1/tickets/{ticket.uuid}/unstrand/",
+            data=json.dumps({}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        ticket.refresh_from_db()
+        self.assertFalse(ticket.stranded)
+        self.assertTrue(
+            TicketEvent.objects.filter(ticket=ticket, event_type=TicketEvent.EventType.CHANNEL_CREATE).exists()
+        )
+
     def test_create_ticket_missing_required_fields(self):
         """Test that POST returns 400 for missing required fields."""
         response = self.client.post(

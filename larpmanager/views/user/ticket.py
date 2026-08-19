@@ -74,6 +74,15 @@ def filter_tickets_by_status(queryset: Any, status: str) -> Any:
     return queryset
 
 
+def filter_tickets_by_stranded(queryset: Any, stranded: str) -> Any:
+    """Apply the ``?stranded=`` filter to a ticket queryset."""
+    if stranded == "true":
+        return queryset.filter(stranded=True)
+    if stranded == "false":
+        return queryset.filter(stranded=False)
+    return queryset
+
+
 def apply_ticket_search(queryset: Any, query: str) -> Any:
     """Apply the ``?q=`` full-text search over ticket and message vectors."""
     if not query:
@@ -131,14 +140,17 @@ def tickets(request: HttpRequest) -> Any:
         queryset = queryset.filter(member=member) if member is not None else queryset.none()
 
     query = request.GET.get("q", "").strip()
+    stranded = request.GET.get("stranded", "").strip()
     context["query"] = query
     context["status"] = status
+    context["stranded"] = stranded
     if is_admin:
         context["counts"] = ticket_status_counts(context["association_id"])
     elif member is not None:
         context["counts"] = ticket_status_counts(context["association_id"], member)
     else:
         context["counts"] = {"total": 0, "active": 0, "done": 0}
+    queryset = filter_tickets_by_stranded(queryset, stranded)
     context["tickets"] = apply_ticket_search(filter_tickets_by_status(queryset, status), query)
     return render(request, "larpmanager/member/tickets.html", context)
 
@@ -536,6 +548,36 @@ def ticket_strand(request: HttpRequest, ticket_uuid: str) -> Any:
 
 @login_required
 @require_POST
+def ticket_unstrand(request: HttpRequest, ticket_uuid: str) -> Any:
+    """Un-strand a ticket: re-link it to Discord by creating a new channel (staff)."""
+    context = get_context(request)
+    ticket = _get_ticket_for_staff(request, context, ticket_uuid)
+
+    if not ticket.stranded:
+        return redirect("ticket_detail", ticket_uuid=ticket.uuid)
+
+    with transaction.atomic():
+        # Set on the instance first so the channel_create event is outbox-delivered.
+        ticket.stranded = False
+        emit_ticket_event(
+            ticket,
+            TicketEvent.EventType.CHANNEL_CREATE,
+            source=TicketEvent.Source.API,
+            actor_member=context.get("member"),
+            payload={
+                "ticket_uuid": str(ticket.uuid),
+                "subject": ticket.subject,
+                "association_uuid": str(ticket.association.uuid),
+                "discord_creator_id": ticket.discord_creator_id,
+            },
+        )
+        ticket.save(update_fields=["stranded"])
+
+    return redirect("ticket_detail", ticket_uuid=ticket.uuid)
+
+
+@login_required
+@require_POST
 def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
     """Merge this ticket into another, reassigning messages (staff)."""
     context = get_context(request)
@@ -559,6 +601,7 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
         return _render_detail_with_error(request, context, source, "Ticket is already merged", status=400)
 
     source_channel_id = source.discord_channel_id
+    source_transcript = source.build_transcript()
 
     with transaction.atomic():
         TicketMessage.objects.filter(ticket=source).update(ticket=target)
@@ -586,6 +629,7 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
                 "target_uuid": str(target.uuid),
                 "target_channel_id": target.discord_channel_id,
                 "source_subject": source.subject,
+                "source_transcript": source_transcript,
             },
         )
 

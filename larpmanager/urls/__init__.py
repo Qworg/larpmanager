@@ -48,6 +48,7 @@ from larpmanager.views.api_tickets import (
     ticket_reopen,
     ticket_strand,
     ticket_transcript,
+    ticket_unstrand,
     tickets_list_create,
 )
 from larpmanager.views.user import event as views_ue
@@ -170,6 +171,11 @@ urlpatterns = (
             "api/v1/tickets/<slug:ticket_uuid>/strand/",
             ticket_strand,
             name="api_ticket_strand",
+        ),
+        path(
+            "api/v1/tickets/<slug:ticket_uuid>/unstrand/",
+            ticket_unstrand,
+            name="api_ticket_unstrand",
         ),
         path(
             "api/v1/tickets/channel/<int:channel_id>/",

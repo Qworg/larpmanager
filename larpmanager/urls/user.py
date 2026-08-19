@@ -246,6 +246,11 @@ urlpatterns = [
         name="ticket_strand",
     ),
     path(
+        "tickets/<slug:ticket_uuid>/unstrand/",
+        views_ut.ticket_unstrand,
+        name="ticket_unstrand",
+    ),
+    path(
         "tickets/<slug:ticket_uuid>/state/",
         views_ut.ticket_state,
         name="ticket_state",

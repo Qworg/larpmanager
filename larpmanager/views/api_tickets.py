@@ -972,6 +972,7 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
         return JsonResponse({"error": "Ticket is already merged"}, status=400)
 
     source_channel_id = source.discord_channel_id
+    source_transcript = source.build_transcript()
 
     with transaction.atomic():
         TicketMessage.objects.filter(ticket=source).update(ticket=target)
@@ -998,6 +999,7 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
                 "target_uuid": str(target.uuid),
                 "target_channel_id": target.discord_channel_id,
                 "source_subject": source.subject,
+                "source_transcript": source_transcript,
             },
         )
 
@@ -1033,6 +1035,43 @@ def ticket_strand(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
         ticket.stranded = True
         ticket.discord_channel_id = None
         ticket.save(update_fields=["stranded", "discord_channel_id"])
+
+    return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def ticket_unstrand(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
+    """Un-strand a ticket: re-link it to Discord via a new channel."""
+    auth, error_response = validate_ticket_api_key(request, required_scope="tickets:write")
+    if error_response is not None:
+        return error_response
+
+    try:
+        ticket = LarpManagerTicket.objects.select_related("association").get(uuid=ticket_uuid, deleted__isnull=True)
+    except (LarpManagerTicket.DoesNotExist, ValidationError):
+        return JsonResponse({"error": "Ticket not found"}, status=404)
+
+    if _association_mismatch(auth, ticket):
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
+    if not ticket.stranded:
+        return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
+
+    with transaction.atomic():
+        ticket.stranded = False
+        emit_ticket_event(
+            ticket,
+            TicketEvent.EventType.CHANNEL_CREATE,
+            source=TicketEvent.Source.API,
+            payload={
+                "ticket_uuid": str(ticket.uuid),
+                "subject": ticket.subject,
+                "association_uuid": str(ticket.association.uuid),
+                "discord_creator_id": ticket.discord_creator_id,
+            },
+        )
+        ticket.save(update_fields=["stranded"])
 
     return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
 

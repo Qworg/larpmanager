@@ -27,7 +27,12 @@ from django.shortcuts import render
 
 from larpmanager.models.larpmanager import LarpManagerTicket
 from larpmanager.utils.core.base import check_association_context
-from larpmanager.views.user.ticket import apply_ticket_search, filter_tickets_by_status, ticket_status_counts
+from larpmanager.views.user.ticket import (
+    apply_ticket_search,
+    filter_tickets_by_status,
+    filter_tickets_by_stranded,
+    ticket_status_counts,
+)
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
@@ -44,14 +49,17 @@ def exe_tickets(request: HttpRequest) -> Any:
 
     status = request.GET.get("status", "").strip() or "active"
     query = request.GET.get("q", "").strip()
+    stranded = request.GET.get("stranded", "").strip()
 
     queryset = LarpManagerTicket.objects.filter(association_id=context["association_id"]).select_related(
         "member", "association"
     )
     queryset = apply_ticket_search(filter_tickets_by_status(queryset, status), query)
+    queryset = filter_tickets_by_stranded(queryset, stranded)
 
     context["status"] = status
     context["query"] = query
+    context["stranded"] = stranded
     context["counts"] = ticket_status_counts(context["association_id"])
     context["tickets"] = queryset
     return render(request, "larpmanager/exe/tickets.html", context)

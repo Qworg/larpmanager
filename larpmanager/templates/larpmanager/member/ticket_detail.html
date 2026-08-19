@@ -173,6 +173,11 @@
                         {% csrf_token %}
                         <button type="submit" class="ticket-strand-btn">{% trans "Strand ticket" %}</button>
                     </form>
+                {% else %}
+                    <form method="post" action="{% url 'ticket_unstrand' ticket.uuid %}">
+                        {% csrf_token %}
+                        <button type="submit" class="ticket-unstrand-btn">{% trans "Un-strand ticket" %}</button>
+                    </form>
                 {% endif %}
                 {% if not ticket.merged_into %}
                     <form method="post" action="{% url 'ticket_merge' ticket.uuid %}" class="ticket-merge-form">
