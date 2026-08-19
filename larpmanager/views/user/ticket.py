@@ -601,7 +601,12 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
         return _render_detail_with_error(request, context, source, "Ticket is already merged", status=400)
 
     source_channel_id = source.discord_channel_id
-    source_transcript = source.build_transcript()
+    source_messages = [
+        {"author_name": m.author_name or "Unknown", "content": m.content or ""}
+        for m in source.messages.order_by(Coalesce("sent_at", "created"), "id")
+    ]
+    if not source_messages and source.transcript:
+        source_messages = [{"author_name": "Transcript", "content": source.transcript}]
 
     with transaction.atomic():
         TicketMessage.objects.filter(ticket=source).update(ticket=target)
@@ -629,7 +634,7 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
                 "target_uuid": str(target.uuid),
                 "target_channel_id": target.discord_channel_id,
                 "source_subject": source.subject,
-                "source_transcript": source_transcript,
+                "source_messages": source_messages,
             },
         )
 

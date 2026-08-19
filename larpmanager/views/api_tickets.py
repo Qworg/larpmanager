@@ -935,7 +935,7 @@ def ticket_channel_writeback(request: HttpRequest, ticket_uuid: str) -> JsonResp
 
 @csrf_exempt
 @require_http_methods(["POST"])
-def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noqa: PLR0911
+def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noqa: C901, PLR0911
     """Merge a ticket into another, reassigning messages and archiving the source."""
     auth, error_response = validate_ticket_api_key(request, required_scope="tickets:write")
     if error_response is not None:
@@ -972,7 +972,12 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
         return JsonResponse({"error": "Ticket is already merged"}, status=400)
 
     source_channel_id = source.discord_channel_id
-    source_transcript = source.build_transcript()
+    source_messages = [
+        {"author_name": m.author_name or "Unknown", "content": m.content or ""}
+        for m in source.messages.order_by(Coalesce("sent_at", "created"), "id")
+    ]
+    if not source_messages and source.transcript:
+        source_messages = [{"author_name": "Transcript", "content": source.transcript}]
 
     with transaction.atomic():
         TicketMessage.objects.filter(ticket=source).update(ticket=target)
@@ -999,7 +1004,7 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
                 "target_uuid": str(target.uuid),
                 "target_channel_id": target.discord_channel_id,
                 "source_subject": source.subject,
-                "source_transcript": source_transcript,
+                "source_messages": source_messages,
             },
         )
 
