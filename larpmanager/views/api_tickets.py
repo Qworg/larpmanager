@@ -48,7 +48,13 @@ from django_ratelimit.core import get_usage
 from django_ratelimit.decorators import ratelimit
 
 from larpmanager.models.association import Association
-from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus, render_transcript_line
+from larpmanager.models.larpmanager import (
+    LarpManagerTicket,
+    TicketPriority,
+    TicketStatus,
+    TicketType,
+    render_transcript_line,
+)
 from larpmanager.models.ticket_event import TicketEvent
 from larpmanager.models.ticket_message import TicketMessage
 from larpmanager.utils.publication.api import log_api_access
@@ -218,6 +224,7 @@ def ticket_to_dict(ticket: LarpManagerTicket, auth: TicketAuth | None = None) ->
         "content": ticket.content,
         "status": ticket.status,
         "priority": ticket.priority,
+        "ticket_type": ticket.ticket_type,
         "version": ticket.version,
         "discord_channel_id": ticket.discord_channel_id,
         "last_synced_message_id": ticket.last_synced_message_id,
@@ -435,6 +442,10 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
     if priority not in TicketPriority.values:
         return JsonResponse({"error": f"Invalid priority: {priority}"}, status=400)
 
+    ticket_type = data.get("ticket_type", TicketType.PRIVATE)
+    if ticket_type not in TicketType.values:
+        return JsonResponse({"error": f"Invalid ticket_type: {ticket_type}"}, status=400)
+
     try:
         association = Association.objects.get(uuid=association_uuid, deleted__isnull=True)
     except Association.DoesNotExist:
@@ -489,6 +500,7 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
                 content=data.get("content", ""),
                 email=data.get("email", member.email if member else None),
                 priority=priority,
+                ticket_type=ticket_type,
                 status=TicketStatus.OPEN,
             )
             emit_ticket_event(

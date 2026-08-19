@@ -215,6 +215,42 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(data["ticket"]["discord_channel_id"], 987654321)
         self.assertEqual(data["ticket"]["priority"], "medium")
 
+    def test_create_ticket_public_type(self):
+        """POST accepts a ticket_type and defaults to private."""
+        association = self.get_association()
+
+        response = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({
+                "association_uuid": str(association.uuid),
+                "discord_creator_id": 123456789,
+                "discord_channel_id": 987654322,
+                "subject": "Public Test",
+                "content": "Public content",
+                "ticket_type": "public",
+            }),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["ticket"]["ticket_type"], "public")
+
+        default_response = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({
+                "association_uuid": str(association.uuid),
+                "discord_creator_id": 123456789,
+                "discord_channel_id": 987654323,
+                "subject": "Private Test",
+                "content": "Private content",
+            }),
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(default_response.status_code, 201)
+        self.assertEqual(default_response.json()["ticket"]["ticket_type"], "private")
+
     def test_create_ticket_missing_required_fields(self):
         """Test that POST returns 400 for missing required fields."""
         response = self.client.post(

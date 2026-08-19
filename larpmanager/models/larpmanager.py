@@ -423,6 +423,13 @@ class TicketPriority(models.TextChoices):
     HIGH = "high", _("High")
 
 
+class TicketType(models.TextChoices):
+    """Visibility type for LarpManagerTicket."""
+
+    PRIVATE = "private", _("Private")
+    PUBLIC = "public", _("Public")
+
+
 class LarpManagerText(BaseModel):
     """Model for managing editable text snippets on the LarpManager home page."""
 
@@ -489,6 +496,13 @@ class LarpManagerTicket(UuidMixin, BaseModel):
         choices=TicketPriority.choices,
         default=TicketPriority.LOW,
         verbose_name=_("Priority"),
+    )
+
+    ticket_type = models.CharField(
+        max_length=10,
+        choices=TicketType.choices,
+        default=TicketType.PRIVATE,
+        verbose_name=_("Type"),
     )
 
     analysis = models.CharField(max_length=10000, verbose_name=_("Analysis"), default="")
