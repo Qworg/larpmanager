@@ -43,8 +43,10 @@ from larpmanager.views.api_tickets import (
     ticket_events_ack,
     ticket_events_history,
     ticket_events_outbox,
+    ticket_merge,
     ticket_outbound,
     ticket_reopen,
+    ticket_strand,
     ticket_transcript,
     tickets_list_create,
 )
@@ -158,6 +160,16 @@ urlpatterns = (
             "api/v1/tickets/<slug:ticket_uuid>/reopen/",
             ticket_reopen,
             name="api_ticket_reopen",
+        ),
+        path(
+            "api/v1/tickets/<slug:ticket_uuid>/merge/",
+            ticket_merge,
+            name="api_ticket_merge",
+        ),
+        path(
+            "api/v1/tickets/<slug:ticket_uuid>/strand/",
+            ticket_strand,
+            name="api_ticket_strand",
         ),
         path(
             "api/v1/tickets/channel/<int:channel_id>/",

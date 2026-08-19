@@ -512,6 +512,87 @@ def ticket_reply(request: HttpRequest, ticket_uuid: str) -> Any:
 
 
 @login_required
+@require_POST
+def ticket_strand(request: HttpRequest, ticket_uuid: str) -> Any:
+    """Strand a ticket: archive Discord but keep it alive in LarpManager (staff)."""
+    context = get_context(request)
+    ticket = _get_ticket_for_staff(request, context, ticket_uuid)
+
+    channel_id = ticket.discord_channel_id
+    with transaction.atomic():
+        emit_ticket_event(
+            ticket,
+            TicketEvent.EventType.STRANDED,
+            source=TicketEvent.Source.API,
+            actor_member=context.get("member"),
+            payload={"channel_id": channel_id},
+        )
+        ticket.stranded = True
+        ticket.discord_channel_id = None
+        ticket.save(update_fields=["stranded", "discord_channel_id"])
+
+    return redirect("ticket_detail", ticket_uuid=ticket.uuid)
+
+
+@login_required
+@require_POST
+def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
+    """Merge this ticket into another, reassigning messages (staff)."""
+    context = get_context(request)
+    source = _get_ticket_for_staff(request, context, ticket_uuid)
+
+    target_uuid = (request.POST.get("merge_into") or "").strip()
+    if not target_uuid:
+        return _render_detail_with_error(request, context, source, "merge_into is required", status=400)
+
+    target = (
+        LarpManagerTicket.objects.filter(
+            uuid=target_uuid, association_id=context["association_id"], deleted__isnull=True
+        )
+        .first()
+    )
+    if target is None:
+        return _render_detail_with_error(request, context, source, "Target ticket not found", status=404)
+    if source.pk == target.pk:
+        return _render_detail_with_error(request, context, source, "Cannot merge a ticket into itself", status=400)
+    if source.merged_into_id is not None:
+        return _render_detail_with_error(request, context, source, "Ticket is already merged", status=400)
+
+    source_channel_id = source.discord_channel_id
+
+    with transaction.atomic():
+        TicketMessage.objects.filter(ticket=source).update(ticket=target)
+        target.refresh_from_db()
+        lines = [
+            render_transcript_line(m)
+            for m in target.messages.order_by(Coalesce("sent_at", "created"), "id")
+        ]
+        target.transcript = "\n".join(lines)
+        target.save(update_fields=["transcript"])
+
+        source.merged_into = target
+        source.status = TicketStatus.DONE
+        source.discord_channel_id = None
+        source.stranded = False
+        source.save(update_fields=["merged_into", "status", "discord_channel_id", "stranded"])
+
+        emit_ticket_event(
+            source,
+            TicketEvent.EventType.MERGED,
+            source=TicketEvent.Source.API,
+            actor_member=context.get("member"),
+            payload={
+                "source_channel_id": source_channel_id,
+                "target_uuid": str(target.uuid),
+                "target_channel_id": target.discord_channel_id,
+                "source_subject": source.subject,
+            },
+        )
+
+    return redirect("ticket_detail", ticket_uuid=target.uuid)
+
+
+@login_required
 def ticket_state(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
     """Return the live state snapshot for the browser poller (D3)."""
     context = get_context(request)

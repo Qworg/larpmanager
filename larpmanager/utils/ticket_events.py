@@ -60,7 +60,12 @@ def emit_ticket_event(  # noqa: PLR0913
     bot outbox cursor to deliver.
     """
     now = timezone.now()
-    already_applied = applied_and_acked or source == TicketEvent.Source.DISCORD or event_type in HISTORY_ONLY_EVENT_TYPES
+    already_applied = (
+        applied_and_acked
+        or source == TicketEvent.Source.DISCORD
+        or event_type in HISTORY_ONLY_EVENT_TYPES
+        or getattr(ticket, "stranded", False)
+    )
 
     return TicketEvent.objects.create(
         ticket=ticket,

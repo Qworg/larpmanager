@@ -225,6 +225,8 @@ def ticket_to_dict(ticket: LarpManagerTicket, auth: TicketAuth | None = None) ->
         "status": ticket.status,
         "priority": ticket.priority,
         "ticket_type": ticket.ticket_type,
+        "stranded": ticket.stranded,
+        "merged_into": str(ticket.merged_into.uuid) if ticket.merged_into else None,
         "version": ticket.version,
         "discord_channel_id": ticket.discord_channel_id,
         "last_synced_message_id": ticket.last_synced_message_id,
@@ -927,6 +929,110 @@ def ticket_channel_writeback(request: HttpRequest, ticket_uuid: str) -> JsonResp
         source=_event_source(auth),
         payload={"ticket_uuid": str(ticket.uuid), "discord_channel_id": discord_channel_id},
     )
+
+    return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noqa: PLR0911
+    """Merge a ticket into another, reassigning messages and archiving the source."""
+    auth, error_response = validate_ticket_api_key(request, required_scope="tickets:write")
+    if error_response is not None:
+        return error_response
+
+    try:
+        source = LarpManagerTicket.objects.select_related("merged_into").get(uuid=ticket_uuid, deleted__isnull=True)
+    except (LarpManagerTicket.DoesNotExist, ValidationError):
+        return JsonResponse({"error": "Ticket not found"}, status=404)
+
+    if _association_mismatch(auth, source):
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    target_uuid = data.get("merge_into")
+    if not target_uuid:
+        return JsonResponse({"error": "merge_into is required"}, status=400)
+
+    try:
+        target = LarpManagerTicket.objects.get(uuid=target_uuid, deleted__isnull=True)
+    except (LarpManagerTicket.DoesNotExist, ValidationError):
+        return JsonResponse({"error": "Target ticket not found"}, status=404)
+
+    if _association_mismatch(auth, target):
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
+    if source.pk == target.pk:
+        return JsonResponse({"error": "Cannot merge a ticket into itself"}, status=400)
+    if source.merged_into_id is not None:
+        return JsonResponse({"error": "Ticket is already merged"}, status=400)
+
+    source_channel_id = source.discord_channel_id
+
+    with transaction.atomic():
+        TicketMessage.objects.filter(ticket=source).update(ticket=target)
+        target.refresh_from_db()
+        lines = [
+            render_transcript_line(m)
+            for m in target.messages.order_by(Coalesce("sent_at", "created"), "id")
+        ]
+        target.transcript = "\n".join(lines)
+        target.save(update_fields=["transcript"])
+
+        source.merged_into = target
+        source.status = TicketStatus.DONE
+        source.discord_channel_id = None
+        source.stranded = False
+        source.save(update_fields=["merged_into", "status", "discord_channel_id", "stranded"])
+
+        emit_ticket_event(
+            source,
+            TicketEvent.EventType.MERGED,
+            source=TicketEvent.Source.API,
+            payload={
+                "source_channel_id": source_channel_id,
+                "target_uuid": str(target.uuid),
+                "target_channel_id": target.discord_channel_id,
+                "source_subject": source.subject,
+            },
+        )
+
+    return JsonResponse({"ticket": ticket_to_dict(target, auth)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def ticket_strand(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
+    """Strand a ticket: archive its Discord channel but keep it alive in LarpManager."""
+    auth, error_response = validate_ticket_api_key(request, required_scope="tickets:write")
+    if error_response is not None:
+        return error_response
+
+    try:
+        ticket = LarpManagerTicket.objects.get(uuid=ticket_uuid, deleted__isnull=True)
+    except (LarpManagerTicket.DoesNotExist, ValidationError):
+        return JsonResponse({"error": "Ticket not found"}, status=404)
+
+    if _association_mismatch(auth, ticket):
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
+    channel_id = ticket.discord_channel_id
+
+    with transaction.atomic():
+        # Emit before marking stranded so the event still reaches the outbox.
+        emit_ticket_event(
+            ticket,
+            TicketEvent.EventType.STRANDED,
+            source=TicketEvent.Source.API,
+            payload={"channel_id": channel_id},
+        )
+        ticket.stranded = True
+        ticket.discord_channel_id = None
+        ticket.save(update_fields=["stranded", "discord_channel_id"])
 
     return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
 

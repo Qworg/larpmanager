@@ -168,6 +168,19 @@
                         <button type="submit" class="ticket-reopen-btn">{% trans "Reopen ticket" %}</button>
                     </form>
                 {% endif %}
+                {% if not ticket.stranded %}
+                    <form method="post" action="{% url 'ticket_strand' ticket.uuid %}">
+                        {% csrf_token %}
+                        <button type="submit" class="ticket-strand-btn">{% trans "Strand ticket" %}</button>
+                    </form>
+                {% endif %}
+                {% if not ticket.merged_into %}
+                    <form method="post" action="{% url 'ticket_merge' ticket.uuid %}" class="ticket-merge-form">
+                        {% csrf_token %}
+                        <input type="text" name="merge_into" placeholder="{% trans 'Merge into ticket UUID' %}" />
+                        <button type="submit" class="ticket-merge-btn">{% trans "Merge into ticket" %}</button>
+                    </form>
+                {% endif %}
             </div>
             <div class="ticket-transcript-links">
                 <h2>{% trans "Shareable transcript link" %}</h2>

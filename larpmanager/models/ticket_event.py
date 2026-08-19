@@ -54,6 +54,8 @@ class TicketEvent(models.Model):
         CHANNEL_ARCHIVE = "channel_archive", "Channel archive"
         ACCESS_DENIED = "access_denied", "Access denied"
         REPLY = "reply", "Reply"
+        MERGED = "merged", "Merged"
+        STRANDED = "stranded", "Stranded"
 
     class Source(models.TextChoices):
         """Origin of the event, derived from the authenticating key."""

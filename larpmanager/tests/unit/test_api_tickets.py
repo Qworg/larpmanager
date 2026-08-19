@@ -251,6 +251,53 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(default_response.status_code, 201)
         self.assertEqual(default_response.json()["ticket"]["ticket_type"], "private")
 
+    def test_merge_ticket(self):
+        """Merge reassigns messages, marks the source merged, and rebuilds the target transcript."""
+        association = self.get_association()
+        source = self.create_larpmanager_ticket(association=association, subject="Source", discord_channel_id=111)
+        target = self.create_larpmanager_ticket(association=association, subject="Target", discord_channel_id=222)
+        TicketMessage.objects.create(
+            ticket=source,
+            discord_message_id=1,
+            author_name="A",
+            content="hello",
+        )
+
+        response = self.client.post(
+            f"/api/v1/tickets/{source.uuid}/merge/",
+            data=json.dumps({"merge_into": str(target.uuid)}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        source.refresh_from_db()
+        target.refresh_from_db()
+        self.assertEqual(source.merged_into_id, target.id)
+        self.assertIsNone(source.discord_channel_id)
+        self.assertEqual(source.status, TicketStatus.DONE)
+        self.assertTrue(TicketMessage.objects.filter(ticket=target, content="hello").exists())
+        self.assertEqual(TicketMessage.objects.filter(ticket=source).count(), 0)
+        self.assertTrue(TicketEvent.objects.filter(ticket=source, event_type=TicketEvent.EventType.MERGED).exists())
+
+    def test_strand_ticket(self):
+        """Strand clears the Discord link and marks the ticket stranded."""
+        association = self.get_association()
+        ticket = self.create_larpmanager_ticket(association=association, discord_channel_id=333)
+
+        response = self.client.post(
+            f"/api/v1/tickets/{ticket.uuid}/strand/",
+            data=json.dumps({}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        ticket.refresh_from_db()
+        self.assertTrue(ticket.stranded)
+        self.assertIsNone(ticket.discord_channel_id)
+        self.assertTrue(TicketEvent.objects.filter(ticket=ticket, event_type=TicketEvent.EventType.STRANDED).exists())
+
     def test_create_ticket_missing_required_fields(self):
         """Test that POST returns 400 for missing required fields."""
         response = self.client.post(

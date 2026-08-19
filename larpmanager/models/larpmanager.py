@@ -505,6 +505,17 @@ class LarpManagerTicket(UuidMixin, BaseModel):
         verbose_name=_("Type"),
     )
 
+    stranded = models.BooleanField(default=False, verbose_name=_("Stranded"))
+
+    merged_into = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="merged_tickets",
+        verbose_name=_("Merged into"),
+    )
+
     analysis = models.CharField(max_length=10000, verbose_name=_("Analysis"), default="")
 
     # Discord integration fields
