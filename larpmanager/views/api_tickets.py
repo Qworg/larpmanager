@@ -180,28 +180,47 @@ def message_to_dict(message: TicketMessage) -> dict[str, Any]:
     }
 
 
+def _revive_if_deleted(message: TicketMessage) -> None:
+    """Clear a soft-delete marker so a resynced row becomes live again."""
+    if message.deleted is not None:
+        message.deleted = None
+
+
 def _upsert_ticket_message(discord_message_id: int, defaults: dict[str, Any]) -> tuple[TicketMessage, bool]:
     """Atomically upsert a TicketMessage on discord_message_id (conflict = update).
+
+    ``discord_message_id`` is a plain DB-unique column that a soft-delete cannot
+    clear, so a resynced message can collide with its own soft-deleted row. Both
+    the lookup and the IntegrityError fallback use ``all_objects`` (the default
+    manager hides soft-deleted rows) and revive the row when it was deleted.
 
     Returns the persisted message and whether it was newly created.
     """
     try:
         with transaction.atomic():
-            message, created = TicketMessage.objects.get_or_create(
+            message, created = TicketMessage.all_objects.get_or_create(
                 discord_message_id=discord_message_id,
                 defaults=defaults,
             )
             if not created:
                 for field, value in defaults.items():
                     setattr(message, field, value)
+                _revive_if_deleted(message)
                 message.save()
     except IntegrityError:
         # A concurrent insert won the race; fetch and update the committed row.
-        with transaction.atomic():
-            message = TicketMessage.objects.get(discord_message_id=discord_message_id)
-            for field, value in defaults.items():
-                setattr(message, field, value)
-            message.save()
+        # DoesNotExist here would mean the conflicting row vanished between the
+        # failed insert and this fetch; log plainly rather than a bare 500.
+        try:
+            with transaction.atomic():
+                message = TicketMessage.all_objects.get(discord_message_id=discord_message_id)
+                for field, value in defaults.items():
+                    setattr(message, field, value)
+                _revive_if_deleted(message)
+                message.save()
+        except TicketMessage.DoesNotExist:
+            logger.exception("TicketMessage %s vanished after IntegrityError on upsert", discord_message_id)
+            raise
         created = False
     return message, created
 
@@ -534,16 +553,30 @@ def tickets_list_create(request: HttpRequest) -> JsonResponse:  # noqa: C901, PL
                 )
     except IntegrityError:
         # A concurrent create with the same idempotency key or channel won the
-        # race; return the committed ticket rather than a 409.
+        # race; return the committed ticket rather than a 409. Both columns are
+        # plain DB-unique (not soft-delete aware), so the conflicting row can be
+        # a soft-deleted ticket invisible to the default manager: look it up
+        # (and report it) via all_objects instead of returning a misleading and
+        # permanent 409 for a ticket the caller cannot see or recreate.
         if idempotency_key:
-            existing_ticket = LarpManagerTicket.objects.filter(idempotency_key=idempotency_key).first()
+            existing_ticket = LarpManagerTicket.all_objects.filter(idempotency_key=idempotency_key).first()
             if existing_ticket is not None:
+                if existing_ticket.deleted is not None:
+                    return JsonResponse(
+                        {"error": "ticket already exists (soft-deleted)", "ticket_uuid": str(existing_ticket.uuid)},
+                        status=409,
+                    )
                 return JsonResponse({"ticket": ticket_to_dict(existing_ticket, auth)})
         if discord_channel_id_int is not None:
-            existing_ticket = LarpManagerTicket.objects.filter(
+            existing_ticket = LarpManagerTicket.all_objects.filter(
                 discord_channel_id=discord_channel_id_int, association=association
             ).first()
             if existing_ticket is not None:
+                if existing_ticket.deleted is not None:
+                    return JsonResponse(
+                        {"error": "ticket already exists (soft-deleted)", "ticket_uuid": str(existing_ticket.uuid)},
+                        status=409,
+                    )
                 return JsonResponse({"ticket": ticket_to_dict(existing_ticket, auth)})
         return JsonResponse({"error": "ticket already exists"}, status=409)
     logger.info("Created ticket %s via Discord API", ticket.uuid)
@@ -627,8 +660,6 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
             base_version = int(data["version"])
         except (ValueError, TypeError):
             return JsonResponse({"error": "version must be an integer"}, status=400)
-        if base_version != ticket.version:
-            return JsonResponse({"error": "concurrent edit", "current_version": ticket.version}, status=409)
 
         for field, value, max_length in [
             ("subject", data.get("subject"), MAX_SUBJECT_LENGTH),
@@ -643,17 +674,19 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
         old_assigned_staff = ticket.assigned_staff_discord_id
         old_subject = ticket.subject
 
+        changed_fields: dict[str, Any] = {}
+
         if "status" in data:
             new_status = data["status"]
             if new_status not in TicketStatus.values:
                 return JsonResponse({"error": f"Invalid status: {new_status}"}, status=400)
-            ticket.status = new_status
+            changed_fields["status"] = new_status
 
         if "priority" in data:
             new_priority = data["priority"]
             if new_priority not in TicketPriority.values:
                 return JsonResponse({"error": f"Invalid priority: {new_priority}"}, status=400)
-            ticket.priority = new_priority
+            changed_fields["priority"] = new_priority
 
         if "assigned_staff_discord_id" in data:
             assigned_staff = data["assigned_staff_discord_id"]
@@ -662,22 +695,35 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
                     assigned_staff = int(assigned_staff)
                 except (ValueError, TypeError):
                     return JsonResponse({"error": "invalid assigned_staff_discord_id"}, status=400)
-            ticket.assigned_staff_discord_id = assigned_staff
+            changed_fields["assigned_staff_discord_id"] = assigned_staff
 
         if "subject" in data:
-            ticket.subject = data["subject"]
+            changed_fields["subject"] = data["subject"]
 
         if "content" in data:
-            ticket.content = data["content"]
+            changed_fields["content"] = data["content"]
 
         source = _event_source(auth)
-        new_status = data.get("status", old_status)
-        new_priority = data.get("priority", old_priority)
-        assigned_staff = ticket.assigned_staff_discord_id
+        new_status = changed_fields.get("status", old_status)
+        new_priority = changed_fields.get("priority", old_priority)
+        assigned_staff = changed_fields.get("assigned_staff_discord_id", old_assigned_staff)
 
+        # Compare-and-swap (D8, API-1): the version check and the write happen in
+        # the same UPDATE, so two concurrent PATCHes reading the same version can
+        # no longer both pass the check and have the second silently clobber the
+        # first's write. Zero rows touched means someone else's write already
+        # advanced the version; report the current one so the caller can retry.
         with transaction.atomic():
-            ticket.version = F("version") + 1
-            ticket.save()
+            # QuerySet.update() bypasses auto_now, so `updated` must be set
+            # explicitly here or the CAS write would leave it stale (API-1).
+            updated = LarpManagerTicket.objects.filter(uuid=ticket_uuid, version=base_version).update(
+                version=F("version") + 1, updated=timezone.now(), **changed_fields
+            )
+            if updated == 0:
+                ticket.refresh_from_db(fields=["version"])
+                return JsonResponse({"error": "concurrent edit", "current_version": ticket.version}, status=409)
+
+            ticket.refresh_from_db()
 
             if "status" in data and new_status != old_status:
                 emit_ticket_event(
@@ -714,7 +760,6 @@ def ticket_detail(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # no
                     payload={"subject": data["subject"]},
                 )
 
-        ticket.refresh_from_db(fields=["version"])
         logger.info("Updated ticket %s via Discord API", ticket.uuid)
 
         return JsonResponse({"ticket": ticket_to_dict(ticket, auth)})
@@ -778,6 +823,11 @@ def ticket_close(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
 
     if _association_mismatch(auth, ticket):
         return JsonResponse({"error": "Forbidden"}, status=403)
+
+    # Already-closed guard (API-5, mirrors ticket_reopen's guard): without it a
+    # duplicate close would still emit a second CLOSED event.
+    if ticket.status == TicketStatus.DONE:
+        return JsonResponse({"error": "Ticket is already closed"}, status=400)
 
     if request.body:
         try:
@@ -966,6 +1016,12 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
     if _association_mismatch(auth, target):
         return JsonResponse({"error": "Forbidden"}, status=403)
 
+    # Unconditional invariant (API-2): merging must never move TicketMessages
+    # across tenants. _association_mismatch no-ops for a bot key (unscoped by
+    # design), so this check is independent of auth to still catch that case.
+    if source.association_id != target.association_id:
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
     if source.pk == target.pk:
         return JsonResponse({"error": "Cannot merge a ticket into itself"}, status=400)
     if source.merged_into_id is not None:
@@ -982,10 +1038,7 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> JsonResponse:  # noq
     with transaction.atomic():
         TicketMessage.objects.filter(ticket=source).update(ticket=target)
         target.refresh_from_db()
-        lines = [
-            render_transcript_line(m)
-            for m in target.messages.order_by(Coalesce("sent_at", "created"), "id")
-        ]
+        lines = [render_transcript_line(m) for m in target.messages.order_by(Coalesce("sent_at", "created"), "id")]
         target.transcript = "\n".join(lines)
         target.save(update_fields=["transcript"])
 

@@ -21,8 +21,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 from django.conf import settings as conf_settings
 from django.contrib.auth.decorators import login_required
@@ -35,6 +39,9 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
+from django_ratelimit import ALL
+from django_ratelimit.core import get_usage
+from django_ratelimit.decorators import ratelimit
 
 from larpmanager.models.larpmanager import LarpManagerTicket, TicketPriority, TicketStatus, render_transcript_line
 from larpmanager.models.ticket_event import TicketEvent
@@ -56,7 +63,116 @@ MAX_REPLY_LENGTH = 2000
 TRANSCRIPT_LINK_TTL = timedelta(hours=24)
 TRANSCRIPT_LINK_MAX_OPENS = 5
 
+# Rate limit for the browser poller endpoints (D3/FIX-WEB-2): keyed per
+# user+ticket (and per ip+ticket) rather than a flat per-user budget, so it
+# bounds a single tab's runaway/malicious polling without being a shared
+# budget across a user's open tabs. At the ~5s baseline cadence, one open
+# ticket tab is ~12 req/min against that ticket's own budget; "60/m" leaves
+# headroom for the poller's error backoff catching up without tripping the
+# limit, and opening N other tickets no longer costs this ticket's budget.
+#
+# FIX-WEB-4: the per-ticket key above is derived entirely from the attacker
+# -controlled uuid path segment, and the URL route accepts any slug-shaped
+# string regardless of whether a ticket with that uuid exists -- so a caller
+# can mint unlimited distinct buckets by varying the uuid and never trip this
+# limit at all. It is therefore stacked with a flat, ticket-agnostic user/ip
+# limiter below that bounds TOTAL poll volume no matter how the path varies.
+# Sizing: assume a generous worst case of up to 5 simultaneously open ticket
+# tabs, each legitimately allowed to peak at this same "60/m" per-ticket
+# ceiling (e.g. all backing off from errors at once) -- 5 * 60 = "300/m" is
+# the highest total volume a real multi-tab user should ever produce, so it
+# is used as the flat ceiling: generous enough to never 429 real usage, but
+# it bounds an attacker cycling through arbitrary (including nonexistent)
+# ticket uuids to that same total, closing the bypass.
+TICKET_POLL_RATE = "60/m"
+TICKET_POLL_TOTAL_RATE = "300/m"
+
+# Matches the "tickets/<uuid>/..." segment shared by both poller URLs, used
+# as a fallback to build the rate-limit keys below when resolver_match isn't
+# populated (e.g. when a view is called directly in tests).
+_TICKET_POLL_PATH_RE = re.compile(r"/tickets/([^/]+)/")
+
 logger = logging.getLogger(__name__)
+
+
+def _ticket_uuid_from_path(request: HttpRequest) -> str:
+    """Extract the ticket uuid segment from a ticket-poller request.
+
+    Prefers the URL resolver's captured ``ticket_uuid`` kwarg, which is exact
+    and unaffected by future route changes (locale/path prefixes etc); falls
+    back to a path regex when ``resolver_match`` is unavailable, e.g. a view
+    invoked directly (as in unit tests) rather than through URL dispatch.
+    """
+    resolver_match = getattr(request, "resolver_match", None)
+    if resolver_match is not None:
+        uuid = resolver_match.kwargs.get("ticket_uuid")
+        if uuid is not None:
+            return uuid
+    match = _TICKET_POLL_PATH_RE.search(request.path)
+    return match.group(1) if match else ""
+
+
+def _ticket_poll_user_key(_group: str, request: HttpRequest) -> str:
+    """Rate-limit key: user id scoped to the polled ticket (FIX-WEB-2)."""
+    user_id = request.user.pk if request.user.is_authenticated else "anon"
+    return f"user:{user_id}:ticket:{_ticket_uuid_from_path(request)}"
+
+
+def _ticket_poll_ip_key(_group: str, request: HttpRequest) -> str:
+    """Rate-limit key: client IP scoped to the polled ticket (FIX-WEB-2)."""
+    return f"ip:{get_client_ip(request)}:ticket:{_ticket_uuid_from_path(request)}"
+
+
+def _ticket_poll_flat_user_key(_group: str, request: HttpRequest) -> str:
+    """Rate-limit key: user id only, NOT scoped to any ticket (FIX-WEB-4).
+
+    Stacked alongside ``_ticket_poll_user_key`` to bound a user's total poll
+    volume regardless of how many distinct (or nonexistent) ticket uuids
+    appear across requests -- the per-ticket key alone is defeated by simply
+    varying that uuid, since it is never validated before the limiter runs.
+    """
+    user_id = request.user.pk if request.user.is_authenticated else "anon"
+    return f"user:{user_id}"
+
+
+def _ticket_poll_flat_ip_key(_group: str, request: HttpRequest) -> str:
+    """Rate-limit key: client IP only, NOT scoped to any ticket (FIX-WEB-4)."""
+    return f"ip:{get_client_ip(request)}"
+
+
+def ticket_poll_rate_limited_response(
+    request: HttpRequest,
+    view_func: Any,
+    rate: str,
+    ip_key: Any = _ticket_poll_ip_key,
+    user_key: Any = _ticket_poll_user_key,
+    extra_limiters: Sequence[tuple[Any, str]] = (),
+) -> JsonResponse:
+    """Build a 429 JSON response with a Retry-After header for a rate-limited poll request.
+
+    Shared by the per-ticket pollers here and the staff batch poller in
+    ``views/exe/ticket.py``, which passes its own (non-per-ticket) key functions
+    to match the keys its own ``@ratelimit`` decorators actually used.
+
+    ``extra_limiters`` lets a caller report the time-left of additional
+    stacked ``(key_fn, rate)`` checks (e.g. the flat total-volume limiters
+    used alongside the per-ticket ones here) so ``Retry-After`` reflects
+    whichever limiter is actually still blocking the request.
+    """
+    usages = [
+        get_usage(request=request, fn=view_func, key=ip_key, rate=rate, method=ALL, increment=False),
+        get_usage(request=request, fn=view_func, key=user_key, rate=rate, method=ALL, increment=False),
+    ]
+    for extra_key, extra_rate in extra_limiters:
+        usages.append(
+            get_usage(request=request, fn=view_func, key=extra_key, rate=extra_rate, method=ALL, increment=False)
+        )
+    time_lefts = [usage["time_left"] for usage in usages if usage and usage.get("time_left") is not None]
+    retry_after = max(1, *time_lefts) if time_lefts else 60
+
+    response = JsonResponse({"error": "rate limited"}, status=429)
+    response["Retry-After"] = str(retry_after)
+    return response
 
 
 def filter_tickets_by_status(queryset: Any, status: str) -> Any:
@@ -587,12 +703,9 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
     if not target_uuid:
         return _render_detail_with_error(request, context, source, "merge_into is required", status=400)
 
-    target = (
-        LarpManagerTicket.objects.filter(
-            uuid=target_uuid, association_id=context["association_id"], deleted__isnull=True
-        )
-        .first()
-    )
+    target = LarpManagerTicket.objects.filter(
+        uuid=target_uuid, association_id=context["association_id"], deleted__isnull=True
+    ).first()
     if target is None:
         return _render_detail_with_error(request, context, source, "Target ticket not found", status=404)
     if source.pk == target.pk:
@@ -611,10 +724,7 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
     with transaction.atomic():
         TicketMessage.objects.filter(ticket=source).update(ticket=target)
         target.refresh_from_db()
-        lines = [
-            render_transcript_line(m)
-            for m in target.messages.order_by(Coalesce("sent_at", "created"), "id")
-        ]
+        lines = [render_transcript_line(m) for m in target.messages.order_by(Coalesce("sent_at", "created"), "id")]
         target.transcript = "\n".join(lines)
         target.save(update_fields=["transcript"])
 
@@ -642,8 +752,23 @@ def ticket_merge(request: HttpRequest, ticket_uuid: str) -> Any:
 
 
 @login_required
+@ratelimit(key=_ticket_poll_flat_ip_key, rate=TICKET_POLL_TOTAL_RATE, method="GET", block=False)
+@ratelimit(key=_ticket_poll_flat_user_key, rate=TICKET_POLL_TOTAL_RATE, method="GET", block=False)
+@ratelimit(key=_ticket_poll_ip_key, rate=TICKET_POLL_RATE, method="GET", block=False)
+@ratelimit(key=_ticket_poll_user_key, rate=TICKET_POLL_RATE, method="GET", block=False)
 def ticket_state(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
     """Return the live state snapshot for the browser poller (D3)."""
+    if getattr(request, "limited", False):
+        return ticket_poll_rate_limited_response(
+            request,
+            ticket_state,
+            TICKET_POLL_RATE,
+            extra_limiters=[
+                (_ticket_poll_flat_ip_key, TICKET_POLL_TOTAL_RATE),
+                (_ticket_poll_flat_user_key, TICKET_POLL_TOTAL_RATE),
+            ],
+        )
+
     context = get_context(request)
     ticket = _get_ticket_accessible(request, context, ticket_uuid)
 
@@ -662,8 +787,23 @@ def ticket_state(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
 
 
 @login_required
+@ratelimit(key=_ticket_poll_flat_ip_key, rate=TICKET_POLL_TOTAL_RATE, method="GET", block=False)
+@ratelimit(key=_ticket_poll_flat_user_key, rate=TICKET_POLL_TOTAL_RATE, method="GET", block=False)
+@ratelimit(key=_ticket_poll_ip_key, rate=TICKET_POLL_RATE, method="GET", block=False)
+@ratelimit(key=_ticket_poll_user_key, rate=TICKET_POLL_RATE, method="GET", block=False)
 def ticket_messages(request: HttpRequest, ticket_uuid: str) -> JsonResponse:
     """Return TicketMessage rows with id greater than ``?after=`` (D3)."""
+    if getattr(request, "limited", False):
+        return ticket_poll_rate_limited_response(
+            request,
+            ticket_messages,
+            TICKET_POLL_RATE,
+            extra_limiters=[
+                (_ticket_poll_flat_ip_key, TICKET_POLL_TOTAL_RATE),
+                (_ticket_poll_flat_user_key, TICKET_POLL_TOTAL_RATE),
+            ],
+        )
+
     context = get_context(request)
     ticket = _get_ticket_accessible(request, context, ticket_uuid)
 

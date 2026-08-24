@@ -40,38 +40,51 @@
         {% endif %}
     </form>
     {% if tickets %}
-        <div data-ticket-poller>
-            <table class="ticket-dashboard">
-                <thead>
-                    <tr>
-                        <th>{% trans "Subject" %}</th>
-                        <th>{% trans "Status" %}</th>
-                        <th>{% trans "Priority" %}</th>
-                        <th>{% trans "Assigned" %}</th>
-                        <th>{% trans "Member" %}</th>
-                        <th>{% trans "Created" %}</th>
+        <table class="ticket-dashboard"
+               data-ticket-list-poller
+               data-batch-state-url="{% url 'exe_ticket_states_batch' %}">
+            <thead>
+                <tr>
+                    <th>{% trans "Subject" %}</th>
+                    <th>{% trans "Status" %}</th>
+                    <th>{% trans "Priority" %}</th>
+                    <th>{% trans "Assigned" %}</th>
+                    <th>{% trans "Member" %}</th>
+                    <th>{% trans "Created" %}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ticket in tickets %}
+                    <tr data-ticket-row-uuid="{{ ticket.uuid }}">
+                        <td>
+                            <a href="{% url 'ticket_detail' ticket.uuid %}">
+                                {% firstof ticket.subject ticket.reason %}
+                            </a>
+                        </td>
+                        <td data-ticket-status="{{ ticket.status }}">{{ ticket.get_status_display }}</td>
+                        <td data-ticket-priority="{{ ticket.priority }}">{{ ticket.get_priority_display }}</td>
+                        <td>{{ ticket.assigned_staff_discord_id|default:"-" }}</td>
+                        <td>{{ ticket.member|default:"-" }}</td>
+                        <td>{{ ticket.created|date:"SHORT_DATE_FORMAT" }}</td>
                     </tr>
-                </thead>
-                <tbody>
-                    {% for ticket in tickets %}
-                        <tr data-ticket-poller
-                            data-ticket-uuid="{{ ticket.uuid }}"
-                            data-state-url="{% url 'ticket_state' ticket.uuid %}">
-                            <td>
-                                <a href="{% url 'ticket_detail' ticket.uuid %}">
-                                    {% firstof ticket.subject ticket.reason %}
-                                </a>
-                            </td>
-                            <td data-ticket-status="{{ ticket.status }}">{{ ticket.get_status_display }}</td>
-                            <td data-ticket-priority="{{ ticket.priority }}">{{ ticket.get_priority_display }}</td>
-                            <td>{{ ticket.assigned_staff_discord_id|default:"-" }}</td>
-                            <td>{{ ticket.member|default:"-" }}</td>
-                            <td>{{ ticket.created|date:"SHORT_DATE_FORMAT" }}</td>
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if tickets.has_other_pages %}
+            <p class="centerized">
+                {% if tickets.has_previous %}
+                    <a href="?status={{ status }}&stranded={{ stranded }}&q={{ query|urlencode }}&page={{ tickets.previous_page_number }}">
+                        {% trans "Previous" %}
+                    </a>
+                {% endif %}
+                {% blocktrans with current=tickets.number total=tickets.paginator.num_pages %}Page {{ current }} of {{ total }}{% endblocktrans %}
+                {% if tickets.has_next %}
+                    <a href="?status={{ status }}&stranded={{ stranded }}&q={{ query|urlencode }}&page={{ tickets.next_page_number }}">
+                        {% trans "Next" %}
+                    </a>
+                {% endif %}
+            </p>
+        {% endif %}
     {% elif query %}
         <p>{% trans "No tickets match your search." %}</p>
     {% else %}

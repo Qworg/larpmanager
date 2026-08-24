@@ -44,6 +44,11 @@ urlpatterns = [
         name="exe_tickets",
     ),
     path(
+        "manage/tickets/states/",
+        views_et.exe_ticket_states_batch,
+        name="exe_ticket_states_batch",
+    ),
+    path(
         "manage/cache/",
         views_eas.exe_reload_cache,
         name="exe_reload_cache",

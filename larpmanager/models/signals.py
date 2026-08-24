@@ -1054,8 +1054,13 @@ def post_save_clear_blog_cache(sender: type, instance: LarpManagerBlog, **kwargs
 
 @receiver(post_save, sender=LarpManagerTicket)
 def save_larpmanager_ticket(sender: type, instance: LarpManagerTicket, created: bool, **kwargs: Any) -> None:
-    """Send email notification when a support ticket is saved."""
-    send_support_ticket_email(instance)
+    """Send the "new ticket" notification email once, on creation only.
+
+    Deliberately guarded to ``created`` so later edits/saves (including PATCH
+    and other in-place updates) never re-send this notification.
+    """
+    if created:
+        send_support_ticket_email(instance)
 
 
 @receiver(pre_save, sender=LarpManagerTutorial)

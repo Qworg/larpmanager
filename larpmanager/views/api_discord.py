@@ -37,12 +37,17 @@ from urllib.parse import urlencode
 
 import requests
 from django.conf import settings
+from django.db import connection, transaction
 from django.http import HttpRequest, HttpResponseRedirect, JsonResponse
 from django.shortcuts import render
+from django.urls import reverse
 from django.views.decorators.http import require_GET
+from django_ratelimit import ALL
+from django_ratelimit.core import get_usage
+from django_ratelimit.decorators import ratelimit
 
 from larpmanager.models.base import PublisherApiKey
-from larpmanager.models.member import Member, MemberConfig
+from larpmanager.models.member import Member, MemberConfig, Membership
 from larpmanager.utils.publication.api import log_api_access
 
 logger = logging.getLogger(__name__)
@@ -60,6 +65,42 @@ DISCORD_USER_ME = f"{DISCORD_API_BASE}/users/@me"
 
 # Config key for storing Discord ID in MemberConfig
 DISCORD_ID_CONFIG_KEY = "discord_id"
+
+# Session key used to bind an OAuth state to the browser that started the flow
+DISCORD_OAUTH_STATE_SESSION_KEY = "discord_oauth_state"
+
+
+def _rate_limit_retry_after(request: HttpRequest, view_func: Any, rate: str, keys: tuple[str, ...]) -> int:
+    """Compute the Retry-After (seconds) for a rate-limited request across the given keys."""
+    usages = [get_usage(request=request, fn=view_func, key=key, rate=rate, method=ALL, increment=False) for key in keys]
+    time_lefts = [usage["time_left"] for usage in usages if usage and usage.get("time_left") is not None]
+    return max(1, *time_lefts) if time_lefts else 60
+
+
+def _rate_limited_json(
+    request: HttpRequest, view_func: Any, rate: str, keys: tuple[str, ...] = ("ip", "header:x-api-key")
+) -> JsonResponse:
+    """Build a 429 JSON response with a Retry-After header for an API-key endpoint."""
+    retry_after = _rate_limit_retry_after(request, view_func, rate, keys)
+    auth = getattr(request, "_ticket_auth", None)
+    log_api_access(auth.api_key if auth else None, request, 429, action=f"{request.method} {request.path}")
+    response = JsonResponse({"error": "rate limited", "retry_after": retry_after}, status=429)
+    response["Retry-After"] = str(retry_after)
+    return response
+
+
+def _rate_limited_page(request: HttpRequest, view_func: Any, rate: str, keys: tuple[str, ...] = ("ip",)) -> Any:
+    """Build a 429 HTML error page with a Retry-After header for an unauthenticated browser endpoint."""
+    retry_after = _rate_limit_retry_after(request, view_func, rate, keys)
+    log_api_access(None, request, 429, action=f"{request.method} {request.path}")
+    response = render(
+        request,
+        "discord_link_error.html",
+        {"error": "Too many attempts. Please wait a moment and try again."},
+    )
+    response.status_code = 429
+    response["Retry-After"] = str(retry_after)
+    return response
 
 
 @dataclass
@@ -207,6 +248,11 @@ def validate_bot_api_key(request: HttpRequest) -> tuple[bool, JsonResponse | Non
 def get_member_by_discord_id(discord_id: int) -> Member | None:
     """Find a member by their linked Discord ID.
 
+    A discord_id is expected to map to exactly one member, but corrupt state
+    (e.g. from a race before linking was de-duplicated) can leave more than one
+    config row pointing at the same discord_id; in that case the most recently
+    updated match wins instead of raising.
+
     Args:
         discord_id: The Discord user ID to search for
 
@@ -223,10 +269,25 @@ def get_member_by_discord_id(discord_id: int) -> Member | None:
         return config.member  # noqa: TRY300
     except MemberConfig.DoesNotExist:
         return None
+    except MemberConfig.MultipleObjectsReturned:
+        logger.exception("Multiple members linked to Discord ID %s; using most recently updated", discord_id)
+        config = (
+            MemberConfig.objects.select_related("member")
+            .filter(name=DISCORD_ID_CONFIG_KEY, value=str(discord_id), deleted__isnull=True)
+            .order_by("-updated")
+            .first()
+        )
+        return config.member if config else None
 
 
 def link_discord_to_member(member: Member, discord_id: int) -> MemberConfig:
     """Link a Discord ID to a member account.
+
+    A discord_id must map to at most one member, so any existing config row
+    holding the same discord_id on a different member is cleared first. The
+    dedupe-then-write is wrapped in a transaction guarded by a Postgres
+    advisory lock keyed on discord_id, so two concurrent links of the same
+    discord_id cannot both pass the delete step and insert duplicate rows.
 
     Args:
         member: The member to link
@@ -236,15 +297,72 @@ def link_discord_to_member(member: Member, discord_id: int) -> MemberConfig:
         The created or updated MemberConfig object
 
     """
-    config, _created = MemberConfig.objects.update_or_create(
-        member=member,
-        name=DISCORD_ID_CONFIG_KEY,
-        defaults={"value": str(discord_id)},
-    )
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [discord_id])
+
+        MemberConfig.objects.select_for_update().filter(
+            name=DISCORD_ID_CONFIG_KEY,
+            value=str(discord_id),
+            deleted__isnull=True,
+        ).exclude(member=member).delete()
+
+        config, _created = MemberConfig.objects.update_or_create(
+            member=member,
+            name=DISCORD_ID_CONFIG_KEY,
+            defaults={"value": str(discord_id)},
+        )
     return config
 
 
+def _parse_signed_state(token: str) -> int:
+    """Parse and verify a signed discord-link state/token, returning the discord_id it asserts.
+
+    Format is ``discord_id:nonce:signature``. A signing secret is mandatory: if
+    ``DISCORD_CLIENT_SECRET`` is not configured, verification fails closed rather
+    than falling back to accepting an unsigned token, since an unsigned token
+    would let anyone assert an arbitrary discord_id with no credentials at all.
+    Raises ValueError if the format is wrong, no secret is configured, or the
+    signature is invalid.
+    """
+    parts = token.split(":")
+    if len(parts) < 2:  # noqa: PLR2004
+        raise ValueError("Invalid state format")  # noqa: EM101, TRY003
+
+    discord_id_from_state = int(parts[0])
+
+    if not DISCORD_CLIENT_SECRET:
+        raise ValueError("Discord OAuth signing secret is not configured")  # noqa: EM101, TRY003
+
+    if len(parts) < 3:  # noqa: PLR2004
+        raise ValueError("Missing state signature")  # noqa: EM101, TRY003
+    nonce = parts[1]
+    provided_signature = parts[2]
+    message = f"{discord_id_from_state}:{nonce}"
+    expected_signature = hmac.new(DISCORD_CLIENT_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(provided_signature, expected_signature):
+        raise ValueError("Invalid state signature")  # noqa: EM101, TRY003
+
+    return discord_id_from_state
+
+
+def _make_signed_state(discord_id: int) -> str:
+    """Build a fresh signed state token asserting discord_id, with a brand-new random nonce.
+
+    Every call produces a different, unpredictable value (given a signing
+    secret) even for the same discord_id, since the nonce is freshly random.
+    """
+    nonce = secrets.token_urlsafe(16)
+    message = f"{discord_id}:{nonce}"
+    if DISCORD_CLIENT_SECRET:
+        signature = hmac.new(DISCORD_CLIENT_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+        return f"{message}:{signature}"
+    return message
+
+
 @require_GET
+@ratelimit(key="ip", rate="120/m", method="GET", block=False)
+@ratelimit(key="header:x-api-key", rate="120/m", method="GET", block=False)
 def discord_member_check(request: HttpRequest, discord_id: int) -> JsonResponse:
     """Check if a Discord user is linked to a larpmanager member.
 
@@ -256,6 +374,8 @@ def discord_member_check(request: HttpRequest, discord_id: int) -> JsonResponse:
         JSON response with linked status and member info if linked
 
     """
+    if getattr(request, "limited", False):
+        return _rate_limited_json(request, discord_member_check, "120/m")
     auth, error_response = validate_ticket_api_key(request)
     if error_response is not None:
         return error_response
@@ -275,19 +395,26 @@ def discord_member_check(request: HttpRequest, discord_id: int) -> JsonResponse:
 
 
 @require_GET
+@ratelimit(key="ip", rate="30/m", method="GET", block=False)
+@ratelimit(key="header:x-api-key", rate="30/m", method="GET", block=False)
 def discord_oauth_url(request: HttpRequest, discord_id: int) -> JsonResponse:
-    """Generate a Discord OAuth URL for linking an account.
+    """Generate an OAuth start URL for linking an account.
 
     The state parameter contains the Discord ID so we can link it after OAuth.
+    The returned URL points at our own ``discord_oauth_start`` view (not Discord's
+    authorize endpoint directly) so the state gets bound to the browser session
+    that actually visits it, before it is ever handed off to Discord.
 
     Args:
         request: HTTP request object
         discord_id: The Discord user ID requesting to link
 
     Returns:
-        JSON response with the OAuth URL
+        JSON response with the OAuth start URL
 
     """
+    if getattr(request, "limited", False):
+        return _rate_limited_json(request, discord_oauth_url, "30/m")
     _auth, error_response = validate_ticket_api_key(request)
     if error_response is not None:
         return error_response
@@ -295,18 +422,58 @@ def discord_oauth_url(request: HttpRequest, discord_id: int) -> JsonResponse:
     if not DISCORD_CLIENT_ID:
         return JsonResponse({"error": "Discord OAuth not configured"}, status=500)
 
-    # Generate a state token that encodes the discord_id securely
-    # Format: discord_id:random_nonce:signature
-    nonce = secrets.token_urlsafe(16)
-    message = f"{discord_id}:{nonce}"
+    # This signed token only asserts discord_id to discord_oauth_start; it is
+    # NOT the OAuth state sent to Discord. discord_oauth_start mints a fresh,
+    # session-bound state from it (see FIX-OAUTH-1).
+    link_token = _make_signed_state(discord_id)
 
-    if DISCORD_CLIENT_SECRET:
-        signature = hmac.new(DISCORD_CLIENT_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()[:16]
-        state = f"{message}:{signature}"
-    else:
-        state = message
+    start_path = reverse("discord_oauth_start")
+    oauth_url = f"{request.build_absolute_uri(start_path)}?{urlencode({'state': link_token})}"
 
-    # Build the OAuth URL
+    return JsonResponse({"oauth_url": oauth_url})
+
+
+@require_GET
+@ratelimit(key="ip", rate="30/m", method="GET", block=False)
+def discord_oauth_start(request: HttpRequest) -> Any:
+    """Start the Discord OAuth flow, minting a fresh session-bound state.
+
+    The caller-supplied ``state`` query parameter is only a bot-issued signed
+    token asserting a discord_id; it is verified here but never itself used as
+    the OAuth state. Instead a brand-new random state is generated, stored in
+    THIS request's session, and sent to Discord. This is what makes the
+    callback's session check meaningful: an attacker who legitimately drives
+    their own link flow to capture a valid (code, state) pair cannot make that
+    captured state land in a victim's session, because visiting this endpoint
+    always mints a fresh, unguessable value - never the value the attacker
+    supplied or already knows.
+
+    Args:
+        request: HTTP request object with a bot-issued signed state/token
+
+    Returns:
+        Redirect to Discord's authorize endpoint, or an error page
+
+    """
+    if getattr(request, "limited", False):
+        return _rate_limited_page(request, discord_oauth_start, "30/m")
+
+    link_token = request.GET.get("state")
+    if not link_token:
+        return render(request, "discord_link_error.html", {"error": "Missing state parameter."})
+
+    if not DISCORD_CLIENT_ID:
+        return render(request, "discord_link_error.html", {"error": "Discord OAuth not configured."})
+
+    try:
+        discord_id = _parse_signed_state(link_token)
+    except (ValueError, IndexError) as e:
+        logger.warning("Discord OAuth link token validation failed: %s", e)
+        return render(request, "discord_link_error.html", {"error": "Invalid state parameter."})
+
+    state = _make_signed_state(discord_id)
+    request.session[DISCORD_OAUTH_STATE_SESSION_KEY] = state
+
     params = {
         "client_id": DISCORD_CLIENT_ID,
         "redirect_uri": DISCORD_REDIRECT_URI,
@@ -314,21 +481,20 @@ def discord_oauth_url(request: HttpRequest, discord_id: int) -> JsonResponse:
         "scope": "identify email",
         "state": state,
     }
-
-    oauth_url = f"{DISCORD_OAUTH_AUTHORIZE}?{urlencode(params)}"
-
-    return JsonResponse({"oauth_url": oauth_url})
+    return HttpResponseRedirect(f"{DISCORD_OAUTH_AUTHORIZE}?{urlencode(params)}")
 
 
 @require_GET
-def discord_oauth_callback(request: HttpRequest) -> HttpResponseRedirect:  # noqa: C901, PLR0911, PLR0912
+@ratelimit(key="ip", rate="20/m", method="GET", block=False)
+def discord_oauth_callback(request: HttpRequest) -> HttpResponseRedirect:  # noqa: C901, PLR0911
     """Handle the OAuth callback from Discord.
 
     This endpoint:
-    1. Exchanges the authorization code for an access token
-    2. Fetches the Discord user's information
-    3. Links the Discord account to the logged-in larpmanager user
-    4. Redirects to a success page
+    1. Verifies the state was bound to this browser's session by discord_oauth_start
+    2. Exchanges the authorization code for an access token
+    3. Fetches the Discord user's information
+    4. Links the Discord account to the logged-in larpmanager user
+    5. Redirects to a success page
 
     Args:
         request: HTTP request object with code and state parameters
@@ -337,6 +503,9 @@ def discord_oauth_callback(request: HttpRequest) -> HttpResponseRedirect:  # noq
         Redirect to success or error page
 
     """
+    if getattr(request, "limited", False):
+        return _rate_limited_page(request, discord_oauth_callback, "20/m")
+
     code = request.GET.get("code")
     state = request.GET.get("state")
     error = request.GET.get("error")
@@ -360,25 +529,11 @@ def discord_oauth_callback(request: HttpRequest) -> HttpResponseRedirect:  # noq
             },
         )
 
-    # Parse and validate the state parameter
+    # Parse and validate the state parameter. A signed 3-part state is always
+    # mandatory; if no signing secret is configured at all, this fails closed
+    # rather than falling back to accepting an unsigned state (see FIX-OAUTH-4).
     try:
-        parts = state.split(":")
-        if len(parts) >= 2:  # noqa: PLR2004
-            discord_id_from_state = int(parts[0])
-
-            # Verify signature if secret is configured
-            if DISCORD_CLIENT_SECRET and len(parts) >= 3:  # noqa: PLR2004
-                nonce = parts[1]
-                provided_signature = parts[2]
-                message = f"{discord_id_from_state}:{nonce}"
-                expected_signature = hmac.new(
-                    DISCORD_CLIENT_SECRET.encode(), message.encode(), hashlib.sha256
-                ).hexdigest()[:16]
-
-                if not hmac.compare_digest(provided_signature, expected_signature):
-                    raise ValueError("Invalid state signature")  # noqa: EM101, TRY003, TRY301
-        else:
-            raise ValueError("Invalid state format")  # noqa: EM101, TRY003, TRY301
+        discord_id_from_state = _parse_signed_state(state)
     except (ValueError, IndexError) as e:
         logger.warning("Discord OAuth state validation failed: %s", e)
         return render(
@@ -386,6 +541,29 @@ def discord_oauth_callback(request: HttpRequest) -> HttpResponseRedirect:  # noq
             "discord_link_error.html",
             {
                 "error": "Invalid state parameter.",
+            },
+        )
+
+    # Verify this callback is coming back to the same browser session that
+    # started the flow via discord_oauth_start. This prevents an attacker from
+    # completing their own OAuth authorization, then luring a logged-in victim
+    # to hit this callback with the attacker's code/state and getting the
+    # attacker's Discord identity linked to the victim's member.
+    session_state = request.session.pop(DISCORD_OAUTH_STATE_SESSION_KEY, None)
+    # Constant-time comparison, matching the HMAC check in _parse_signed_state.
+    # Both sides are encoded to bytes first: compare_digest raises on None and
+    # on a non-ASCII str, but never on bytes.
+    state_matches = isinstance(session_state, str) and hmac.compare_digest(
+        session_state.encode(),
+        state.encode(),
+    )
+    if not state_matches:
+        logger.warning("Discord OAuth state/session mismatch")
+        return render(
+            request,
+            "discord_link_error.html",
+            {
+                "error": "Discord link session expired or invalid. Please start the linking process again.",
             },
         )
 
@@ -493,6 +671,7 @@ def discord_oauth_callback(request: HttpRequest) -> HttpResponseRedirect:  # noq
 
 
 @require_GET
+@ratelimit(key="ip", rate="20/m", method="GET", block=False)
 def discord_link_complete(request: HttpRequest) -> HttpResponseRedirect:
     """Complete Discord linking after login.
 
@@ -505,6 +684,9 @@ def discord_link_complete(request: HttpRequest) -> HttpResponseRedirect:
         Redirect to success or error page
 
     """
+    if getattr(request, "limited", False):
+        return _rate_limited_page(request, discord_link_complete, "20/m")
+
     if not request.user.is_authenticated:
         return HttpResponseRedirect("/accounts/login/")
 
@@ -546,8 +728,18 @@ def discord_link_complete(request: HttpRequest) -> HttpResponseRedirect:
 
 
 @require_GET
+@ratelimit(key="ip", rate="30/m", method="GET", block=False)
+@ratelimit(key="header:x-api-key", rate="30/m", method="GET", block=False)
 def discord_unlink(request: HttpRequest) -> JsonResponse:
     """Unlink a Discord account from a member (API endpoint).
+
+    A bot key (platform-wide by design) may unlink any member. A scoped
+    PublisherApiKey may only unlink a member that belongs to its own
+    association, so one association's key cannot be used to unlink members
+    of another association. A discord_id is expected to map to at most one
+    member, but corrupt state can leave more than one config row pointing at
+    it; all matching (and, for scoped keys, in-scope) rows are unlinked
+    instead of raising.
 
     Args:
         request: HTTP request object with discord_id parameter
@@ -556,7 +748,9 @@ def discord_unlink(request: HttpRequest) -> JsonResponse:
         JSON response indicating success or failure
 
     """
-    _auth, error_response = validate_ticket_api_key(request, required_scope="tickets:write")
+    if getattr(request, "limited", False):
+        return _rate_limited_json(request, discord_unlink, "30/m")
+    auth, error_response = validate_ticket_api_key(request, required_scope="tickets:write")
     if error_response is not None:
         return error_response
 
@@ -564,13 +758,29 @@ def discord_unlink(request: HttpRequest) -> JsonResponse:
     if not discord_id:
         return JsonResponse({"error": "discord_id required"}, status=400)
 
-    try:
-        config = MemberConfig.objects.get(
+    configs = list(
+        MemberConfig.objects.select_related("member").filter(
             name=DISCORD_ID_CONFIG_KEY,
             value=str(discord_id),
             deleted__isnull=True,
         )
-        config.delete()
-        return JsonResponse({"success": True})
-    except MemberConfig.DoesNotExist:
+    )
+    if not configs:
         return JsonResponse({"error": "Discord account not linked"}, status=404)
+
+    if not auth.is_bot_key:
+        configs = [
+            config
+            for config in configs
+            if Membership.objects.filter(
+                member=config.member,
+                association=auth.association,
+                deleted__isnull=True,
+            ).exists()
+        ]
+        if not configs:
+            return JsonResponse({"error": "Discord account not linked"}, status=404)
+
+    for config in configs:
+        config.delete()
+    return JsonResponse({"success": True})
