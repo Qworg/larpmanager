@@ -30,17 +30,30 @@ from django.utils import timezone
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 
+from larpmanager.cache.basic import get_run_association_id
 from larpmanager.cache.character import get_event_cache_all
 from larpmanager.forms.miscellanea import OrgaHelpQuestionForm, SendMailForm
+from larpmanager.mail.suppression import get_suppressed_emails
 from larpmanager.models.access import get_event_staffers
 from larpmanager.models.event import PreRegistration, Run
 from larpmanager.models.member import FirstAidChoices, Member, Membership, MembershipStatus, NewsletterChoices
 from larpmanager.models.miscellanea import EmailRecipient, HelpQuestion
 from larpmanager.models.registration import Registration, TicketTier
 from larpmanager.utils.core.base import check_event_context
-from larpmanager.utils.core.common import _get_help_questions, format_email_body, get_member, get_object_uuid
+from larpmanager.utils.core.common import (
+    _get_help_questions,
+    format_email_body,
+    format_email_skipped,
+    get_member,
+    get_object_uuid,
+)
 from larpmanager.utils.core.paginate import orga_paginate
-from larpmanager.utils.larpmanager.tasks import partition_shared_recipients, send_mail_exec, split_recipients
+from larpmanager.utils.larpmanager.tasks import (
+    partition_newsletter_recipients,
+    partition_shared_recipients,
+    send_mail_exec,
+    split_recipients,
+)
 from larpmanager.utils.security.confirm import confirm_post
 from larpmanager.utils.users.member import get_mail
 
@@ -211,7 +224,7 @@ def orga_spam(request: HttpRequest, event_slug: str) -> HttpResponse:
     )
 
     # Add event staff members to exclusion list
-    already.extend([mb.id for mb in get_event_staffers(context["event"])])
+    already.extend([mb.id for mb in get_event_staffers(context["event"].id)])
 
     # Get all active association members (exclude empty memberships)
     members = Membership.objects.filter(association_id=context["association_id"])
@@ -262,7 +275,7 @@ def orga_persuade(request: HttpRequest, event_slug: str) -> HttpResponse:
     )
 
     # Add event staff members to exclusion list
-    already.extend([mb.id for mb in get_event_staffers(context["event"])])
+    already.extend([mb.id for mb in get_event_staffers(context["event"].id)])
 
     # Get active association members
     members = Membership.objects.filter(association_id=context["association_id"])
@@ -422,10 +435,11 @@ def send_mail_batch(
     request: HttpRequest,
     association_id: int | None = None,
     run_id: int | None = None,
-) -> tuple[list, list]:
-    """Queue batch email, only for recipients who shared their data with the association.
+) -> tuple[list, list, list]:
+    """Queue batch email, only for recipients who shared their data and accept bulk mails.
 
-    Recipients without data sharing consent for the association are skipped.
+    Recipients without data sharing consent for the association are skipped, as
+    are those who opted out of the newsletter.
 
     Args:
         request: The HTTP request carrying the POST data (players, subject, body).
@@ -433,7 +447,7 @@ def send_mail_batch(
         run_id: Run sending the email (event send); association is derived from it.
 
     Returns:
-        Tuple (added, ignored) of email addresses.
+        Tuple (added, ignored, unsubscribed, suppressed) of email addresses.
 
     """
     # Extract email parameters from POST data
@@ -445,17 +459,27 @@ def send_mail_batch(
     if not association_id and run_id:
         run = Run.objects.filter(pk=run_id).select_related("event").first()
         if run:
-            association_id = run.event.association_id
+            association_id = get_run_association_id(run.id)
 
     # Keep only recipients who consented to share their data with the association
     recipients = split_recipients(player_ids)
     added, ignored = partition_shared_recipients(recipients, association_id)
 
-    # Execute the email sending operation for the allowed recipients
-    if added:
-        send_mail_exec(",".join(added), email_subject, email_body, association_id, run_id)
+    # Drop the addresses that opted out, so the result reports what is really queued
+    added, unsubscribed = partition_newsletter_recipients(added, association_id)
 
-    return added, ignored
+    # Execute the email sending operation for the allowed recipients, handing over the
+    # opted out ones so they are traced as skipped without resolving them a second time
+    if added or unsubscribed:
+        send_mail_exec(",".join(added), email_subject, email_body, association_id, run_id, opted_out=unsubscribed)
+
+    # Suppressed addresses are still handed over, so the send keeps a trace of the skip,
+    # but they never leave the queue: reporting them as added would be a lie
+    suppressed_emails = get_suppressed_emails(added)
+    suppressed = [email for email in added if email.strip().lower() in suppressed_emails]
+    added = [email for email in added if email.strip().lower() not in suppressed_emails]
+
+    return added, ignored, unsubscribed, suppressed
 
 
 @login_required
@@ -481,7 +505,9 @@ def orga_send_mail(request: HttpRequest, event_slug: str) -> HttpResponse:
         form = SendMailForm(request.POST)
         if form.is_valid():
             # Queue mail for batch processing using current run (only data-sharing recipients)
-            context["added"], context["ignored"] = send_mail_batch(request, run_id=context["run"].id)
+            context["added"], context["ignored"], context["unsubscribed"], context["suppressed"] = send_mail_batch(
+                request, run_id=context["run"].id
+            )
             return render(request, "larpmanager/exe/users/send_mail_result.html", context)
     else:
         # Display empty form for GET requests
@@ -520,6 +546,7 @@ def orga_archive_email(request: HttpRequest, event_slug: str) -> HttpResponse:
                 ("subj", _("Subject")),
                 ("body", _("Body")),
                 ("sent", _("Sent")),
+                ("skipped", _("Skipped")),
             ],
             # Define formatting callbacks for each field
             # These functions control how data is displayed in the template
@@ -527,6 +554,7 @@ def orga_archive_email(request: HttpRequest, event_slug: str) -> HttpResponse:
                 "body": format_email_body,
                 "sent": lambda el: el.sent.strftime("%d/%m/%Y %H:%M") if el.sent else "",
                 "run": lambda el: str(el.run) if el.run else "",
+                "skipped": format_email_skipped,
             },
         },
     )
@@ -589,7 +617,7 @@ def orga_sensitive(request: HttpRequest, event_slug: str) -> HttpResponse:
             flat=True,
         ),
     )
-    member_list.extend([mb.id for mb in get_event_staffers(context["run"].event)])
+    member_list.extend([mb.id for mb in get_event_staffers(context["run"].event_id)])
 
     # Define member model and fields to display
     member_cls: type[Member] = Member

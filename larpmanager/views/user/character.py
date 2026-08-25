@@ -47,7 +47,7 @@ from larpmanager.cache.character import get_event_cache_all
 from larpmanager.cache.config import get_event_config, save_single_config
 from larpmanager.cache.event_text import get_event_text
 from larpmanager.cache.experience import get_event_exp_systems
-from larpmanager.cache.question import get_cached_writing_questions, get_writing_field_names
+from larpmanager.cache.question import get_character_dependencies, get_writing_field_names
 from larpmanager.cache.writing import get_character_element_fields, get_writing_element_fields_batch
 from larpmanager.forms.character import CharacterForm
 from larpmanager.forms.member import AvatarForm
@@ -55,10 +55,7 @@ from larpmanager.forms.registration import RegistrationCharacterRelForm
 from larpmanager.forms.writing import PlayerRelationshipForm
 from larpmanager.models.event import EventTextType
 from larpmanager.models.experience import AbilityExp
-from larpmanager.models.form import (
-    QuestionApplicable,
-    WritingOption,
-)
+from larpmanager.models.form import QuestionApplicable
 from larpmanager.models.miscellanea import PlayerRelationship
 from larpmanager.models.registration import Registration, RegistrationCharacterRel
 from larpmanager.models.writing import (
@@ -67,7 +64,8 @@ from larpmanager.models.writing import (
 )
 from larpmanager.templatetags.show_tags import get_tooltip
 from larpmanager.utils.core.base import get_event_context
-from larpmanager.utils.core.common import get_element, get_element_event, get_player_relationship
+from larpmanager.utils.core.common import get_element, get_element_event, get_event_elements, get_player_relationship
+from larpmanager.utils.core.guard import experience_recalc_deferred
 from larpmanager.utils.edit.backend import user_edit
 from larpmanager.utils.io.pdf import has_pdf_customization
 from larpmanager.utils.io.upload import normalize_profile_image
@@ -82,6 +80,8 @@ from larpmanager.utils.services.character import (
 from larpmanager.utils.services.experience import (
     add_char_addit,
     build_exp_avail_by_system_from_addit,
+    build_exp_context,
+    calculate_character_experience_points,
     get_available_ability_exp,
     get_current_ability_exp,
     remove_char_ability,
@@ -92,11 +92,21 @@ from larpmanager.utils.users.registration import (
     check_character_maximum,
     get_character_play_max,
     get_player_characters,
+    registration_status,
 )
 from larpmanager.views.user.casting import casting_details, get_casting_preferences
 from larpmanager.views.user.registration import init_form_submitted
 
 logger = logging.getLogger(__name__)
+
+# Tolerance in seconds when comparing the version stamp of the loaded form with the saved one,
+# to absorb the rounding of the stamp sent to the browser and back
+STALE_TOLERANCE = 0.001
+
+CHARACTER_STALE_MESSAGE = _(
+    "This character was modified in another window: your changes here have not been saved. "
+    "Copy the text you want to keep, then reload the page.",
+)
 
 if TYPE_CHECKING:
     from larpmanager.forms.base import BaseModelForm
@@ -199,7 +209,7 @@ def character_external(request: HttpRequest, event_slug: str, code: str) -> Http
 
     # Attempt to retrieve character using the provided access token
     try:
-        char = context["event"].get_elements(Character).get(access_token=code)
+        char = get_event_elements(context["event"].id, Character, context=context).get(access_token=code)
     except ObjectDoesNotExist as err:
         msg = "invalid code"
         raise Http404(msg) from err
@@ -345,10 +355,23 @@ def character_form(
     # Initialize form dependencies and set element type for template context
     get_options_dependencies(context)
     context["elementTyp"] = Character
+    context["request"] = request
 
     context["user_character_text"] = get_event_text(context["event"].id, EventTextType.USER_CHARACTER)
 
-    if request.method == "POST":
+    _init_auto_save(context, instance)
+
+    # Auto-save posts the whole form in background: answer in json, without redirect
+    if request.method == "POST" and context.get("auto_save") and request.POST.get("ajax") == "1":
+        return _character_form_ajax(request, context, event_slug, instance, form_class)
+
+    # Refuse to save over changes done meanwhile from another window
+    is_stale = request.method == "POST" and _is_stale(context, request, instance)
+    if is_stale:
+        messages.error(request, CHARACTER_STALE_MESSAGE)
+        # Keep the submitted data on screen, so the player can copy it before reloading
+        form = form_class(request.POST, request.FILES, instance=instance, context=context)
+    elif request.method == "POST":
         # Process form submission with uploaded files
         form = form_class(request.POST, request.FILES, instance=instance, context=context)
         if form.is_valid():
@@ -384,25 +407,109 @@ def character_form(
         context=context,
     )
 
+    # Render topbar status; skipped on POST success, which redirects instead
+    context["run_status"] = registration_status(context, context["run"], context["member"])
+
     return render(request, "larpmanager/event/character/edit.html", context)
 
 
-def _save_character(context: dict, form: CharacterForm, success_message: str) -> str:
+def _set_auto_save(context: dict) -> None:
+    """Activate the background auto-save of the character form, unless disabled for the event."""
+    context["auto_save"] = not get_event_config(
+        context["event"].id,
+        "user_character_disable_auto",
+        context=context,
+    )
+
+
+def _init_auto_save(context: dict, instance: Character | RegistrationCharacterRel | None) -> None:
+    """Set up auto-save context: activation flag and version stamp of the loaded element."""
+    if not context.get("auto_save"):
+        return
+
+    context["base_updated"] = ""
+    if instance is not None and instance.pk:
+        context["base_updated"] = f"{instance.updated.timestamp():.6f}"
+
+
+def _is_stale(context: dict, request: HttpRequest, instance: Character | RegistrationCharacterRel | None) -> bool:
+    """Check if the element was saved elsewhere after the form was loaded."""
+    if not context.get("auto_save") or instance is None or not instance.pk:
+        return False
+
+    posted = request.POST.get("base_updated")
+    if not posted:
+        return False
+
+    try:
+        base_updated = float(posted)
+    except ValueError:
+        return False
+
+    # The instance is loaded fresh in this request, so its stamp is the current one
+    return instance.updated.timestamp() - base_updated > STALE_TOLERANCE
+
+
+def _character_form_ajax(
+    request: HttpRequest,
+    context: dict,
+    event_slug: str,
+    instance: Character | RegistrationCharacterRel | None,
+    form_class: type[BaseModelForm],
+) -> JsonResponse:
+    """Save the character form from the auto-save call, answering with the new version stamp."""
+    if _is_stale(context, request, instance):
+        return JsonResponse({"res": "ko", "stale": True, "warn": str(CHARACTER_STALE_MESSAGE)})
+
+    # Create the character only once the player has given it a name
+    if instance is None and not request.POST.get("name", "").strip():
+        return JsonResponse({"res": "ko"})
+
+    form = form_class(request.POST, request.FILES, instance=instance, context=context)
+    if not form.is_valid():
+        return JsonResponse({"res": "ko", "errors": form.errors.get_json_data()})
+
+    character, _message = _save_character(context, form, "", auto_save=True)
+
+    # Read back the stamp, so it matches the stored one even if the save triggered other updates
+    character.refresh_from_db(fields=["updated"])
+
+    result = {"res": "ok", "updated": f"{character.updated.timestamp():.6f}"}
+
+    # Point the following auto-saves to the edit page of the character just created
+    if instance is None:
+        result["url"] = reverse(
+            "character_edit",
+            kwargs={"event_slug": event_slug, "character_uuid": character.uuid},
+        )
+
+    return JsonResponse(result)
+
+
+def _save_character(
+    context: dict,
+    form: CharacterForm,
+    success_message: str,
+    *,
+    auto_save: bool = False,
+) -> str:
     """Saves a character with retry behaviour."""
     # Retry logic to handle race conditions in character number assignment
     max_retries = 3
-    character = None
+    character = form.instance
     for retry_attempt in range(max_retries):
         try:
             # Save character data within atomic transaction
             with transaction.atomic():
-                character = form.save(commit=False)
-                # Update character with additional processing and context
-                success_message = _update_character(context, character, form, success_message)
-                character.save()
+                # Assign player if not already set
+                if isinstance(character, Character) and not character.player:
+                    character.player = context["member"]
 
-                # Handle character assignment logic
-                check_assign_character(context)
+                character = form.save()
+
+                # Assignment to the registration is done only on explicit confirmation
+                if not auto_save:
+                    check_assign_character(context)
             # Success - break out of retry loop
             break
         except IntegrityError as e:
@@ -420,45 +527,56 @@ def _save_character(context: dict, form: CharacterForm, success_message: str) ->
     return character, success_message
 
 
-def _update_character(context: dict, character: Any, form: BaseModelForm, message: str) -> str:
-    """Update character status based on form data and event configuration.
+def propose_character_for_approval(character: Character) -> None:
+    """Move a character from CREATION/REVIEW to PROPOSED.
+
+    Re-reads and locks the row before transitioning, so a character already moved on to
+    PROPOSED (or beyond) by a concurrent request is left untouched.
+    """
+    with transaction.atomic():
+        locked_character = Character.objects.select_for_update().get(pk=character.pk)
+        if locked_character.status in [CharacterStatus.CREATION, CharacterStatus.REVIEW]:
+            locked_character.status = CharacterStatus.PROPOSED
+            locked_character.save()
+
+
+@login_required
+def character_confirm(request: HttpRequest, event_slug: str, character_uuid: str) -> HttpResponse:
+    """Let the player confirm their character is ready, proposing it to the staff for approval.
 
     Args:
-        context: Context dictionary containing event information
-        character: Character instance to update
-        form: Form instance with cleaned data
-        message: Initial message string
+        request: HTTP request object
+        event_slug: Event slug
+        character_uuid: Character UUID
 
     Returns:
-        Updated message string or original message if no changes
+        HttpResponse: Confirmation page on GET, redirect to character page on POST
 
     """
-    # Early return if character is not a Character instance
-    if not isinstance(character, Character):
-        return message
+    context = get_event_context(request, event_slug, signup=True)
+    get_char_check(request, context, character_uuid, deny_public=True)
 
-    # Assign player if not already set
-    if not character.player:
-        character.player = context["member"]
+    if not get_event_config(context["event"].id, "user_character_approval", context=context):
+        raise Http404
 
-    # Check if character approval is enabled for this event
-    # Update status to proposed if character is in creation/review and user clicked propose
-    if (
-        get_event_config(
-            context["event"].id,
-            "user_character_approval",
-            context=context,
+    character = Character.objects.get(pk=_get_character_cache_id(context))
+    if character.status not in [CharacterStatus.CREATION, CharacterStatus.REVIEW]:
+        messages.warning(request, _("This character cannot be proposed at the moment"))
+        return redirect("character", event_slug=event_slug, character_uuid=character_uuid)
+
+    if request.method == "POST":
+        propose_character_for_approval(character)
+        messages.success(
+            request,
+            _(
+                "The character has been proposed to the staff, who will examine it and approve it "
+                "or request changes if necessary.",
+            ),
         )
-        and character.status in [CharacterStatus.CREATION, CharacterStatus.REVIEW]
-        and form.cleaned_data.get("propose", False)
-    ):
-        character.status = CharacterStatus.PROPOSED
-        message = _(
-            "The character has been proposed to the staff, who will examine it and approve it "
-            "or request changes if necessary.",
-        )
+        return redirect("character", event_slug=event_slug, character_uuid=character_uuid)
 
-    return message
+    context["character"] = character
+    return render(request, "larpmanager/event/character/confirm.html", context)
 
 
 @login_required
@@ -632,9 +750,9 @@ def character_list(request: HttpRequest, event_slug: str) -> Any:
     """
     context = get_event_context(request, event_slug, include_status=True, signup=True, feature_slug="user_character")
 
-    context["writing_field_names"] = get_writing_field_names(context["event"], QuestionApplicable.CHARACTER)
+    context["writing_field_names"] = get_writing_field_names(context["event"].id, QuestionApplicable.CHARACTER)
 
-    context["list"] = get_player_characters(context["member"], context["event"])
+    context["list"] = get_player_characters(context["member"], context["event"].id)
     # add character configs
     char_add_addit(context)
     context["list"] = list(context["list"])
@@ -647,7 +765,7 @@ def character_list(request: HttpRequest, event_slug: str) -> Any:
                 "used_key": f"exp_used_{sys.uuid}",
                 "avail_key": f"exp_avail_{sys.uuid}",
             }
-            for sys in get_event_exp_systems(context["event"])
+            for sys in get_event_exp_systems(context["event"].id)
             if not sys.hidden
         ]
 
@@ -661,7 +779,7 @@ def character_list(request: HttpRequest, event_slug: str) -> Any:
         el.fields = res["fields"]
         context.update(res)
 
-    check, _max_chars = check_character_maximum(context["event"], context["member"])
+    check, _max_chars = check_character_maximum(context["event"].id, context["member"])
     context["char_maximum"] = check
     context["approval"] = get_event_config(context["event"].id, "user_character_approval", context=context)
 
@@ -730,7 +848,7 @@ def character_list_json(request: HttpRequest, event_slug: str) -> JsonResponse:
     """Return JSON list of player's characters for an event."""
     context = get_event_context(request, event_slug, signup=True, feature_slug="user_character")
 
-    context["list"] = get_player_characters(context["member"], context["event"])
+    context["list"] = get_player_characters(context["member"], context["event"].id)
 
     # Get character fields info
     return_list = [{"uuid": el.uuid, "name": el.name} for el in context["list"]]
@@ -741,54 +859,43 @@ def character_list_json(request: HttpRequest, event_slug: str) -> JsonResponse:
 @login_required
 def character_create(request: HttpRequest, event_slug: str) -> Any:
     """Handle character creation with maximum character validation."""
-    context = get_event_context(request, event_slug, include_status=True, signup=True, feature_slug="user_character")
+    context = get_event_context(request, event_slug, signup=True, feature_slug="user_character")
 
-    check, _max_chars = check_character_maximum(context["event"], context["member"])
+    check, _max_chars = check_character_maximum(context["event"].id, context["member"])
     if check:
+        if request.POST.get("ajax") == "1":
+            return JsonResponse({"res": "ko"})
         messages.success(request, _("You have reached the maximum number of characters that can be created"))
         return redirect("character_list", event_slug=event_slug)
 
     context["class_name"] = "character"
+    _set_auto_save(context)
     return character_form(request, context, event_slug, None, CharacterForm)
 
 
 @login_required
 def character_edit(request: HttpRequest, event_slug: str, character_uuid: str) -> HttpResponse:
     """Handle user character editing form."""
-    context = get_event_context(request, event_slug, include_status=True, signup=True)
+    context = get_event_context(request, event_slug, signup=True)
     get_char_check(request, context, character_uuid, deny_public=True)
+    _set_auto_save(context)
     return character_form(request, context, event_slug, context["character"], CharacterForm)
 
 
 def get_options_dependencies(context: dict) -> None:
-    """Populate context with writing option dependencies for character creation.
+    """Populate context with writing requirements for character creation.
 
-    Analyzes writing questions and options for the current event to build a
-    dependency mapping that determines which options require other options
-    to be selected first during character creation.
+    Analyzes writing questions and options for the current event to build the
+    dependency mappings that determine which options can be selected, and which
+    questions are shown, based on the options already chosen.
 
     Args:
         context: Context dictionary containing event, features, and other data.
-             Will be modified to include 'dependencies' key with option mappings.
+             Will be modified to include 'dependencies' key with the "options" and
+             "questions" mappings.
 
     """
-    # Initialize empty dependencies dictionary in context
-    context["dependencies"] = {}
-
-    # Early return if character feature is not enabled for this event
-    if "character" not in context["features"]:
-        return
-
-    # Get all character-applicable writing questions ordered by their sequence
-    character_questions = get_cached_writing_questions(context["event"], QuestionApplicable.CHARACTER)
-    question_ids = [question["id"] for question in character_questions]
-
-    # Find all writing options belonging to character questions
-    writing_options = context["event"].get_elements(WritingOption).filter(question_id__in=question_ids)
-
-    # Build dependency mapping for options that have requirements
-    for option in writing_options.filter(requirements__isnull=False).distinct():
-        context["dependencies"][str(option.uuid)] = [str(u) for u in option.requirements.values_list("uuid", flat=True)]
+    context["dependencies"] = get_character_dependencies(context["event"].id, context["features"])
 
 
 def _get_character_assign_error(context: dict) -> str | None:
@@ -825,7 +932,7 @@ def character_assign(request: HttpRequest, event_slug: str, character_uuid: str)
         HttpResponse: Redirect to character list
 
     """
-    context = get_event_context(request, event_slug, signup=True, include_status=True)
+    context = get_event_context(request, event_slug, signup=True)
     get_char_check(request, context, character_uuid, deny_public=True)
 
     blocking_error = _get_character_assign_error(context)
@@ -939,15 +1046,26 @@ def character_abilities(request: HttpRequest, event_slug: str, character_uuid: s
             "used": char.addit.get(f"exp_used_{sys.uuid}", 0),
             "avail": char.addit.get(f"exp_avail_{sys.uuid}", 0),
         }
-        for sys in get_event_exp_systems(context["event"])
+        for sys in get_event_exp_systems(context["event"].id)
         if not sys.hidden
     ]
 
-    # Build available abilities dictionary organized by ability type
+    # Build per-system experience data used both for display and for the POST save check
     exp_avail_by_system = build_exp_avail_by_system_from_addit(char)
+    exp_context = build_exp_context(char)
+    context["exp_context"] = exp_context
+
+    # Handle POST request for saving ability changes (skip building the display dict below,
+    # it's not needed since the save re-queries availability under lock and we redirect after)
+    if request.method == "POST":
+        _save_character_abilities(context, request)
+        # Redirect to prevent duplicate submissions
+        return redirect(request.path_info)
+
+    # Build available abilities dictionary organized by ability type
     multiple_systems = len(context["exp_systems_data"]) > 1
     context["available"] = {}
-    for ability in get_available_ability_exp(char, exp_avail_by_system):
+    for ability in get_available_ability_exp(char, exp_avail_by_system, exp_context):
         if ability.typ is None:
             continue
         # Create type entry if it doesn't exist
@@ -963,7 +1081,7 @@ def character_abilities(request: HttpRequest, event_slug: str, character_uuid: s
 
     # Build current character abilities organized by type name
     context["sheet_abilities"] = {}
-    for el in get_current_ability_exp(char):
+    for el in get_current_ability_exp(char, exp_context):
         if el.typ is None:
             continue
         # Create type list if it doesn't exist
@@ -971,12 +1089,6 @@ def character_abilities(request: HttpRequest, event_slug: str, character_uuid: s
             context["sheet_abilities"][el.typ.name] = []
         # Add ability to the type's list
         context["sheet_abilities"][el.typ.name].append(el)
-
-    # Handle POST request for saving ability changes
-    if request.method == "POST":
-        _save_character_abilities(context, request)
-        # Redirect to prevent duplicate submissions
-        return redirect(request.path_info)
 
     # Create ordered list of available types for template rendering
     type_available_dict = {
@@ -1091,7 +1203,7 @@ def character_inventory_json(request: HttpRequest, event_slug: str, character_uu
     get_char_check(request, context, character_uuid, deny_public=True)
 
     # Get character data
-    context["character"] = context["event"].get_elements(Character).get(uuid=character_uuid)
+    context["character"] = get_event_elements(context["event"].id, Character, context=context).get(uuid=character_uuid)
 
     inventories = {}
     for inv in context["character"].inventory.all():
@@ -1121,8 +1233,9 @@ def character_abilities_del(request: HttpRequest, event_slug: str, character_uui
         raise Http404(msg)
 
     with transaction.atomic():
-        remove_char_ability(context["character"], context["ability"].id)
-        context["character"].save()
+        with experience_recalc_deferred():
+            remove_char_ability(context["character"], context["ability"].id)
+        calculate_character_experience_points(context["character"])
 
     messages.success(request, _("Ability removed!"))
     return redirect(
@@ -1134,7 +1247,7 @@ def _save_character_abilities(context: dict, request: HttpRequest) -> None:
     """Process character ability selection and save to character.
 
     Args:
-        context: Context dictionary with character and available abilities
+        context: Context dictionary with character and exp_context
         request: HTTP request object with POST data
 
     """
@@ -1148,24 +1261,30 @@ def _save_character_abilities(context: dict, request: HttpRequest) -> None:
         messages.error(request, _("Ability missing"))
         return
 
-    if selected_type not in context["available"] or selected_uuid not in context["available"][selected_type]["list"]:
+    ability = get_element_event(context, selected_uuid, AbilityExp)
+    if ability.typ is None or str(ability.typ.uuid) != selected_type:
         messages.error(request, _("Invalid selection"))
         return
-
-    ability = get_element_event(context, selected_uuid, AbilityExp)
 
     with transaction.atomic():
         # Lock the character and recompute affordability under the lock
         char = Character.objects.select_for_update().get(pk=context["character"].pk)
         add_char_addit(char)
         exp_avail = build_exp_avail_by_system_from_addit(char)
-        available_uuids = {str(available.uuid) for available in get_available_ability_exp(char, exp_avail)}
+        available_uuids = {
+            str(available.uuid)
+            for available in get_available_ability_exp(
+                char, exp_avail, exp_context=context["exp_context"], refresh_abilities=True
+            )
+        }
         if str(ability.uuid) not in available_uuids:
             messages.error(request, _("Ability no longer available"))
             return
-        char.exp_ability_list.add(ability)
-        char.save()
+        with experience_recalc_deferred():
+            char.exp_ability_list.add(ability)
+        calculate_character_experience_points(char)
         context["character"] = char
+
     messages.success(request, _("Ability acquired!"))
 
     get_undo_abilities(context, context["character"], ability)

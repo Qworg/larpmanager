@@ -21,6 +21,7 @@ import contextlib
 import html
 import re
 from datetime import UTC, datetime
+from functools import cached_property
 from typing import Any, ClassVar
 
 from django import forms
@@ -32,11 +33,11 @@ from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from larpmanager.cache.config import get_event_config
-from larpmanager.cache.question import get_cached_writing_questions
+from larpmanager.cache.question import get_cached_writing_questions, get_character_dependencies
 from larpmanager.cache.registration import get_registration_counts
 from larpmanager.cache.rels import refresh_character_relationships_background
 from larpmanager.cache.writing import get_cached_relationship_tags
-from larpmanager.forms.base import BaseModelForm
+from larpmanager.forms.base import BaseModelForm, get_question_key
 from larpmanager.forms.utils import (
     AssociationMemberS2Widget,
     CharacterDualListWidget,
@@ -51,9 +52,9 @@ from larpmanager.forms.utils import (
 )
 from larpmanager.forms.writing import BaseWritingForm, WritingForm
 from larpmanager.models.base import Feature
-from larpmanager.models.event import Event
 from larpmanager.models.experience import AbilityExp, DeliveryExp
 from larpmanager.models.form import (
+    BaseQuestionType,
     QuestionApplicable,
     QuestionStatus,
     QuestionVisibility,
@@ -75,7 +76,10 @@ from larpmanager.models.writing import (
     RelationshipTag,
     TextVersionChoices,
 )
+from larpmanager.utils.core.common import get_event_class_parent, get_event_elements
+from larpmanager.utils.core.guard import experience_recalc_deferred
 from larpmanager.utils.edit.backend import save_version
+from larpmanager.utils.services.experience import calculate_character_experience_points
 
 
 class CharacterForm(WritingForm, BaseWritingForm):
@@ -121,8 +125,55 @@ class CharacterForm(WritingForm, BaseWritingForm):
         # Initialize storage for field details and metadata
         self.details: dict[str, Any] = {}
 
+        # Questions hidden by their unmet requirements, filled during validation
+        self.gated_questions: list[dict] = []
+
+        # Publish the requirements to the page, so the client mirrors the server side gating
+        if "dependencies" not in self.params and self.params.get("event"):
+            self.params["dependencies"] = get_character_dependencies(
+                self.params["event"].id,
+                self.params.get("features", []),
+            )
+
+        # Default options assigned to the questions the player cannot answer, mapped by question id
+        self.default_choices: dict[int, int] = {}
+
+        # Option counts of the run, kept to check the availability of the default options
+        self.registration_counts: dict = {}
+
         # Set up character-specific fields including factions and custom questions
         self._init_character()
+
+        # Auto-save submits forms still being filled in: no field can block the save
+        if self.is_auto_save():
+            for field in self.fields.values():
+                field.required = False
+
+    @cached_property
+    def dependencies(self) -> dict[str, list[str]]:
+        """Requirements between options, mapped by option uuid."""
+        return self._cached_dependencies("options")
+
+    @cached_property
+    def question_dependencies(self) -> dict[str, list[str]]:
+        """Options required by each question, mapped by question uuid."""
+        return self._cached_dependencies("questions")
+
+    def _cached_dependencies(self, kind: str) -> dict[str, list[str]]:
+        """Requirement map of the given kind, reused from the context when already loaded."""
+        if "dependencies" in self.params:
+            return self.params["dependencies"].get(kind, {})
+
+        event = self.params.get("event")
+        if not event:
+            return {}
+
+        return get_character_dependencies(event.id, self.params.get("features", []))[kind]
+
+    def is_auto_save(self) -> bool:
+        """Check whether the form is bound to a background auto-save request."""
+        request = self.params.get("request")
+        return bool(request and request.method == "POST" and request.POST.get("ajax") == "1")
 
     def check_editable(self, question: dict) -> bool:
         """Check if a question is editable based on event config and instance status.
@@ -158,7 +209,7 @@ class CharacterForm(WritingForm, BaseWritingForm):
 
         Sets up dynamic form fields based on event configuration and custom field definitions,
         organizing fields into default and custom categories, and handling organizer-specific
-        fields and character completion proposals.
+        fields.
 
         Args:
             self: The form instance containing event parameters and organizer status.
@@ -170,7 +221,6 @@ class CharacterForm(WritingForm, BaseWritingForm):
             - Uses parent event if current event has a parent
             - Handles different field types based on question configuration
             - Adds organizer-specific fields when applicable
-            - Conditionally adds character proposal field for user approval workflow
 
         """
         # Get event, preferring parent event if available for loading questions
@@ -181,7 +231,9 @@ class CharacterForm(WritingForm, BaseWritingForm):
 
         # Initialize registration questions and get counts
         self._init_registration_question(self.instance, event)
-        registration_counts = get_registration_counts(self.params.get("run"))
+        params_run = self.params.get("run")
+        registration_counts = get_registration_counts(params_run.id, params_run.event_id)
+        self.registration_counts = registration_counts
 
         # Initialize field categorization sets
         fields_default = {"event"}
@@ -217,33 +269,39 @@ class CharacterForm(WritingForm, BaseWritingForm):
         for field_label in all_fields - fields_custom:
             self.delete_field(field_label)
 
-        self._init_character_status(current_event)
-
-    def _init_character_status(self, event: Event) -> None:
-        """Add character completion proposal field for user approval workflow."""
-        if (
-            not self.orga
-            and get_event_config(event.id, "user_character_approval", context=self.params)
-            and (not self.instance.pk or self.instance.status in [CharacterStatus.CREATION, CharacterStatus.REVIEW])
-        ):
-            self.fields["propose"] = forms.BooleanField(
-                required=False,
-                label=_("Complete"),
-                help_text=_(
-                    "Click here to confirm that you have completed the character and are ready to "
-                    "propose it to the staff. Be careful: some fields may no longer be editable. "
-                    "Leave the field blank to save your changes and to be able to continue them in "
-                    "the future.",
-                ),
-                widget=forms.CheckboxInput(attrs={"class": "checkbox_single"}),
-            )
-
     def _init_character(self) -> None:
         """Initialize character-specific form data."""
         self.delete_field("number")
 
         self._init_factions()
         self._init_custom_fields()
+        self._mark_gated_options()
+
+    def _mark_gated_options(self) -> None:
+        """Tell the choice widgets which options start hidden by their unmet requirements.
+
+        The gated options are not on the page, so they must not be counted when deciding whether
+        the remaining ones are enough to be collapsed behind the "show other options" link.
+        """
+        if not self.dependencies:
+            return
+
+        choice_fields = self._choice_fields()
+        if not choice_fields:
+            return
+
+        available = {uuid: label for options in choice_fields.values() for uuid, label in options.items()}
+        owner = {uuid: key for key, options in choice_fields.items() for uuid in options}
+        selected = self._initial_options(choice_fields)
+
+        for field_key, options in choice_fields.items():
+            widget = self.fields[field_key].widget
+            if not hasattr(widget, "gated_options"):
+                continue
+
+            widget.gated_options = {
+                uuid for uuid in options if self._missing_requirements(uuid, available, owner, selected)
+            }
 
     def _init_factions(self) -> None:
         """Initialize faction selection field for character form.
@@ -254,7 +312,9 @@ class CharacterForm(WritingForm, BaseWritingForm):
         if "faction" not in self.params.get("features"):
             return
 
-        queryset = self.params.get("run").event.get_elements(Faction).filter(selectable=True)
+        queryset = get_event_elements(self.params.get("run").event_id, Faction, context=self.params).filter(
+            selectable=True
+        )
 
         self.fields["factions_list"] = forms.ModelMultipleChoiceField(
             queryset=queryset,
@@ -302,7 +362,7 @@ class CharacterForm(WritingForm, BaseWritingForm):
         new = set(self.cleaned_data["factions_list"].values_list("pk", flat=True))
 
         # Get the faction event context for filtering existing factions
-        faction_event = self.params.get("run").event.get_class_parent(Faction)
+        faction_event = get_event_class_parent(self.params.get("run").event_id, Faction, context=self.params)
 
         # Get current faction IDs associated with the instance
         # For non-orga users, only consider selectable factions to preserve staff-assigned non-selectable factions
@@ -318,6 +378,7 @@ class CharacterForm(WritingForm, BaseWritingForm):
         # Add newly selected factions
         for ch in new - old:
             instance.factions_list.add(ch)
+
         return None
 
     def clean(self) -> dict:
@@ -335,6 +396,12 @@ class CharacterForm(WritingForm, BaseWritingForm):
         """
         cleaned_data = super().clean()
 
+        self._gate_questions()
+
+        self._validate_dependencies()
+
+        self._apply_default_options()
+
         # Check if factions_list field exists in cleaned data
         if "factions_list" in self.cleaned_data:
             # Count primary factions to ensure only one is selected
@@ -349,6 +416,320 @@ class CharacterForm(WritingForm, BaseWritingForm):
                 raise ValidationError({"factions_list": _("Select only one primary faction")})
 
         return cleaned_data
+
+    def _choice_fields(self, *, include_unavailable: bool = False) -> dict[str, dict[str, str]]:
+        """Return, for each choice field of the form, the uuid and name of its selectable options.
+
+        Options sold out are left out unless requested: requiring them would build an error the
+        user has no way to fix.
+        """
+        choice_fields = {}
+        choice_types = BaseQuestionType.get_choice_types()
+        for question in self.questions:
+            if question["typ"] not in choice_types:
+                continue
+
+            field_key = get_question_key(question)
+            if field_key not in self.fields:
+                continue
+
+            names = {str(option["uuid"]): option["name"] for option in question.get("options") or []}
+            unavailable = set() if include_unavailable else set(self.unavail.get(question["uuid"], []))
+            choice_fields[field_key] = {
+                str(value): names.get(str(value), label)
+                for value, label in self.fields[field_key].choices
+                if str(value) and str(value) not in unavailable
+            }
+
+        return choice_fields
+
+    def _missing_requirements(
+        self,
+        option_uuid: str,
+        available: dict[str, str],
+        owner: dict[str, str],
+        selected: set,
+    ) -> list[str]:
+        """Return the names of the requirement groups of an option that are not satisfied.
+
+        Requirements are grouped by the question they belong to: picking any option of a group
+        satisfies it, while every group has to be satisfied. Requirements pointing to options
+        not available in the form are ignored.
+        """
+        groups: dict[str, list[str]] = {}
+        for requirement in self.dependencies.get(option_uuid, []):
+            if requirement in available:
+                groups.setdefault(owner[requirement], []).append(requirement)
+
+        return [
+            " / ".join(available[requirement] for requirement in requirements)
+            for requirements in groups.values()
+            if not set(requirements) & selected
+        ]
+
+    def _initial_options(self, choice_fields: dict[str, dict[str, str]]) -> set[str]:
+        """Return the uuids of the options held by the choice fields before any change."""
+        selected = set()
+        for field_key in choice_fields:
+            value = self.initial.get(field_key)
+            if not value:
+                continue
+            values = value if isinstance(value, (list, tuple, set)) else [value]
+            selected.update(str(single) for single in values)
+
+        return selected
+
+    def filter_gated_choices(self, field_key: str) -> None:
+        """Drop from a field the options whose requirements are not met by the stored answers.
+
+        Used when a single field is edited alone (double click on a list cell): the other answers
+        are not on the page, so the client side gating cannot run and the check is done here.
+        """
+        if not self.dependencies or field_key not in self.fields:
+            return
+
+        choice_fields = self._choice_fields()
+        if field_key not in choice_fields:
+            return
+
+        available = {uuid: label for options in choice_fields.values() for uuid, label in options.items()}
+        owner = {uuid: key for key, options in choice_fields.items() for uuid in options}
+        selected = self._initial_options(choice_fields)
+
+        field = self.fields[field_key]
+        field.choices = [
+            (value, label)
+            for value, label in field.choices
+            if not str(value) or not self._missing_requirements(str(value), available, owner, selected)
+        ]
+
+    def _selected_options(self, choice_fields: dict[str, dict[str, str]], skip: set[str] | None = None) -> set[str]:
+        """Return the uuids of the options chosen in the given choice fields."""
+        selected = set()
+        for field_key in choice_fields:
+            if skip and field_key in skip:
+                continue
+            value = self.cleaned_data.get(field_key)
+            if not value:
+                continue
+            selected.update(value if isinstance(value, (list, tuple, set)) else [value])
+
+        return selected
+
+    def _gate_questions(self) -> None:
+        """Drop the answers of the questions whose required options are not chosen.
+
+        Mirrors the client side, which hides them: the answer is discarded and the question
+        cannot block the save, even when mandatory.
+        """
+        # Auto-save is gated too, as it stores answers
+        if not self.question_dependencies:
+            return
+
+        # Sold out options stay on the page unless configured otherwise: there they still gate the
+        # questions requiring them, as the client cannot see them chosen
+        keep_unavailable = not get_event_config(
+            self.params["event"].id, "character_form_hide_unavailable", context=self.params
+        )
+        choice_fields = self._choice_fields(include_unavailable=keep_unavailable)
+        # Requirements pointing to options not present in the form are treated as satisfied
+        available = {uuid for options in choice_fields.values() for uuid in options}
+
+        gated = {}
+        for question in self.questions:
+            requirements = [
+                requirement
+                for requirement in self.question_dependencies.get(str(question["uuid"]), [])
+                if requirement in available
+            ]
+            field_key = get_question_key(question)
+            if requirements and field_key in self.fields:
+                gated[field_key] = (question, set(requirements))
+
+        # Hiding a question deselects its options, which can gate others: repeat until stable
+        hidden: set[str] = set()
+        for _pass in range(len(gated)):
+            selected = self._selected_options(choice_fields, skip=hidden)
+            newly = {key for key, (_question, required) in gated.items() if key not in hidden and required - selected}
+            if not newly:
+                break
+            hidden |= newly
+
+        self.gated_questions = [gated[field_key][0] for field_key in hidden]
+        for field_key in hidden:
+            self._errors.pop(field_key, None)
+            question = gated[field_key][0]
+            self.cleaned_data[field_key] = [] if question["typ"] == BaseQuestionType.MULTIPLE else ""
+
+    def _validate_dependencies(self) -> None:
+        """Check that every chosen option has its required options chosen too.
+
+        Mirrors the client side check: requirements on the same question are alternatives,
+        requirements on different questions are all needed.
+        """
+        # Auto-save is checked too, as it stores choices
+        if not self.dependencies:
+            return
+
+        choice_fields = self._choice_fields()
+        if not choice_fields:
+            return
+
+        # Name of every option the user can pick, and the field it belongs to, on any question of the form
+        available = {uuid: label for options in choice_fields.values() for uuid, label in options.items()}
+        owner = {uuid: field_key for field_key, options in choice_fields.items() for uuid in options}
+
+        selected = self._selected_options(choice_fields)
+
+        for field_key, options in choice_fields.items():
+            for option_uuid in selected & set(options):
+                missing = self._missing_requirements(option_uuid, available, owner, selected)
+                if missing:
+                    self.add_error(
+                        field_key,
+                        _("The option '%(option)s' requires: %(missing)s")
+                        % {"option": options[option_uuid], "missing": ", ".join(missing)},
+                    )
+
+    def _apply_default_options(self) -> None:
+        """Assign the default options of the single choice questions the player cannot answer.
+
+        A question is filled only when it holds no choice yet, and its field is missing from the form
+        or disabled: its options marked as default are evaluated in order, and the first one that is
+        available, allowed by the ticket and with its prerequisites satisfied is assigned. Assigning
+        an option can satisfy the prerequisites of another default, so the pass is repeated until
+        no other question is filled.
+        """
+        # Organizers can answer every question, so no option is ever assigned automatically
+        if self.orga:
+            return
+
+        pending = [question for question in self.questions if self._needs_default(question)]
+        if not pending:
+            return
+
+        # Same maps used to check the prerequisites of the chosen options: requirements pointing to
+        # options not available in the form are treated as satisfied
+        choice_fields = self._choice_fields()
+        available = {uuid: label for options in choice_fields.values() for uuid, label in options.items()}
+        owner = {uuid: field_key for field_key, options in choice_fields.items() for uuid in options}
+        selected = self._selected_options(choice_fields) | self._answered_options()
+
+        for _pass in range(len(pending)):
+            resolved = set()
+            for question in pending:
+                option = self._first_eligible_default(question, available, owner, selected)
+                if not option:
+                    continue
+
+                self.default_choices[question["id"]] = option["id"]
+                selected.add(str(option["uuid"]))
+                resolved.add(question["id"])
+
+            if not resolved:
+                break
+
+            pending = [question for question in pending if question["id"] not in resolved]
+
+    def _needs_default(self, question: dict) -> bool:
+        """Check whether a question has to be filled with one of its default options."""
+        if question["typ"] != BaseQuestionType.SINGLE:
+            return False
+
+        if not any(option.get("default") for option in question.get("options") or []):
+            return False
+
+        # A question dropped by its unmet prerequisites keeps no answer at all
+        if any(gated["id"] == question["id"] for gated in self.gated_questions):
+            return False
+
+        # An option already chosen is never replaced
+        if question["id"] in self.singles:
+            return False
+
+        # A field the player can still answer is left to them, even when left empty
+        field_key = get_question_key(question)
+        field = self.fields.get(field_key)
+        if field is not None and not field.disabled:
+            return False
+
+        return not self.cleaned_data.get(field_key)
+
+    def _answered_options(self) -> set[str]:
+        """Return the uuids of the options already chosen, including those without a field."""
+        chosen = {choice.option_id for choice in self.singles.values()}
+        if not chosen:
+            return set()
+
+        return {
+            str(option["uuid"])
+            for question in self.questions
+            for option in question.get("options") or []
+            if option["id"] in chosen
+        }
+
+    def _first_eligible_default(
+        self,
+        question: dict,
+        available: dict[str, str],
+        owner: dict[str, str],
+        selected: set,
+    ) -> dict | None:
+        """Return the first default option of a question that can be assigned, if any."""
+        defaults = [option for option in question.get("options") or [] if option.get("default")]
+        for option in sorted(defaults, key=lambda option: option.get("order") or 0):
+            if not self._option_available(question, option):
+                continue
+
+            if not self._option_allowed_ticket(option):
+                continue
+
+            if self._missing_requirements(str(option["uuid"]), available, owner, selected):
+                continue
+
+            return option
+
+        return None
+
+    def _option_available(self, question: dict, option: dict) -> bool:
+        """Check that an option is not sold out, reusing the counts computed for the form."""
+        if str(option["uuid"]) in self.unavail.get(question["uuid"], []):
+            return False
+
+        max_available = option.get("max_available") or 0
+        if max_available <= 0:
+            return True
+
+        taken = (self.registration_counts or {}).get(self.get_option_key_count(option), 0)
+        return taken < max_available
+
+    def _option_allowed_ticket(self, option: dict) -> bool:
+        """Check that the ticket of the player is one of those the option is restricted to."""
+        allowed = [ticket_id for ticket_id in option.get("tickets_map") or [] if ticket_id is not None]
+        registration = self.params.get("registration")
+        if not allowed or not registration:
+            return True
+
+        return registration.ticket_id in allowed
+
+    def save(self, commit: bool = True) -> Any:  # noqa: FBT001, FBT002
+        """Save the character, discarding the answers of the questions hidden by their requirements."""
+        instance = super().save(commit=commit)
+
+        if self.gated_questions and instance.pk:
+            question_ids = [question["id"] for question in self.gated_questions]
+            self.choice_class.objects.filter(question_id__in=question_ids, **{self.instance_key: instance.id}).delete()
+            self.answer_class.objects.filter(question_id__in=question_ids, **{self.instance_key: instance.id}).delete()
+
+        if self.default_choices and instance.pk:
+            for question_id, option_id in self.default_choices.items():
+                self.choice_class.objects.get_or_create(
+                    question_id=question_id,
+                    option_id=option_id,
+                    **{self.instance_key: instance.id},
+                )
+
+        return instance
 
 
 class OrgaCharacterForm(CharacterForm):
@@ -394,7 +775,7 @@ class OrgaCharacterForm(CharacterForm):
         )
 
         # For AJAX auto-save: skip widget setup but still load relationship data for saving
-        if self.params.get("request") and self.params["request"].POST.get("ajax") == "1":
+        if self.is_auto_save():
             self._load_relationships_data()
             return
 
@@ -444,7 +825,7 @@ class OrgaCharacterForm(CharacterForm):
         self._load_relationships_data()
 
         if get_event_config(context["event"].id, "writing_relationship_tags", context=self.params):
-            context["relationship_tags"] = get_cached_relationship_tags(context["event"])
+            context["relationship_tags"] = get_cached_relationship_tags(context["event"].id)
             for entry in self.params["relationships"].values():
                 entry["tag_uuids"] = [tag.uuid for tag in entry.get("tags", [])]
 
@@ -479,7 +860,7 @@ class OrgaCharacterForm(CharacterForm):
 
         if get_event_config(self.params["event"].id, "casting_mirror", context=self.params):
             if "mirror" in self.fields:
-                characters_query = self.params["run"].event.get_elements(Character).all()
+                characters_query = get_event_elements(self.params["run"].event_id, Character, context=self.params).all()
                 character_choices = [(character.uuid, character.name) for character in characters_query]
                 self.fields["mirror"].choices = [("", _("--- NOT ASSIGNED ---")), *character_choices]
         else:
@@ -502,6 +883,8 @@ class OrgaCharacterForm(CharacterForm):
 
         self._init_special_fields()
 
+        self._mark_gated_options()
+
     def _init_plots(self) -> None:
         """Initialize plot assignment fields in character forms.
 
@@ -513,7 +896,7 @@ class OrgaCharacterForm(CharacterForm):
 
         self.fields["plots"] = forms.ModelMultipleChoiceField(
             label="Plots",
-            queryset=self.params["event"].get_elements(Plot),
+            queryset=get_event_elements(self.params["event"].id, Plot, context=self.params),
             required=False,
             widget=EventPlotS2WidgetMulti,
         )
@@ -524,7 +907,7 @@ class OrgaCharacterForm(CharacterForm):
         self.plot_role_help_text = _("This text will be added to the %(name)s plot paragraph in the sheet.")
         self.params["TINYMCE_DISABLED"] = getattr(conf_settings, "TINYMCE_DISABLED", False)
 
-        self.plots = self.instance.get_plot_characters(self.params["event"])
+        self.plots = self.instance.get_plot_characters(self.params["event"].id)
         self.initial["plots"] = [plot_character.plot_id for plot_character in self.plots]
 
         self.add_char_finder = []
@@ -575,7 +958,7 @@ class OrgaCharacterForm(CharacterForm):
             return
 
         # Add / remove plots, restricted to the plots of this event (they are not inherited)
-        plot_event = self.params["event"].get_class_parent(Plot)
+        plot_event = get_event_class_parent(self.params["event"].id, Plot, context=self.params)
         selected = set(self.cleaned_data.get("plots", []))
         current = set(Plot.objects.filter(plotcharacterrel__character=instance, event=plot_event))
 
@@ -590,7 +973,7 @@ class OrgaCharacterForm(CharacterForm):
 
         # update texts (rows added client side are not declared fields, read them from raw data)
         to_update = []
-        for pr in instance.get_plot_characters(self.params["event"]):
+        for pr in instance.get_plot_characters(self.params["event"].id):
             field = f"pl_{pr.plot_id}"
             text = self.cleaned_data[field] if field in self.cleaned_data else self.data.get(field)
             if text is None or text == pr.text:
@@ -608,7 +991,7 @@ class OrgaCharacterForm(CharacterForm):
         # experience ability
         self.fields["exp_ability_list"] = forms.ModelMultipleChoiceField(
             label=_("Abilities"),
-            queryset=self.params["run"].event.get_elements(AbilityExp),
+            queryset=get_event_elements(self.params["run"].event_id, AbilityExp, context=self.params),
             widget=S2WidgetMulti(search_fields=["name__icontains"]),
             required=False,
         )
@@ -619,7 +1002,7 @@ class OrgaCharacterForm(CharacterForm):
         # delivery list
         self.fields["exp_delivery_list"] = forms.ModelMultipleChoiceField(
             label=_("Award"),
-            queryset=self.params["run"].event.get_elements(DeliveryExp),
+            queryset=get_event_elements(self.params["run"].event_id, DeliveryExp, context=self.params),
             widget=S2WidgetMulti(search_fields=["name__icontains"]),
             required=False,
         )
@@ -650,7 +1033,7 @@ class OrgaCharacterForm(CharacterForm):
         if "faction" not in self.params["features"]:
             return
 
-        queryset = self.params["run"].event.get_elements(Faction)
+        queryset = get_event_elements(self.params["run"].event_id, Faction, context=self.params)
 
         self.fields["factions_list"] = forms.ModelMultipleChoiceField(
             queryset=queryset,
@@ -678,7 +1061,9 @@ class OrgaCharacterForm(CharacterForm):
         if "relationships" not in self.params["features"] or "relationships" not in self.params:
             return
 
-        uuid_to_id = dict(self.params["event"].get_elements(Character).values_list("uuid", "id"))
+        uuid_to_id = dict(
+            get_event_elements(self.params["event"].id, Character, context=self.params).values_list("uuid", "id")
+        )
 
         rel_data = {k: v for k, v in self.data.items() if k.startswith("rel_") and not k.startswith("rel_tags_")}
         # Only process relationships if relationship fields are present in the form
@@ -780,7 +1165,9 @@ class OrgaCharacterForm(CharacterForm):
             return {}
 
         prefix = "rel_tags_"
-        tag_by_uuid = {tag.uuid: tag for tag in self.params["event"].get_elements(RelationshipTag)}
+        tag_by_uuid = {
+            tag.uuid: tag for tag in get_event_elements(self.params["event"].id, RelationshipTag, context=self.params)
+        }
         posted: dict[str, list] = {}
         for key in self.data:
             if not key.startswith(prefix):
@@ -807,7 +1194,7 @@ class OrgaCharacterForm(CharacterForm):
             return
 
         # with no tag defined the form renders no checkbox, so an empty post must not clear anything
-        if not get_cached_relationship_tags(self.params["event"]):
+        if not get_cached_relationship_tags(self.params["event"].id):
             return
 
         relationships = self.params.get("relationships", {})
@@ -876,16 +1263,21 @@ class OrgaCharacterForm(CharacterForm):
             The saved instance.
 
         """
-        # Save the main instance using parent's save method
-        instance = super().save()
+        # Save the main instance and related data under one deferral scope, to have
+        # a single experience recompute runs below
+        with experience_recalc_deferred():
+            instance = super().save()
 
-        # Only process related data if instance has been persisted
+            # Only process related data if instance has been persisted
+            if instance.pk:
+                self._save_plot(instance)
+                self._save_exp(instance)
+                self._save_relationships(instance)
+                self._save_active(instance)
+                refresh_character_relationships_background(instance.id)
+
         if instance.pk:
-            self._save_plot(instance)
-            self._save_exp(instance)
-            self._save_relationships(instance)
-            self._save_active(instance)
-            refresh_character_relationships_background(instance.id)
+            calculate_character_experience_points(instance)
 
         return instance
 
@@ -932,6 +1324,7 @@ class OrgaWritingQuestionForm(BaseModelForm):
         exclude: ClassVar[list] = ["order", "applicable"]
         widgets: ClassVar[dict] = {
             "description": forms.Textarea(attrs={"rows": 3, "cols": 40}),
+            "requirements": EventWritingOptionS2WidgetMulti,
         }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -962,7 +1355,7 @@ class OrgaWritingQuestionForm(BaseModelForm):
             help_texts = {
                 QuestionStatus.OPTIONAL: "The question is shown, and can be filled by the player",
                 QuestionStatus.MANDATORY: "The question needs to be filled by the player",
-                QuestionStatus.DISABLED: "The question is shown, but cannot be changed by the player",
+                QuestionStatus.DISABLED: "The question is shown read only, the player cannot change it",
                 QuestionStatus.HIDDEN: "The question is not shown to the player",
             }
 
@@ -1006,6 +1399,16 @@ class OrgaWritingQuestionForm(BaseModelForm):
 
         self.check_applicable = self.params["writing_typ"]
 
+        self._init_requirements()
+
+    def _init_requirements(self) -> None:
+        """Initialize the options gating the question, available only on character questions."""
+        if self.params["writing_typ"] != QuestionApplicable.CHARACTER:
+            self.delete_field("requirements")
+            return
+
+        self.event_field_if_feature("requirements", "wri_que_requirements", self.params["event"])
+
     def _init_type(self) -> None:
         """Initialize character type field choices based on available writing question types.
 
@@ -1018,7 +1421,7 @@ class OrgaWritingQuestionForm(BaseModelForm):
             - Sets self.prevent_canc based on instance type length
         """
         # Get writing questions applicable to current writing type
-        writing_questions = get_cached_writing_questions(self.params["event"], self.params["writing_typ"])
+        writing_questions = get_cached_writing_questions(self.params["event"].id, self.params["writing_typ"])
 
         # Extract already used question types to avoid duplicates
         already_used_types = list({q["typ"] for q in writing_questions})
@@ -1089,6 +1492,8 @@ class OrgaWritingQuestionForm(BaseModelForm):
             instance.applicable = self.params["writing_typ"]
         if commit:
             instance.save()
+            # the instance was saved by hand: the m2m fields are still pending
+            self.save_m2m()
         return instance
 
 
@@ -1125,15 +1530,8 @@ class OrgaWritingOptionForm(BaseModelForm):
         elif "max_available" in self.fields:
             self.fields["max_available"].required = False
 
-        if "wri_que_tickets" not in self.params["features"]:
-            self.delete_field("tickets")
-        else:
-            self.configure_field_event("tickets", self.params["event"])
-
-        if "wri_que_requirements" not in self.params["features"]:
-            self.delete_field("requirements")
-        else:
-            self.configure_field_event("requirements", self.params["event"])
+        self.event_field_if_feature("tickets", "wri_que_tickets", self.params["event"])
+        self.event_field_if_feature("requirements", "wri_que_requirements", self.params["event"])
 
     def clean_max_available(self) -> int:
         """Treat blank max_available as 0."""

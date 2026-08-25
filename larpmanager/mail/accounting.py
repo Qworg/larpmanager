@@ -23,6 +23,7 @@ from typing import Any
 
 from django.utils.translation import activate, gettext_lazy as _
 
+from larpmanager.cache.basic import get_run_event_id
 from larpmanager.cache.config import get_association_config
 from larpmanager.cache.feature import get_association_features, get_event_features
 from larpmanager.mail.base import notify_organization_exe
@@ -35,7 +36,7 @@ from larpmanager.mail.templates import (
     get_pay_token_email,
     get_token_credit_name,
 )
-from larpmanager.models.access import get_event_organizers
+from larpmanager.models.access import get_event_organizers, get_event_organizers_by_event
 from larpmanager.models.accounting import (
     AccountingItemCollection,
     AccountingItemDonation,
@@ -48,7 +49,7 @@ from larpmanager.models.accounting import (
     PaymentType,
 )
 from larpmanager.models.association import get_url, hdr
-from larpmanager.models.event import Run
+from larpmanager.models.event import Event, Run
 from larpmanager.models.member import Member, Membership, NotificationType
 from larpmanager.utils.io.pdf import generate_payment_receipt
 from larpmanager.utils.larpmanager.tasks import my_send_mail
@@ -75,10 +76,10 @@ def send_expense_notification_email(instance: AccountingItemExpense) -> None:
         return
 
     # Only send email notifications for newly created expenses
-    # that are associated with a run and event
-    if instance.run and instance.run.event:
+    # that are associated with a run and event (skip soft-deleted events)
+    if instance.run_id and Event.objects.filter(id=get_run_event_id(instance.run_id)).exists():
         # Iterate through all organizers for the event
-        for organizer in get_event_organizers(instance.run.event):
+        for organizer in get_event_organizers(instance.run_id):
             # Set the language context for the organizer
             activate(organizer.language)
 
@@ -134,7 +135,7 @@ def send_expense_approval_email(expense_item: AccountingItemExpense) -> None:
     _token_name, credits_name = get_token_credit_name(expense_item.association_id)
 
     # Add credit information if run has credits feature enabled
-    event_features = get_event_features(expense_item.run.event_id) if expense_item.run else {}
+    event_features = get_event_features(get_run_event_id(expense_item.run_id)) if expense_item.run else {}
     if expense_item.run and "credits" in event_features:
         email_body += "<br /><br /><i>" + _(
             "These funds have been added to your account as %(credits)s."
@@ -196,7 +197,7 @@ def notify_pay_token(instance: AccountingItemPayment, member: Member, run: Run) 
     my_send_mail(subject, body, member, run)
 
     # Send notifications to organizers/treasurers
-    for organizer in get_event_organizers(run.event):
+    for organizer in get_event_organizers_by_event(run.event_id):
         my_send_digest_email(
             member=organizer,
             run=run,
@@ -230,7 +231,7 @@ def notify_pay_credit(instance: AccountingItemPayment, member: Member, run: Run)
     my_send_mail(email_subject, email_body, member, run)
 
     # Send notifications to organizers/treasurers
-    for organizer in get_event_organizers(run.event):
+    for organizer in get_event_organizers_by_event(run.event_id):
         my_send_digest_email(
             member=organizer,
             run=run,
@@ -268,7 +269,7 @@ def notify_pay_money(
     my_send_mail(subject, body, paying_member, run, **_receipt_attachment_path(payment_instance))
 
     # Send notifications to organizers/treasurers
-    for organizer in get_event_organizers(run.event):
+    for organizer in get_event_organizers_by_event(run.event_id):
         my_send_digest_email(
             member=organizer,
             run=run,
@@ -380,7 +381,7 @@ def notify_credit(credits_name: str, instance: AccountingItemOther) -> None:
 
     # Send notification emails to event organizers if credit is run-specific
     if instance.run:
-        for event_organizer in get_event_organizers(instance.run.event):
+        for event_organizer in get_event_organizers(instance.run_id):
             # Localize email content for each organizer
             activate(event_organizer.language)
             email_subject, email_body = get_assignment_email(credits_name, instance)
@@ -402,7 +403,7 @@ def notify_token(instance: Any, tokens_name: str) -> None:
 
     # Send notification to event organizers if run exists
     if instance.run:
-        for organizer in get_event_organizers(instance.run.event):
+        for organizer in get_event_organizers(instance.run_id):
             activate(organizer.language)
             email_subject, email_body = get_assignment_email(tokens_name, instance)
             email_subject += _(" for %(user)s") % {"user": instance.member}
@@ -522,7 +523,7 @@ def notify_invoice_check(inv: PaymentInvoice) -> None:
         notify_organization_exe(inv.association, inv, notification_type=NotificationType.INVOICE_APPROVAL_EXE)
         return
 
-    members_to_notify = list(get_event_organizers(inv.registration.run.event))
+    members_to_notify = list(get_event_organizers(inv.registration.run_id))
     run = inv.registration.run
 
     # If treasurer feature is enabled, add treasurer appointees to the notification list

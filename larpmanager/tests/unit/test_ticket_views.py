@@ -387,8 +387,13 @@ class TestTicketViews(BaseTestCase):
         mock_check.return_value = {"association_id": association.id}
 
         page_size = exe_ticket_views.TICKETS_PAGE_SIZE
-        for _i in range(page_size + 5):
+        # The seeded fixture data already contains tickets, so size the second
+        # page from the real total rather than assuming an empty association.
+        existing = LarpManagerTicket.objects.filter(association=association).count()
+        for _i in range(page_size + 5 - existing):
             self.create_larpmanager_ticket(association=association, status=TicketStatus.OPEN)
+        total = LarpManagerTicket.objects.filter(association=association).count()
+        self.assertGreater(total, page_size)
 
         request = self._make_request("get", "/manage/tickets/", {"status": "all"})
         page = exe_ticket_views.exe_tickets(request)["context"]["tickets"]
@@ -400,7 +405,7 @@ class TestTicketViews(BaseTestCase):
         request_page2 = self._make_request("get", "/manage/tickets/", {"status": "all", "page": "2"})
         page2 = exe_ticket_views.exe_tickets(request_page2)["context"]["tickets"]
 
-        self.assertEqual(len(list(page2)), 5)
+        self.assertEqual(len(list(page2)), total - page_size)
         self.assertTrue(page2.has_previous())
         self.assertFalse(page2.has_next())
 

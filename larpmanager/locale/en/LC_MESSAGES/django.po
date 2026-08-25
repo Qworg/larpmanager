@@ -923,6 +923,9 @@ msgstr ""
 msgid "Invalid ticket selection"
 msgstr ""
 
+msgid "Read only"
+msgstr ""
+
 msgid "Not selected"
 msgstr ""
 
@@ -941,16 +944,6 @@ msgstr ""
 msgid "Character"
 msgstr ""
 
-msgid "Complete"
-msgstr ""
-
-msgid ""
-"Click here to confirm that you have completed the character and are ready to "
-"propose it to the staff. Be careful: some fields may no longer be editable. "
-"Leave the field blank to save your changes and to be able to continue them "
-"in the future."
-msgstr ""
-
 msgid "Factions"
 msgstr ""
 
@@ -958,6 +951,10 @@ msgid "Show available factions"
 msgstr ""
 
 msgid "Select only one primary faction"
+msgstr ""
+
+#, python-format
+msgid "The option '%(option)s' requires: %(missing)s"
 msgstr ""
 
 msgid "Manage characters of the event"
@@ -1046,6 +1043,15 @@ msgstr ""
 msgid ""
 "If enabled, allows characters and registrations to be exported to an easily "
 "readable page."
+msgstr ""
+
+msgid "Collapse options minimum"
+msgstr ""
+
+msgid ""
+"Indicate the minimum number of options a form field must have to hide the "
+"unselected ones behind the 'Show other options' link; if empty, the default "
+"of 5 is used."
 msgstr ""
 
 msgid "Show availability"
@@ -1500,6 +1506,14 @@ msgid ""
 "bought."
 msgstr ""
 
+msgid "Disable free abilities"
+msgstr ""
+
+msgid ""
+"If enabled, characters no longer automatically acquire abilities with a cost "
+"of zero."
+msgstr ""
+
 msgid "Multiple systems"
 msgstr ""
 
@@ -1521,6 +1535,11 @@ msgid "Approval"
 msgstr ""
 
 msgid "If enabled, activates a staff-managed approval process for characters."
+msgstr ""
+
+msgid ""
+"If enabled, the character form of the players will not be saved "
+"automatically while editing."
 msgstr ""
 
 msgid "Guilds"
@@ -2027,42 +2046,6 @@ msgstr ""
 msgid "Prologue"
 msgstr ""
 
-msgid "Included"
-msgstr ""
-
-msgid "Not included"
-msgstr ""
-
-msgid "Non-residential"
-msgstr ""
-
-msgid "Camping"
-msgstr ""
-
-msgid "Agritourism"
-msgstr ""
-
-msgid "Historic residence"
-msgstr ""
-
-msgid "Hotel"
-msgstr ""
-
-msgid "Other"
-msgstr ""
-
-msgid "Restaurant"
-msgstr ""
-
-msgid "Self-catering"
-msgstr ""
-
-msgid "Internal catering"
-msgstr ""
-
-msgid "External catering"
-msgstr ""
-
 msgid "Enter a valid number"
 msgstr ""
 
@@ -2385,6 +2368,9 @@ msgid "6-digit code from your authenticator app"
 msgstr ""
 
 msgid "Overpaid"
+msgstr ""
+
+msgid "Complete"
 msgstr ""
 
 msgid "Partial"
@@ -3102,6 +3088,10 @@ msgstr ""
 msgid "Reason"
 msgstr ""
 
+#, python-format
+msgid "You can review and submit again your data <a href='%(url)s'>here</a>."
+msgstr ""
+
 msgid "If you have questions, feel free to contact us."
 msgstr ""
 
@@ -3311,6 +3301,23 @@ msgid ""
 msgstr ""
 
 msgid "Without payment of this fee, event participation is not permitted."
+msgstr ""
+
+#, python-format
+msgid "Character creation reminder for %(event)s"
+msgstr ""
+
+#, python-format
+msgid ""
+"Hello! You registered for %(event)s and created your character, but it has "
+"not yet been confirmed for submission to the staff for approval. <a "
+"href='%(url)s'>click here</a> to check its status."
+msgstr ""
+
+#, python-format
+msgid ""
+"Hello! You registered for %(event)s but have not created your character yet. "
+"<a href='%(url)s'>click here</a> to create it."
 msgstr ""
 
 msgid "Review users with pending event deadlines:"
@@ -3564,6 +3571,9 @@ msgid "Venue: rent, utilities, and accommodation"
 msgstr ""
 
 msgid "Secretarial: stationery and printing"
+msgstr ""
+
+msgid "Other"
 msgstr ""
 
 msgid "Raw materials, auxiliaries, consumables and goods"
@@ -3833,6 +3843,9 @@ msgid "Payment reminder email"
 msgstr ""
 
 msgid "Profile completion reminder email"
+msgstr ""
+
+msgid "Character creation reminder email"
 msgstr ""
 
 msgid "Type of text"
@@ -4255,9 +4268,6 @@ msgstr ""
 msgid "Mandatory"
 msgstr ""
 
-msgid "Disabled"
-msgstr ""
-
 msgid "Searchable"
 msgstr ""
 
@@ -4298,6 +4308,12 @@ msgstr ""
 msgid "Select the types of writing elements that this question applies to"
 msgstr ""
 
+msgid "Prerequisites"
+msgstr ""
+
+msgid "Enter other options that must be selected for this question to be shown"
+msgstr ""
+
 msgid "Option name, displayed within the question (keep it short)"
 msgstr ""
 
@@ -4311,11 +4327,15 @@ msgid ""
 "(0 = unlimited)"
 msgstr ""
 
-msgid "Prerequisites"
+msgid ""
+"Enter other options that must be selected for this option to be selectable"
 msgstr ""
 
 msgid ""
-"Enter other options that must be selected for this option to be selectable"
+"Indicate whether this option is assigned automatically, when the question "
+"cannot be answered by the participant and no option was chosen; if several "
+"options are marked, the first one whose prerequisites are satisfied is "
+"assigned"
 msgstr ""
 
 msgid ""
@@ -4493,20 +4513,6 @@ msgid ""
 "participants, and to the organisers."
 msgstr ""
 
-msgid "Legal name"
-msgstr ""
-
-msgid ""
-"If the first name shown on your documents is different from the one you "
-"prefer to use, then write it here; otherwise leave this field empty."
-msgstr ""
-
-msgid "Legal Gender"
-msgstr ""
-
-msgid "Enter your legal gender as it appears on official documents."
-msgstr ""
-
 msgid "Pronouns"
 msgstr ""
 
@@ -4628,6 +4634,20 @@ msgstr ""
 
 msgid ""
 "If you are a candidate for the Board, please write an introduction here!"
+msgstr ""
+
+msgid "Legal name"
+msgstr ""
+
+msgid ""
+"If the first name shown on your documents is different from the one you "
+"prefer to use, then write it here; otherwise leave this field empty."
+msgstr ""
+
+msgid "Legal Gender"
+msgstr ""
+
+msgid "Enter your legal gender as it appears on official documents."
 msgstr ""
 
 msgid "Inactive"
@@ -4858,6 +4878,9 @@ msgstr ""
 msgid "Attachment Name"
 msgstr ""
 
+msgid "Bulk"
+msgstr ""
+
 msgid "Email Content"
 msgstr ""
 
@@ -4868,6 +4891,30 @@ msgid "Time And Date Of Sending"
 msgstr ""
 
 msgid "Language Code"
+msgstr ""
+
+msgid "Skipped"
+msgstr ""
+
+msgid "Permanent bounce"
+msgstr ""
+
+msgid "Transient bounce"
+msgstr ""
+
+msgid "Complaint"
+msgstr ""
+
+msgid "Manual"
+msgstr ""
+
+msgid "Bounce Count"
+msgstr ""
+
+msgid "Last Event"
+msgstr ""
+
+msgid "Raw Payload"
 msgstr ""
 
 msgid "The event this content belongs to"
@@ -5187,6 +5234,11 @@ msgstr ""
 msgid "Guild logo"
 msgstr ""
 
+msgid ""
+"If checked, the guild is not shown in the guild list or the gallery: only "
+"its members see it"
+msgstr ""
+
 msgid "Role"
 msgstr ""
 
@@ -5437,6 +5489,12 @@ msgid "Delay in profile"
 msgstr ""
 
 msgid "Missing casting preferences"
+msgstr ""
+
+msgid "Character not yet created"
+msgstr ""
+
+msgid "Character not yet confirmed"
 msgstr ""
 
 msgid "Show help tip"
@@ -5692,6 +5750,9 @@ msgid "Add option"
 msgstr ""
 
 msgid "Maximum"
+msgstr ""
+
+msgid "Assigned automatically when the participant cannot answer the question"
 msgstr ""
 
 msgid "An error occurred while reordering elements"
@@ -6113,6 +6174,17 @@ msgstr ""
 msgid "Select the new ability to obtain"
 msgstr ""
 
+msgid "Confirm character"
+msgstr ""
+
+msgid "Is your character ready?"
+msgstr ""
+
+msgid ""
+"Click here to confirm that you have completed the character and are ready to "
+"propose it to the staff. Be careful: some fields may no longer be editable."
+msgstr ""
+
 msgid "Edit"
 msgstr ""
 
@@ -6123,6 +6195,9 @@ msgid "Character profile"
 msgstr ""
 
 msgid "Upload a photo of your character specifically for this event!"
+msgstr ""
+
+msgid "The form is auto-saved every 5 seconds."
 msgstr ""
 
 msgid "Your characters"
@@ -6363,6 +6438,9 @@ msgstr ""
 msgid "My pending invites"
 msgstr ""
 
+msgid "Secret guild: visible only to its members"
+msgstr ""
+
 msgid "Availability"
 msgstr ""
 
@@ -6577,6 +6655,9 @@ msgid ""
 "belongs to at least one inclusion category, it will be shown in the search."
 msgstr ""
 
+msgid "Included"
+msgstr ""
+
 msgid ""
 "If you press a second time, it will be *excluded* in the search. If a "
 "character belongs to even one exclusion category, it will not be shown in "
@@ -6753,6 +6834,9 @@ msgid "Show collections"
 msgstr ""
 
 msgid "already delivered"
+msgstr ""
+
+msgid "Created"
 msgstr ""
 
 msgid "Organizer"
@@ -7340,6 +7424,28 @@ msgstr ""
 msgid "No address was ignored"
 msgstr ""
 
+msgid "Unsubscribed"
+msgstr ""
+
+msgid ""
+"These addresses opted out of bulk communications, and were not added to the "
+"queue:"
+msgstr ""
+
+msgid "No address was unsubscribed"
+msgstr ""
+
+msgid "Suppressed"
+msgstr ""
+
+msgid ""
+"These addresses bounced or reported a complaint in the past, and were not "
+"added to the queue:"
+msgstr ""
+
+msgid "No address was suppressed"
+msgstr ""
+
 msgid "Back"
 msgstr ""
 
@@ -7634,7 +7740,22 @@ msgid ""
 "hands dirty and break things! No signup required."
 msgstr ""
 
-msgid "Skip the demo, start your adventure from scratch"
+msgid "Create a new demo"
+msgstr ""
+
+msgid ""
+"A new demo organization will be created just for you, ready to explore as "
+"you want. This takes a few seconds."
+msgstr ""
+
+msgid "Proceed"
+msgstr ""
+
+msgid ""
+"Preparing your demo, this takes a few seconds. Please do not close this page!"
+msgstr ""
+
+msgid "Skip the demo, create your own organization"
 msgstr ""
 
 msgid "Create your organization"
@@ -8175,9 +8296,6 @@ msgid "We are processing your payment. Please wait a moment"
 msgstr ""
 
 msgid "View the characters you play"
-msgstr ""
-
-msgid "Last Event"
 msgstr ""
 
 msgid "You don't have any characters yet."
@@ -9047,9 +9165,6 @@ msgstr ""
 msgid "Content Type"
 msgstr ""
 
-msgid "Created"
-msgstr ""
-
 #, python-format
 msgid "%(used)s / %(total)s used"
 msgstr ""
@@ -9492,6 +9607,21 @@ msgid ""
 "the uploaded data."
 msgstr ""
 
+msgid ""
+"Note that existing rules with the same number, will be overwritten with the "
+"uploaded data."
+msgstr ""
+
+msgid ""
+"Note that existing modifiers with the same number, will be overwritten with "
+"the uploaded data."
+msgstr ""
+
+msgid ""
+"Note that existing ability types with the same name, will be overwritten "
+"with the uploaded data."
+msgstr ""
+
 msgid "You can also upload a second file with the registration options:"
 msgstr ""
 
@@ -9527,9 +9657,6 @@ msgid "Select the files to upload (must be in CSV format, encoded in UTF-8):"
 msgstr ""
 
 msgid "Loading performed, see logs"
-msgstr ""
-
-msgid "Proceed"
 msgstr ""
 
 msgid ""
@@ -11317,6 +11444,18 @@ msgstr ""
 msgid "Welcome"
 msgstr ""
 
+msgid "Invalid address"
+msgstr ""
+
+msgid "Forbidden domain"
+msgstr ""
+
+msgid "Opted out of communications"
+msgstr ""
+
+msgid "Address blocked after a bounce or a complaint"
+msgstr ""
+
 msgid "Registration Tickets"
 msgstr ""
 
@@ -11546,21 +11685,6 @@ msgstr ""
 msgid "(Optional) Character names it was awarded to, comma-separated"
 msgstr ""
 
-msgid "The ticket's name"
-msgstr ""
-
-msgid "The tier of the ticket"
-msgstr ""
-
-msgid "(Optional) The ticket's description"
-msgstr ""
-
-msgid "(Optional) The cost of the ticket"
-msgstr ""
-
-msgid "(Optional) Maximum number of spots available"
-msgstr ""
-
 msgid "The rule's number (unique identifier)"
 msgstr ""
 
@@ -11578,6 +11702,24 @@ msgid "(Optional) Ability names, comma-separated"
 msgstr ""
 
 msgid "(Optional) Cost (0 = auto assigned)"
+msgstr ""
+
+msgid "The ability type's name"
+msgstr ""
+
+msgid "The ticket's name"
+msgstr ""
+
+msgid "The tier of the ticket"
+msgstr ""
+
+msgid "(Optional) The ticket's description"
+msgstr ""
+
+msgid "(Optional) The cost of the ticket"
+msgstr ""
+
+msgid "(Optional) Maximum number of spots available"
 msgstr ""
 
 msgid "The question name"
@@ -11714,6 +11856,36 @@ msgid ""
 msgstr ""
 
 msgid "Please review it and submit it for publication."
+msgstr ""
+
+msgid "Not included"
+msgstr ""
+
+msgid "Non-residential"
+msgstr ""
+
+msgid "Camping"
+msgstr ""
+
+msgid "Agritourism"
+msgstr ""
+
+msgid "Historic residence"
+msgstr ""
+
+msgid "Hotel"
+msgstr ""
+
+msgid "Restaurant"
+msgstr ""
+
+msgid "Self-catering"
+msgstr ""
+
+msgid "Internal catering"
+msgstr ""
+
+msgid "External catering"
 msgstr ""
 
 msgid ""
@@ -12116,6 +12288,13 @@ msgstr ""
 msgid "Change your character!"
 msgstr ""
 
+#, python-format
+msgid "Confirm your character %(name)s is ready to propose to the staff!"
+msgstr ""
+
+msgid "Confirm your character!"
+msgstr ""
+
 msgid "Select your preferences"
 msgstr ""
 
@@ -12258,6 +12437,9 @@ msgid "Please write a question"
 msgstr ""
 
 msgid "Your request has been sent, we will reply as soon as possible!"
+msgstr ""
+
+msgid "Too many demos created, please wait a little before trying again"
 msgstr ""
 
 #, python-format
@@ -12697,6 +12879,11 @@ msgstr ""
 msgid "Preferences saved!"
 msgstr ""
 
+msgid ""
+"This character was modified in another window: your changes here have not "
+"been saved. Copy the text you want to keep, then reload the page."
+msgstr ""
+
 msgid "Characters are not visible at the moment"
 msgstr ""
 
@@ -12715,6 +12902,9 @@ msgid "Information saved!"
 msgstr ""
 
 msgid "New character created!"
+msgstr ""
+
+msgid "This character cannot be proposed at the moment"
 msgstr ""
 
 msgid ""

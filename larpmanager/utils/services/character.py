@@ -32,6 +32,7 @@ from larpmanager.cache.experience import get_event_exp_systems
 from larpmanager.cache.fields import visible_writing_fields
 from larpmanager.cache.question import get_cached_writing_questions
 from larpmanager.cache.registration import search_player
+from larpmanager.cache.run import get_event_run_ids
 from larpmanager.cache.writing import get_character_element_fields
 from larpmanager.models.casting import AssignmentTrait, Trait
 from larpmanager.models.form import (
@@ -55,7 +56,7 @@ from larpmanager.models.writing import (
     Relationship,
 )
 from larpmanager.utils.auth.permission import has_event_permission
-from larpmanager.utils.core.common import get_element
+from larpmanager.utils.core.common import get_element, get_event_class_parent
 from larpmanager.utils.core.exceptions import NotFoundError
 from larpmanager.utils.larpmanager.tasks import background_auto
 from larpmanager.utils.services.event import has_access_character
@@ -357,7 +358,7 @@ def get_character_sheet_exp(context: dict) -> None:
             "used": context["character"].addit.get(f"exp_used_{sys.uuid}", 0),
             "avail": context["character"].addit.get(f"exp_avail_{sys.uuid}", 0),
         }
-        for sys in get_event_exp_systems(context["event"])
+        for sys in get_event_exp_systems(context["event"].id)
         if not sys.hidden
     ]
 
@@ -447,7 +448,7 @@ def get_character_sheet_plots(context: dict) -> None:
     context["sheet_plots"] = []
 
     # Get the plot relations of the current event for the character, ordered by sequence
-    plot_relations = context["character"].get_plot_characters(context["event"])
+    plot_relations = context["character"].get_plot_characters(context["event"].id)
 
     for plot_relation in plot_relations:
         # Start with the base plot text
@@ -485,7 +486,7 @@ def get_character_sheet_factions(context: dict, *, only_visible: bool = False) -
     # If we show all the factions (player / staffer)
     all_factions = {}
     if not only_visible:
-        faction_event = context["event"].get_class_parent("faction")
+        faction_event = get_event_class_parent(context["event"].id, "faction", context=context)
         faction_ids = []
         for faction in context["character"].factions_list.filter(event=faction_event).order_by("order"):
             all_factions[faction.id] = faction.show_complete()
@@ -583,7 +584,7 @@ def get_character_sheet_guilds(context: dict, *, only_visible: bool = False) -> 
     if "guild" not in context["features"]:
         return
 
-    guild_event = context["event"].get_class_parent("guild")
+    guild_event = get_event_class_parent(context["event"].id, "guild", context=context)
     all_guilds = {}
     accepted_guilds = (
         Guild.objects.filter(
@@ -722,7 +723,13 @@ def get_char_check(
             # Locked: player sees public fields only (no full sheet)
             return
 
-    get_element(context, character_uuid, "character", Character)
+    get_element(
+        context,
+        character_uuid,
+        "character",
+        Character,
+        queryset_base=Character.objects.select_related("player"),
+    )
     context["check"] = 1
 
 
@@ -796,7 +803,7 @@ def check_missing_mandatory(context: dict) -> None:
         **dict.fromkeys(BaseQuestionType.get_choice_types(), WritingChoice),
     }
 
-    questions = get_cached_writing_questions(context["event"], QuestionApplicable.CHARACTER)
+    questions = get_cached_writing_questions(context["event"].id, QuestionApplicable.CHARACTER)
     character_id = _get_character_cache_id(context)
 
     # Collect mandatory questions grouped by model
@@ -853,7 +860,7 @@ def _collect_sources_map(character: Character) -> dict[int, set[str]]:
     sheet_name = next(
         (
             q["name"]
-            for q in get_cached_writing_questions(character.event, QuestionApplicable.CHARACTER)
+            for q in get_cached_writing_questions(character.event_id, QuestionApplicable.CHARACTER)
             if q["typ"] == WritingQuestionType.SHEET
         ),
         WritingQuestionType.SHEET.label,
@@ -869,13 +876,13 @@ def _collect_sources_map(character: Character) -> dict[int, set[str]]:
         _add_refs(pcr.text or "", pcr.plot.name)
         _add_refs(pcr.plot.text or "", pcr.plot.name)
 
-    faction_event = character.event.get_class_parent("faction")
+    faction_event = get_event_class_parent(character.event_id, "faction")
     faction_qs = character.factions_list.filter(event=faction_event, deleted__isnull=True)
     for faction in faction_qs:
         _add_refs(faction.text or "", faction.name)
 
     if character.player_id:
-        run_ids = list(character.event.runs.values_list("id", flat=True))
+        run_ids = get_event_run_ids(character.event_id)
         for assignment in AssignmentTrait.objects.filter(
             member_id=character.player_id, run_id__in=run_ids, deleted__isnull=True
         ).select_related("trait"):

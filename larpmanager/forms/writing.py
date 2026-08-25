@@ -60,8 +60,11 @@ from larpmanager.models.writing import (
     RelationshipTag,
     SpeedLarp,
 )
+from larpmanager.utils.core.common import get_event_elements
+from larpmanager.utils.core.guard import experience_recalc_deferred
 from larpmanager.utils.core.validators import FileTypeValidator
 from larpmanager.utils.services.character import _get_character_cache_id
+from larpmanager.utils.services.experience import calculate_character_experience_points
 
 
 class WritingForm(BaseModelForm):
@@ -228,7 +231,7 @@ class BaseWritingForm(BaseRegistrationForm):
     def _init_questions(self, event: Event) -> None:
         """Initialize questions filtered by applicable type using cache."""
         self.params.get("features", [])
-        self.questions = get_cached_writing_questions(event, self.applicable)
+        self.questions = get_cached_writing_questions(event.id, self.applicable)
 
     def get_options_query(self, event: Event) -> Any:
         """Get annotated queryset of options with ticket mappings."""
@@ -241,7 +244,7 @@ class BaseWritingForm(BaseRegistrationForm):
         """Return cache key for tracking option character count."""
         return f"option_char_{option['id']}"
 
-    def save(self, commit: bool = True) -> Any:  # noqa: FBT001, FBT002, ARG002
+    def save(self, commit: bool = True) -> Any:  # noqa: FBT001, FBT002
         """Save the form and handle registration questions if present.
 
         Args:
@@ -251,16 +254,25 @@ class BaseWritingForm(BaseRegistrationForm):
             The saved instance
 
         """
-        # Save parent form and persist instance
-        instance = super().save()
-        instance.save()
+        # Save parent form and persist instance. Defer the post_save experience
+        # recompute: it needs the registration questions saved below, which happen
+        # after instance.save(), otherwise it would run once here with stale data
+        # and be wasted.
+        with experience_recalc_deferred():
+            instance = super().save(commit=commit)
 
-        # Save registration questions if form has them
-        if hasattr(self, "questions"):
+        # Registration questions need a saved instance (element_id); if commit is False
+        # the caller is responsible for saving the instance and calling
+        # save_registration_questions() itself once it has a pk.
+        if commit and hasattr(self, "questions"):
             orga = True
             if hasattr(self, "orga"):
                 orga = self.orga
             self.save_registration_questions(instance, is_organizer=orga)
+
+        # Recompute the character experience point now that questions are saved
+        if commit and isinstance(instance, Character):
+            calculate_character_experience_points(instance)
 
         return instance
 
@@ -581,7 +593,7 @@ class GuildForm(WritingForm, BaseWritingForm):
     class Meta:
         model = Guild
 
-        fields: ClassVar[list] = ["name", "teaser", "text", "cover"]
+        fields: ClassVar[list] = ["name", "teaser", "text", "cover", "secret"]
 
         widgets: ClassVar[dict] = {
             "teaser": WritingTinyMCE(),
@@ -601,7 +613,7 @@ class GuildForm(WritingForm, BaseWritingForm):
             self.instance.event = event
         self._init_registration_question(self.instance, event)
 
-        fields_default = {"name", "teaser", "text", "cover"}
+        fields_default = {"name", "teaser", "text", "cover", "secret"}
         fields_custom = set()
 
         for question in self.questions:
@@ -651,7 +663,7 @@ class OrgaQuestForm(WritingForm, BaseWritingForm):
         self._init_special_fields()
 
         # Populate quest type choices from event elements
-        que = self.params.get("run").event.get_elements(QuestType)
+        que = get_event_elements(self.params.get("run").event_id, QuestType, context=self.params)
         self.fields["typ"].choices = [(m.uuid, m.name) for m in que]
 
 
@@ -679,7 +691,7 @@ class OrgaTraitForm(WritingForm, BaseWritingForm):
         self._init_special_fields()
 
         # Populate quest choices from event elements
-        que = self.params.get("run").event.get_elements(Quest)
+        que = get_event_elements(self.params.get("run").event_id, Quest, context=self.params)
         self.fields["quest"].choices = [(m.uuid, m.name) for m in que]
 
 
@@ -701,7 +713,7 @@ class OrgaHandoutForm(WritingForm):
         super().__init__(*args, **kwargs)
 
         # Retrieve handout templates for the associated run's event
-        que = self.params.get("run").event.get_elements(HandoutTemplate)
+        que = get_event_elements(self.params.get("run").event_id, HandoutTemplate, context=self.params)
 
         # Populate template field choices with template IDs and names
         self.fields["template"].choices = [(m.uuid, m.name) for m in que]
@@ -759,7 +771,7 @@ class OrgaPrologueForm(WritingForm, BaseWritingForm):
         super().__init__(*args, **kwargs)
 
         # Populate prologue type choices from event elements
-        que = self.params.get("run").event.get_elements(PrologueType)
+        que = get_event_elements(self.params.get("run").event_id, PrologueType, context=self.params)
         self.fields["typ"].choices = [(m.uuid, m.name) for m in que]
 
         # Initialize organization-specific fields and reorder characters

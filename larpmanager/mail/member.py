@@ -26,6 +26,7 @@ from django.utils import timezone, translation
 from django.utils.html import escape
 from django.utils.translation import activate, gettext_lazy as _
 
+from larpmanager.cache.basic import get_run_event_id
 from larpmanager.cache.config import get_association_config
 from larpmanager.cache.feature import get_event_features
 from larpmanager.mail.accounting import _receipt_attachment_path
@@ -176,7 +177,7 @@ def notify_membership_approved(member: Member, resp: str) -> None:
 
     # Process each registration for payment requirements
     for registration in member_registrations:
-        features = get_event_features(registration.run.event_id)
+        features = get_event_features(get_run_event_id(registration.run_id))
         run_starts_this_year = registration.run.start and registration.run.start.year == timezone.now().year
 
         # Check if membership fee is required for this event
@@ -221,6 +222,10 @@ def notify_membership_reject(member: Any, resp: Any) -> None:
     body = _("We regret to inform you that your membership application was not approved by the board.")
     if resp:
         body += " " + _("Reason") + f": {resp}"
+    membership_url = get_url("membership", member.membership)
+    body += "<br /><br />" + _(
+        "You can review and submit again your data <a href='%(url)s'>here</a>.",
+    ) % {"url": membership_url}
     body += " " + _("If you have questions, feel free to contact us.")
     my_send_mail(subject, body, member, member.membership)
 
@@ -242,7 +247,7 @@ def send_help_question_notification_email(instance: Any) -> None:
 
     if instance.is_user:
         if instance.run:
-            for organizer in get_event_organizers(instance.run.event):
+            for organizer in get_event_organizers(instance.run_id):
                 activate(organizer.language)
                 subject, body = get_help_email(instance)
                 subject += " " + _("for %(event)s") % {"event": instance.run}
@@ -280,7 +285,7 @@ def send_chat_message_notification_email(instance: Any) -> None:
         return
     activate(instance.receiver.language)
     subject = hdr(instance) + _("New message from %(user)s") % {"user": instance.sender.display_member()}
-    chat_url = get_url(f"chat/{instance.sender.id}/", instance)
+    chat_url = get_url(f"chat/{instance.sender.uuid}/", instance)
     email_body = f"<br /><br />{escape(instance.message)} (<a href='{chat_url}'>" + _("reply here") + "</a>)"
     my_send_mail(subject, email_body, instance.receiver, instance)
 

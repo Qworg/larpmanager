@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Any, ClassVar
 
 from colorfield.fields import ColorField
@@ -33,6 +32,14 @@ from pilkit.processors import ResizeToFit
 from tinymce.models import HTMLField
 
 from larpmanager.cache.config import get_element_config, get_event_config
+from larpmanager.cache.feature import get_event_features
+from larpmanager.cache.media import (
+    get_character_filepath,
+    get_character_media_filepath,
+    get_faction_filepath,
+    get_faction_media_filepath,
+    get_handout_media_filepath,
+)
 from larpmanager.models.base import BaseModel, MediaTokenMixin, OrderMixin, UuidMixin
 from larpmanager.models.event import BaseConceptModel, Event, ProgressStep, Run
 from larpmanager.models.member import Member
@@ -279,25 +286,30 @@ class Character(Writing):
         js["locked"] = self.locked
 
         if run:
-            self.show_factions(run.event, js)
-            self.show_guilds(run.event, js)
+            self.show_factions(run.event_id, js)
+            self.show_guilds(run.event_id, js)
 
         return js
 
-    def show_guilds(self, event: Event | None, js: dict) -> None:
+    def show_guilds(self, event_id: int, js: dict) -> None:
         """Add guild information to the JavaScript data structure.
 
         Populates the 'guilds' list in the js dictionary with numbers of guilds
         the character belongs to, restricted to accepted memberships.
 
         Args:
-            event: Event object to get guilds from. If None, uses self.event.
+            event_id: Event ID object to get guilds from.
             js: Dictionary to populate with guild data.
 
         """
         js["guilds"] = []
 
-        guild_event = event.get_class_parent("guild") if event else self.event.get_class_parent("guild")
+        if "guild" not in get_event_features(event_id):
+            return
+
+        from larpmanager.utils.core.common import get_event_class_parent  # noqa: PLC0415
+
+        guild_event = get_event_class_parent(event_id, "guild")
 
         # noinspection PyUnresolvedReferences
         query = self.guild_memberships.filter(
@@ -306,7 +318,7 @@ class Character(Writing):
         for membership in query.order_by("guild__order"):
             js["guilds"].append(membership.guild.number)
 
-    def show_factions(self, event: Event | None, js: dict) -> None:
+    def show_factions(self, event_id: int, js: dict) -> None:
         """Add faction information to the JavaScript data structure.
 
         Populates the 'factions' list in the js dictionary with faction objects
@@ -314,21 +326,27 @@ class Character(Writing):
         adds a default faction object. Also sets thumbnail URL if primary faction has cover image.
 
         Args:
-            event: Event object to get factions from. If None, uses self.event.
+            event_id: Event ID object to get factions from.
             js: Dictionary to populate with faction data.
 
         """
         js["factions"] = []
 
+        if "faction" not in get_event_features(event_id):
+            js["factions"].append(0)
+            return
+
         # Determine which event to use for faction lookup
-        faction_event = event.get_class_parent("faction") if event else self.event.get_class_parent("faction")
+        from larpmanager.utils.core.common import get_event_class_parent  # noqa: PLC0415
+
+        faction_event_id = get_event_class_parent(event_id, "faction")
 
         # Track if we find a primary faction
         has_primary_faction = False
 
         # Process all public factions for this event
         # noinspection PyUnresolvedReferences
-        query = self.factions_list.filter(event=faction_event).exclude(typ=FactionType.SECRET)
+        query = self.factions_list.filter(event_id=faction_event_id).exclude(typ=FactionType.SECRET)
         for faction in query.order_by("order"):
             # Check if this is a primary faction
             if faction.typ == FactionType.PRIM:
@@ -350,14 +368,11 @@ class Character(Writing):
     @staticmethod
     def get_character_filepath(run: Run) -> str:
         """Get the directory path for storing character files for a given run."""
-        directory_path = str(Path(run.get_media_filepath()) / "characters/")
-        Path(directory_path).mkdir(mode=0o770, parents=True, exist_ok=True)
-        return directory_path
+        return get_character_filepath(run.id)
 
     def get_media_filepath(self, run: Run, descr: str) -> str:
         """Get the base path to this character's PDF files."""
-        character_directory = self.get_character_filepath(run)
-        return str(Path(character_directory) / f"{self.number}-{self.media_token}-{descr}.pdf")
+        return get_character_media_filepath(run.id, self.number, self.media_token, descr)
 
     def get_sheet_filepath(self, run: Run) -> str:
         """Get the path to this character's PDF sheet file."""
@@ -382,15 +397,17 @@ class Character(Writing):
         """Return queryset of relationships where this character is the source."""
         return Relationship.objects.filter(source_id=self.pk)
 
-    def get_plot_characters(self, event: Any = None) -> Any:
+    def get_plot_characters(self, event_id: int | None = None) -> Any:
         """Return queryset of plot-character relations for this character.
 
-        Plots are not inherited in campaigns: when an event is given, only relations
+        Plots are not inherited in campaigns: when an event ID is given, only relations
         towards plots of that event are returned.
         """
         queryset = PlotCharacterRel.objects.filter(character_id=self.pk).select_related("plot")
-        if event:
-            queryset = queryset.filter(plot__event=event.get_class_parent("plot"))
+        if event_id:
+            from larpmanager.utils.core.common import get_event_class_parent  # noqa: PLC0415
+
+            queryset = queryset.filter(plot__event=get_event_class_parent(event_id, "plot"))
         return queryset.order_by("order")
 
     @classmethod
@@ -561,14 +578,11 @@ class Faction(Writing):
     @staticmethod
     def get_faction_filepath(run: Run) -> str:
         """Get the directory path for storing faction PDF files for a specific run."""
-        directory_path = str(Path(run.get_media_filepath()) / "factions/")
-        Path(directory_path).mkdir(mode=0o770, parents=True, exist_ok=True)
-        return directory_path
+        return get_faction_filepath(run.id)
 
     def get_sheet_filepath(self, run: Run) -> str:
         """Get the complete file path for this faction's PDF sheet."""
-        faction_directory = self.get_faction_filepath(run)
-        return str(Path(faction_directory) / f"{self.number}-{self.media_token}.pdf")
+        return get_faction_media_filepath(run.id, self.number, self.media_token)
 
     def show_red(self) -> dict:
         """Update JavaScript response with 'typ' and 'teaser' attributes."""
@@ -638,11 +652,17 @@ class Guild(Writing):
         blank=True,
     )
 
+    secret = models.BooleanField(
+        default=False,
+        verbose_name=_("Secret"),
+        help_text=_("If checked, the guild is not shown in the guild list or the gallery: only its members see it"),
+    )
+
     def show_red(self) -> dict:
         """Update JavaScript response with 'teaser' and cover attributes."""
         js = super().show_red()
 
-        for s in ["teaser", "color"]:
+        for s in ["teaser", "color", "secret"]:
             self.upd_js_attr(js, s)
 
         if self.cover:
@@ -797,11 +817,9 @@ class Handout(Writing):
         """Return string representation."""
         return f"H{self.number} {self.name}"
 
-    def get_filepath(self, run: Run) -> str:
+    def get_filepath(self) -> str:
         """Build the file path for this handout's PDF within the event's media directory."""
-        handouts_directory = str(Path(run.event.get_media_filepath()) / "handouts")
-        Path(handouts_directory).mkdir(mode=0o770, parents=True, exist_ok=True)
-        return str(Path(handouts_directory) / f"{self.number}-{self.media_token}.pdf")
+        return get_handout_media_filepath(self.event_id, self.number, self.media_token)
 
 
 class TextVersionChoices(models.TextChoices):
@@ -959,17 +977,15 @@ def replace_character_names(instance: Any) -> None:
     if not instance.pk:
         return
 
-    # Early return if instance doesn't have an associated event
-    if not hasattr(instance, "event"):
-        return
-
     # Early return if event doesn't have character substitution enabled
     if not get_event_config(instance.event_id, "writing_substitute"):
         return
 
     # Build character name to number mapping for replacement
+    from larpmanager.utils.core.common import get_event_elements  # noqa: PLC0415
+
     character_name_to_number_mapping = {}
-    for character in instance.event.get_elements(Character):
+    for character in get_event_elements(instance.event_id, Character):
         character_name_to_number_mapping[character.name] = character.number
 
     # Sort names by length (longest first) to avoid partial replacements

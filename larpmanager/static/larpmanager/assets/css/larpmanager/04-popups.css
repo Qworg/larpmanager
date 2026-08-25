@@ -524,7 +524,7 @@ dialog::backdrop {
   transform: translate(-50%, -50%);
   padding: 3em;
   border-radius: 2em;
-  background-color: rgba(var(--sec-rgb), 0.9);
+  background-color: rgba(var(--sec-rgb), 1);
   -webkit-box-shadow: 0px 0px 39px 12px rgba(0, 0, 0, 0.75);
   -moz-box-shadow: 0px 0px 39px 12px rgba(0, 0, 0, 0.75);
   box-shadow: 0px 0px 39px 12px rgba(0, 0, 0, 0.75);
@@ -536,7 +536,7 @@ dialog::backdrop {
   transition: opacity 0.2s;
   transition-delay: 0.1s;
   pointer-events: none;
-  z-index: 99;
+  z-index: 999;
 }
 
 #excel-edit iframe {
@@ -551,6 +551,48 @@ dialog::backdrop {
 #excel-edit.visible {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* the page-level v20/v22 rules left-align headings and option rows: the popup centers them */
+#excel-edit h1,
+#excel-edit h2,
+#excel-edit h3,
+#excel-edit h4,
+#excel-edit p {
+  text-align: center;
+}
+
+#excel-edit input,
+#excel-edit textarea {
+  margin: auto;
+}
+
+#excel-edit .my-checkbox-class > div,
+#excel-edit .my-radio-class > div,
+#excel-edit .reg-checkbox-class > div,
+#excel-edit .reg-radio-class > div {
+  text-align: center;
+}
+
+#excel-edit .my-checkbox-class label,
+#excel-edit .my-radio-class label,
+#excel-edit .reg-checkbox-class label,
+#excel-edit .reg-radio-class label {
+  justify-content: center;
+  text-align: center;
+}
+
+#excel-edit .opt-body,
+#excel-edit .opt-card-body {
+  flex: 0 1 auto;
+}
+
+#excel-edit .opt-card-header {
+  justify-content: center;
+}
+
+#excel-edit .opt-card-price {
+  margin-left: 0;
 }
 
 #excel-edit .close {

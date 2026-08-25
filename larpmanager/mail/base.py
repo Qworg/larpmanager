@@ -19,7 +19,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 from __future__ import annotations
 
-from contextlib import suppress
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +31,7 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.utils.translation import activate, gettext_lazy as _
 
+from larpmanager.cache.basic import get_event_association_id, get_run_basic_cache
 from larpmanager.cache.config import get_event_config
 from larpmanager.cache.event_text import get_event_text
 from larpmanager.cache.links import reset_event_links
@@ -41,9 +41,17 @@ from larpmanager.models.access import (
     EventRole,
     RoleInvite,
     get_association_executives,
-    get_event_organizers,
+    get_event_organizers_by_event,
 )
-from larpmanager.models.association import Association, get_association_maintainers, get_url, hdr
+from larpmanager.models.association import (
+    Association,
+    get_association_maintainers,
+    get_association_url,
+    get_url,
+    hdr,
+    hdr_association,
+    hdr_run,
+)
 from larpmanager.models.casting import AssignmentTrait, Casting
 from larpmanager.models.event import EventTextType
 from larpmanager.models.member import Member
@@ -251,9 +259,10 @@ def on_event_roles_m2m_changed(sender: type, **kwargs: Any) -> None:  # noqa: AR
         # Cache invalidation ensures permission changes take effect
         if action in ("post_remove", "post_clear"):
             if pk_set:
+                association_id = get_event_association_id(instance.event_id)
                 for mid in pk_set:
                     mb = Member.objects.get(pk=mid)
-                    reset_event_links(mb.id, instance.event.association_id)
+                    reset_event_links(mb.id, association_id)
             return
 
         # Only process role additions from this point
@@ -263,28 +272,29 @@ def on_event_roles_m2m_changed(sender: type, **kwargs: Any) -> None:  # noqa: AR
         # Get event organizers for notification purposes
         # Gracefully handle cases where event has no organizers yet
         try:
-            orgas = get_event_organizers(instance.event)
+            orgas = get_event_organizers_by_event(instance.event_id)
         except ObjectDoesNotExist:
             orgas = []
 
         # Process each member that was added to the role
+        association_id = get_event_association_id(instance.event_id)
         for mid in pk_set:
             mb = Member.objects.get(pk=mid)
             # Ensure member is part of the association
-            mb.join(instance.event.association)
+            mb.join(association_id)
             # Invalidate cached permissions for the member
-            reset_event_links(mb.id, instance.event.association_id)
+            reset_event_links(mb.id, association_id)
             if instance.number == 1 and mb.email:
                 _newsletter_set_active(mb.email)
 
             # Send approval notification to the member
             # Use member's preferred language for personalized communication
             activate(mb.language)
-            subj = hdr(instance.event.association) + _("Role approval %(role)s per %(event)s") % {
+            subj = hdr_association(association_id) + _("Role approval %(role)s per %(event)s") % {
                 "role": instance.name,
                 "event": instance.event,
             }
-            url = get_url(reverse("manage", kwargs={"event_slug": instance.event.slug}), instance.event.association)
+            url = get_association_url(reverse("manage", kwargs={"event_slug": instance.event.slug}), association_id)
             body = _("Access the management panel <a href= %(url)s'>from here</a>!") % {"url": url}
             my_send_mail(subj, body, mb, instance.event)
 
@@ -295,7 +305,7 @@ def on_event_roles_m2m_changed(sender: type, **kwargs: Any) -> None:  # noqa: AR
                     continue
                 # Use organizer's preferred language for notification
                 activate(m.language)
-                subj = hdr(instance.event.association) + _("Approval %(user)s as %(role)s for %(event)s") % {
+                subj = hdr_association(association_id) + _("Approval %(user)s as %(role)s for %(event)s") % {
                     "user": mb,
                     "role": instance.name,
                     "event": instance.event,
@@ -342,12 +352,13 @@ def bring_friend_instructions(registration: Registration, context: dict) -> None
     activate(registration.member.language)
 
     # Build email subject with event header and localized message
-    email_subject = hdr(registration.run.event) + _("Bring a friend to %(event)s!") % {"event": registration.run}
+    email_subject = hdr_run(registration.run_id) + _("Bring a friend to %(event)s!") % {"event": registration.run}
 
     # Start email body with the user's personal discount code
     email_body = _("Personal code: <b>%(cod)s</b>") % {"cod": registration.uuid}
 
     # Add instructions for sharing the code and friend's discount amount
+    currency_symbol = get_run_basic_cache(registration.run_id)["currency_symbol"]
     email_body += (
         "<br /><br />"
         + _("Copy this code and share it with friends!")
@@ -358,14 +369,14 @@ def bring_friend_instructions(registration: Registration, context: dict) -> None
         )
         % {
             "amount_to": context["bring_friend_discount_to"],
-            "currency": registration.run.event.association.get_currency_symbol(),
+            "currency": currency_symbol,
         }
         + " "
         # Add information about the user's own discount benefit
         + _("For each of them, you will receive %(amount_from)s %(currency)s off your own event registration.")
         % {
             "amount_from": context["bring_friend_discount_from"],
-            "currency": registration.run.event.association.get_currency_symbol(),
+            "currency": currency_symbol,
         }
     )
 
@@ -404,8 +415,10 @@ def send_trait_assignment_email(instance: AssignmentTrait) -> None:
     # Set language context to member's preferred language
     activate(instance.member.language)
 
+    run_cache = get_run_basic_cache(instance.run_id)
+
     # Skip email if character mail is disabled for this event
-    if get_event_config(instance.run.event_id, "mail_character"):
+    if get_event_config(run_cache["event_id"], "mail_character"):
         return
 
     # Get trait and quest display information for the current run
@@ -413,7 +426,7 @@ def send_trait_assignment_email(instance: AssignmentTrait) -> None:
     quest_display = instance.trait.quest.show(instance.run)
 
     # Build email subject with event header and localized text
-    subject = hdr(instance.run.event) + _("Trait assigned for %(event)s") % {"event": instance.run}
+    subject = hdr_run(instance.run_id) + _("Trait assigned for %(event)s") % {"event": instance.run}
 
     # Create main email body with trait assignment details
     body = _(
@@ -422,14 +435,14 @@ def send_trait_assignment_email(instance: AssignmentTrait) -> None:
     ) % {"event": instance.run, "trait": trait_display["name"], "quest": quest_display["name"]}
 
     # Add character access link to the email body
-    character_url = get_url(
+    character_url = get_association_url(
         reverse("character_your", kwargs={"event_slug": instance.run.get_slug()}),
-        instance.run.event,
+        run_cache["association_id"],
     )
     body += "<br/><br />" + _("Access your character <a href='%(url)s'>here</a>!") % {"url": character_url}
 
     # Append custom assignment message if configured for this event
-    custom_assignment_message = get_event_text(instance.run.event_id, EventTextType.ASSIGNMENT)
+    custom_assignment_message = get_event_text(run_cache["event_id"], EventTextType.ASSIGNMENT)
     if custom_assignment_message:
         body += "<br />" + custom_assignment_message
 
@@ -469,7 +482,7 @@ def mail_confirm_casting(
     activate(member.language)
 
     # Build email subject with event header and casting confirmation message
-    email_subject = hdr(run.event) + _("Casting preferences saved on '%(type)s' for %(event)s") % {
+    email_subject = hdr_run(run.id) + _("Casting preferences saved on '%(type)s' for %(event)s") % {
         "type": preference_category_name,
         "event": run,
     }
@@ -519,9 +532,7 @@ def send_character_status_update_email(instance: Character) -> None:
         return
 
     # Skip if status is the same as the old one
-    old_status = None
-    with suppress(ObjectDoesNotExist):
-        old_status = Character.objects.get(pk=instance.pk).status
+    old_status = Character.objects.filter(pk=instance.pk).values_list("status", flat=True).first()
 
     if old_status == instance.status:
         return

@@ -1969,6 +1969,10 @@ body.landing #get-started-real h2 {
   margin-bottom: 0.5rem;
 }
 
+body.landing .get-started-demo p {
+  text-align: center;
+}
+
 body.landing .get-started-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -2011,6 +2015,76 @@ body.landing .get-started-card {
 body.landing .get-started-card:hover {
   background: #56b3d1;
   transform: translateY(-2px);
+}
+
+body.landing .get-started-card:disabled {
+  cursor: wait;
+  opacity: 0.5;
+  transform: none;
+}
+
+body.landing .get-started-card:disabled:hover {
+  background: var(--teal-bright);
+  transform: none;
+}
+
+.demo-confirm-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: fit-content;
+  min-width: 320px;
+  max-width: 30vw;
+  height: fit-content;
+  min-height: 200px;
+  max-height: 40vh;
+  margin: 0;
+  padding: 2rem;
+  border: none;
+  border-radius: 12px;
+  background: #0a1418;
+  color: #fff;
+  box-shadow: 0 0 39px 12px rgba(0, 0, 0, 0.75);
+}
+
+.demo-confirm-modal::backdrop {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+@media (max-width: 840px) {
+  .demo-confirm-modal {
+    max-width: 90vw;
+  }
+}
+
+.demo-confirm-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+body.landing .demo-confirm-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  text-align: center;
+}
+
+body.landing .demo-confirm-step.hide {
+  display: none;
+}
+
+body.landing .demo-confirm-step i {
+  font-size: 3rem;
+  color: var(--teal-bright);
 }
 
 body.landing .get-started-card i {

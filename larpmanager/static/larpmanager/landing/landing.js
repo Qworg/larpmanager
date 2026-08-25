@@ -111,6 +111,66 @@ window.addEventListener('DOMContentLoaded', function () {
         }
     }
 
+    // Demo launch: confirm in a modal first (cloning takes a few seconds), then submit.
+    var demoForms = document.querySelectorAll('.get-started-demo-form');
+    var demoModal = document.getElementById('demo-confirm-modal');
+    var demoConfirmStep = document.getElementById('demo-confirm-step');
+    var demoBuildingStep = document.getElementById('demo-building-step');
+    var demoProceedButton = document.getElementById('demo-confirm-proceed');
+    var demoCloseButton = document.getElementById('demo-confirm-close');
+    var pendingDemoForm = null;
+
+    if (demoModal && demoConfirmStep && demoBuildingStep && demoProceedButton) {
+        demoForms.forEach(function (form) {
+            var card = form.querySelector('.get-started-card');
+            if (!card) {
+                return;
+            }
+            card.addEventListener('click', function () {
+                pendingDemoForm = form;
+                demoConfirmStep.classList.remove('hide');
+                demoBuildingStep.classList.add('hide');
+                demoModal.showModal();
+            });
+        });
+
+        demoProceedButton.addEventListener('click', function () {
+            if (!pendingDemoForm) {
+                return;
+            }
+            demoConfirmStep.classList.add('hide');
+            demoBuildingStep.classList.remove('hide');
+            pendingDemoForm.requestSubmit();
+        });
+
+        if (demoCloseButton) {
+            demoCloseButton.addEventListener('click', function () {
+                demoModal.close();
+            });
+        }
+
+        // Close when clicking the backdrop (outside the dialog bounds)
+        demoModal.addEventListener('click', function (event) {
+            var rect = demoModal.getBoundingClientRect();
+            if (event.clientX < rect.left || event.clientX > rect.right ||
+                event.clientY < rect.top || event.clientY > rect.bottom) {
+                demoModal.close();
+            }
+        });
+    }
+
+    // Coming back with the browser back button may restore the frozen page from
+    // the bfcache: close any stuck modal so the user can start another demo
+    window.addEventListener('pageshow', function (event) {
+        if (!event.persisted) {
+            return;
+        }
+        pendingDemoForm = null;
+        if (demoModal && demoModal.open) {
+            demoModal.close();
+        }
+    });
+
     window._lmReady = true;
 
 });

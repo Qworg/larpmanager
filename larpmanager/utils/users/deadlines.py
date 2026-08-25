@@ -25,6 +25,7 @@ from django.conf import settings as conf_settings
 from django.db.models import Count
 from django.utils import timezone
 
+from larpmanager.cache.basic import get_run_association_id
 from larpmanager.cache.config import get_association_config, get_event_config
 from larpmanager.cache.feature import get_association_features, get_event_features
 from larpmanager.models.accounting import AccountingItemMembership
@@ -32,6 +33,8 @@ from larpmanager.models.casting import Casting
 from larpmanager.models.event import Run
 from larpmanager.models.member import Member, Membership, MembershipStatus
 from larpmanager.models.registration import Registration, TicketTier
+from larpmanager.models.writing import Character, CharacterStatus
+from larpmanager.utils.core.common import get_event_class_parent
 
 
 def get_users_data(member_ids: Any) -> Any:
@@ -88,10 +91,10 @@ def check_run_deadlines(runs: list[Run]) -> list:
         registrations_by_run[registration.run_id].append(registration)
 
     # Get tolerance setting
-    tolerance = int(get_association_config(runs[0].event.association_id, "deadlines_tolerance"))
+    association_id = get_run_association_id(runs[0].id)
+    tolerance = int(get_association_config(association_id, "deadlines_tolerance"))
 
     # Check membership feature
-    association_id = runs[0].event.association_id
     now = timezone.now()
     uses_membership = "membership" in get_association_features(association_id)
 
@@ -124,6 +127,8 @@ def check_run_deadlines(runs: list[Run]) -> list:
                 "fee_del",
                 "profile",
                 "profile_del",
+                "char",
+                "char_confirm",
             ]
         }
         features = get_event_features(run.event_id)
@@ -154,6 +159,10 @@ def check_run_deadlines(runs: list[Run]) -> list:
 
         # Check casting deadlines
         deadlines_casting(deadline_violations, features, player_ids, run)
+
+        # Check character creation deadlines
+        deadlines_character(deadline_violations, features, player_ids, run)
+
         result = {category: get_users_data(violations) for category, violations in deadline_violations.items()}
         result["run"] = run
         all_results.append(result)
@@ -313,3 +322,47 @@ def deadlines_casting(collect: Any, features: Any, player_ids: Any, run: Any) ->
     members_with_preferences = Casting.objects.filter(run=run).values_list("member_id", flat=True)
 
     collect["cast"] = set(player_ids) - (set(members_with_characters) | set(members_with_preferences))
+
+
+def deadlines_character(collect: Any, features: Any, player_ids: Any, run: Any) -> None:
+    """Check self-service character creation/confirmation for players.
+
+    Args:
+        collect (dict): Dictionary to collect deadline violations
+        features (dict): Event features
+        player_ids (list): List of player member IDs
+        run: Run instance
+
+    Side effects:
+        Updates collect with "char" (no character created yet)
+        and "char_confirm" (confirmed but not yet approved) violations
+
+    """
+    if "user_character" not in features:
+        return
+
+    required_characters = int(get_event_config(run.event_id, "user_character_max"))
+    requires_approval = get_event_config(run.event_id, "user_character_approval")
+
+    # characters are an inheritable element: in a campaign they live on the parent event
+    characters_event_id = get_event_class_parent(run.event_id, Character)
+    characters = Character.objects.filter(event_id=characters_event_id, player_id__in=player_ids, deleted__isnull=True)
+
+    total_counts: dict[int, int] = {}
+    unconfirmed_counts: dict[int, int] = {}
+    for player_id, status in characters.values_list("player_id", "status"):
+        total_counts[player_id] = total_counts.get(player_id, 0) + 1
+        if status in [CharacterStatus.CREATION, CharacterStatus.REVIEW]:
+            unconfirmed_counts[player_id] = unconfirmed_counts.get(player_id, 0) + 1
+
+    missing = set()
+    uncorfimed = set()
+    for player_id in player_ids:
+        if total_counts.get(player_id, 0) < required_characters:
+            missing.add(player_id)
+        elif requires_approval and unconfirmed_counts.get(player_id, 0) > 0:
+            uncorfimed.add(player_id)
+
+    collect["char"] = missing
+    if requires_approval:
+        collect["char_confirm"] = uncorfimed

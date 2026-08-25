@@ -74,6 +74,9 @@ msgstr "Krop"
 msgid "Book"
 msgstr "Bog"
 
+msgid "Bulk"
+msgstr "Masse"
+
 msgid "Card"
 msgstr "Kort"
 
@@ -246,7 +249,7 @@ msgid "View"
 msgstr "Se"
 
 msgid "Vote"
-msgstr "Stem"
+msgstr "Stemme"
 
 msgid "What"
 msgstr "Hvad"
@@ -609,6 +612,9 @@ msgstr "Log ind"
 
 msgid "Manage"
 msgstr "Administrer"
+
+msgid "Manual"
+msgstr "Manuel"
 
 msgid "Master"
 msgstr "Master"
@@ -986,6 +992,9 @@ msgstr "Log ind"
 msgid "Signups"
 msgstr "Tilmeldinger"
 
+msgid "Skipped"
+msgstr "Sprunget over"
+
 msgid "Station"
 msgstr "Station"
 
@@ -1123,9 +1132,6 @@ msgstr "Frist"
 
 msgid "Deployed"
 msgstr "Udlagt"
-
-msgid "Disabled"
-msgstr "Deaktiveret"
 
 msgid "Discount"
 msgstr "Rabat"
@@ -1421,6 +1427,9 @@ msgstr "Annulleret"
 msgid "Character"
 msgstr "Karakter"
 
+msgid "Complaint"
+msgstr "Klage"
+
 msgid "Completed"
 msgstr "Fuldført"
 
@@ -1570,6 +1579,9 @@ msgstr "Spørgsmål"
 
 msgid "Read mail"
 msgstr "Læs e-mail"
+
+msgid "Read only"
+msgstr "Skrivebeskyttet"
 
 msgid "Recipient"
 msgstr "Modtager"
@@ -1931,6 +1943,9 @@ msgstr "Startdato"
 msgid "Statistics"
 msgstr "Statistik"
 
+msgid "Suppressed"
+msgstr "Undertrykt"
+
 msgid "Surcharges"
 msgstr "Tillæg"
 
@@ -2105,6 +2120,9 @@ msgstr "Inventarer"
 msgid "Last change"
 msgstr "Seneste ændring"
 
+msgid "Last played"
+msgstr "Senest spillet"
+
 msgid "Leave guild"
 msgstr "Forlad guild"
 
@@ -2170,6 +2188,9 @@ msgstr "Quest-typer"
 
 msgid "Quick Setup"
 msgstr "Hurtig opsætning"
+
+msgid "Raw Payload"
+msgstr "Rå nyttelast"
 
 msgid "Redeem link"
 msgstr "Indløsningslink"
@@ -2272,6 +2293,9 @@ msgstr "Tilgængelighed"
 
 msgid "Bank address"
 msgstr "Bankadresse"
+
+msgid "Bounce Count"
+msgstr "Antal afvisninger"
 
 msgid "Cache reset!"
 msgstr "Cache nulstillet!"
@@ -2470,6 +2494,9 @@ msgstr "Oversættelser"
 
 msgid "Type of text"
 msgstr "Teksttype"
+
+msgid "Unsubscribed"
+msgstr "Afmeldt"
 
 msgid "VAT (Ticket)"
 msgstr "Moms (billet)"
@@ -2978,7 +3005,7 @@ msgid "Request signed"
 msgstr "Anmodning underskrevet"
 
 msgid "Request signup"
-msgstr "Anmod om tilmelding"
+msgstr "Anmodning om tilmelding"
 
 msgid "Requests open:"
 msgstr "Åbne anmodninger:"
@@ -3161,6 +3188,9 @@ msgstr "Samlet saldo:"
 msgid "Highlight color"
 msgstr "Fremhævningsfarve"
 
+msgid "Invalid address"
+msgstr "Ugyldig adresse"
+
 msgid "Invalid request"
 msgstr "Ugyldig anmodning"
 
@@ -3306,10 +3336,10 @@ msgid "View accounting"
 msgstr "Se regnskab"
 
 msgid "WILL BE DELETED"
-msgstr "SLETTES"
+msgstr "VIL BLIVE SLETTET"
 
 msgid "WILL BE UPDATED"
-msgstr "OPDATERES"
+msgstr "VIL BLIVE OPDATERET"
 
 msgid "Warehouse items"
 msgstr "Lagerartikler"
@@ -3413,6 +3443,9 @@ msgstr "Eksternt website"
 msgid "Field visibility"
 msgstr "Feltsynlighed"
 
+msgid "Forbidden domain"
+msgstr "Forbudt domæne"
+
 msgid "Handout template"
 msgstr "Handout-skabelon"
 
@@ -3481,6 +3514,9 @@ msgstr "Afventende invitationer:"
 
 msgid "Pending payments"
 msgstr "Ventende betalinger"
+
+msgid "Permanent bounce"
+msgstr "Permanent afvisning"
 
 msgid "Player selection"
 msgstr "Spillervalg"
@@ -3556,6 +3592,9 @@ msgstr "Transaktionsgebyrer"
 
 msgid "Transfer preview"
 msgstr "Forhåndsvisning af overførsler"
+
+msgid "Transient bounce"
+msgstr "Midlertidig afvisning"
 
 msgid "Workshop Modules"
 msgstr "Workshopmoduler"
@@ -3633,8 +3672,14 @@ msgstr "Indsamling lukket"
 msgid "Collection total:"
 msgstr "Indsamling i alt:"
 
+msgid "Confirm character"
+msgstr "Bekræft karakter"
+
 msgid "Conversion ticket"
 msgstr "Konverteringsbillet"
+
+msgid "Create a new demo"
+msgstr "Opret en ny demo"
 
 msgid "Credit assignment"
 msgstr "Tildeling af credits"
@@ -3758,6 +3803,9 @@ msgstr "Modtagne betalinger"
 
 msgid "Payments received"
 msgstr "Modtagne betalinger"
+
+msgid "Played characters"
+msgstr "Spillede karakterer"
 
 msgid "Pre registrations"
 msgstr "Forhåndstilmeldinger"
@@ -3883,6 +3931,9 @@ msgstr "Godkendt karakter"
 
 msgid "Available versions"
 msgstr "Tilgængelige versioner"
+
+msgid "Changed character!"
+msgstr "Karakter skiftet!"
 
 msgid "Character creation"
 msgstr "Oprettelse af karakter"
@@ -4485,6 +4536,9 @@ msgstr "Tildelt medarbejder"
 msgid "Category of the event"
 msgstr "Eventets kategori"
 
+msgid "Change your character"
+msgstr "Skift din karakter"
+
 msgid "Character Inventories"
 msgstr "Karakterinventarer"
 
@@ -4496,6 +4550,9 @@ msgstr "Introduktion til karakterskema"
 
 msgid "Characters unassigned"
 msgstr "Ikke-tildelte karakterer"
+
+msgid "Choose your character"
+msgstr "Vælg din karakter"
 
 msgid "Code 'Bring a friend'"
 msgstr "Kode 'Tag en ven med'"
@@ -4682,8 +4739,14 @@ msgstr "Ankommet sikkert frem"
 msgid "Browse upcoming events"
 msgstr "Gennemse kommende events"
 
+msgid "Change your character!"
+msgstr "Skift din karakter!"
+
 msgid "Character Relationship"
 msgstr "Karakterrelation"
+
+msgid "Choose your character!"
+msgstr "Vælg din karakter!"
 
 msgid "Copy link to clipboard"
 msgstr "Kopiér link til udklipsholder"
@@ -4696,6 +4759,9 @@ msgstr "Valutaer og materialer"
 
 msgid "Customised mail server"
 msgstr "Tilpasset mailserver"
+
+msgid "Disable free abilities"
+msgstr "Deaktivér gratis evner"
 
 msgid "Event deletion request"
 msgstr "Anmodning om sletning af event"
@@ -4791,9 +4857,6 @@ msgstr "Refusion godkendt"
 msgid "Role approval %(role)s"
 msgstr "Rollegodkendelse %(role)s"
 
-msgid "Select your character!"
-msgstr "Vælg din karakter!"
-
 msgid "Set up payment methods"
 msgstr "Opsæt betalingsmetoder"
 
@@ -4854,6 +4917,9 @@ msgstr "Muligheder i karakterarket"
 #, python-format
 msgid "Conditions of %(event)s"
 msgstr "Betingelser for %(event)s"
+
+msgid "Confirm your character!"
+msgstr "Bekræft din karakter!"
 
 msgid "Create a new collection"
 msgstr "Opret en ny indsamling"
@@ -4949,6 +5015,9 @@ msgstr "Vælg dine præferencer"
 msgid "Show available factions"
 msgstr "Vis tilgængelige faktioner"
 
+msgid "The ability type's name"
+msgstr "Evnetypens navn"
+
 msgid "The genre of your event"
 msgstr "Genren for dit event"
 
@@ -4982,6 +5051,12 @@ msgstr "Karakterkonfigurationer"
 msgid "Code of the box or shelf"
 msgstr "Koden på kassen eller hylden"
 
+msgid "Collapse options minimum"
+msgstr "Skjul valgmuligheder under minimum"
+
+msgid "Create another character"
+msgstr "Opret en anden karakter"
+
 msgid "Create your organization"
 msgstr "Opret din organisation"
 
@@ -4996,6 +5071,9 @@ msgstr "Rediger tilmeldingsstatus"
 
 msgid "Invalid ticket selection"
 msgstr "Ugyldigt billetvalg"
+
+msgid "Is your character ready?"
+msgstr "Er din karakter klar?"
 
 msgid "Lightweight sheet (Test)"
 msgstr "Letvægtsark (test)"
@@ -5124,6 +5202,9 @@ msgstr "Tilføj en mere efter gemning"
 msgid "Character Inventory Types"
 msgstr "Typer af karakterinventar"
 
+msgid "Character not yet created"
+msgstr "Karakteren er endnu ikke oprettet"
+
 msgid "Character sheet questions"
 msgstr "Spørgsmål i karakterarket"
 
@@ -5132,6 +5213,9 @@ msgstr "Kontrollér dobbelte Speed larps:"
 
 msgid "Check missing speed larp:"
 msgstr "Kontrollér manglende Speed larp:"
+
+msgid "Create another character!"
+msgstr "Opret en anden karakter!"
 
 msgid "Current platform version:"
 msgstr "Aktuel platformsversion:"
@@ -5178,6 +5262,9 @@ msgstr "Medlem forfremmet til admin!"
 #, python-format
 msgid "New message from %(user)s"
 msgstr "Ny besked fra %(user)s"
+
+msgid "No address was suppressed"
+msgstr "Ingen adresse blev undertrykt"
 
 msgid "Option saved successfully"
 msgstr "Mulighed gemt"
@@ -5366,6 +5453,9 @@ msgstr "Få adgang til dit karakterark"
 msgid "Activate new event features"
 msgstr "Aktivér nye eventfunktioner"
 
+msgid "Character not yet confirmed"
+msgstr "Karakteren er endnu ikke bekræftet"
+
 msgid "Check inverse relationship:"
 msgstr "Kontrollér omvendt relation:"
 
@@ -5427,8 +5517,14 @@ msgstr "Kontingenter til godkendelse"
 msgid "Missing casting preferences"
 msgstr "Manglende Casting-præferencer"
 
+msgid "No address was unsubscribed"
+msgstr "Ingen adresse blev afmeldt"
+
 msgid "No inventory transfers yet."
 msgstr "Der er endnu ikke foretaget nogen inventaroverførsler."
+
+msgid "Opted out of communications"
+msgstr "Fravalgt kommunikation"
 
 msgid "Pre-registration confirmed!"
 msgstr "Forhåndsregistrering bekræftet!"
@@ -5907,6 +6003,9 @@ msgstr "Se dine private samtaler"
 msgid "Where the event will take place"
 msgstr "Hvor eventet finder sted"
 
+msgid "You already play this character"
+msgstr "Du spiller allerede denne karakter"
+
 msgid "You have completed the payment!"
 msgstr "Du har gennemført betalingen!"
 
@@ -6067,6 +6166,9 @@ msgstr "(Valgfrit) Billettens navn"
 
 msgid "Access the organization dashboard"
 msgstr "Gå til organisationens kontrolpanel"
+
+msgid "Character creation reminder email"
+msgstr "Påmindelsesmail om oprettelse af karakter"
 
 msgid "Days available cannot be negative"
 msgstr "Antallet af tilgængelige dage kan ikke være negativt"
@@ -6661,9 +6763,6 @@ msgstr "Transport: brændstof og motorvejsafgifter"
 msgid "Visit the tutorial to learn the basics"
 msgstr "Besøg vejledningen for at lære det grundlæggende"
 
-msgid "You already have an assigned character"
-msgstr "Du har allerede fået tildelt en karakter"
-
 msgid "You are exploring a demo organization."
 msgstr "Du udforsker en demoorganisation."
 
@@ -6790,6 +6889,9 @@ msgstr "CSS-koden til at tilpasse PDF-udskrift."
 msgid "The following registrations were drawn:"
 msgstr "Følgende tilmeldinger blev trukket:"
 
+msgid "The form is auto-saved every 5 seconds."
+msgstr "Formularen gemmes automatisk hvert 5. sekund."
+
 msgid "The question status, allowed values are"
 msgstr "Spørgsmålsstatussen, tilladte værdier er"
 
@@ -6884,6 +6986,9 @@ msgstr "Indsamlingen blev leveret til brugeren"
 msgid "The number of payments to split the fee."
 msgstr "Antallet af betalinger, som gebyret skal opdeles i."
 
+msgid "This character belongs to another player"
+msgstr "Denne karakter tilhører en anden spiller"
+
 msgid "This content is currently not available."
 msgstr "Dette indhold er ikke tilgængeligt lige nu."
 
@@ -6940,6 +7045,10 @@ msgstr "Browserens brugeragentstreng fra adgangen"
 msgid "Cannot demote the last admin of the guild"
 msgstr "Kan ikke degradere guildens sidste admin"
 
+#, python-format
+msgid "Character creation reminder for %(event)s"
+msgstr "Påmindelse om oprettelse af karakter til %(event)s"
+
 msgid "Choice locked, click to make it available"
 msgstr "Valg låst, klik for at gøre det tilgængeligt"
 
@@ -6994,6 +7103,9 @@ msgstr "Påmindelse om udfyldelse af profil til %(event)s"
 
 msgid "Seconds to wait between each email batch."
 msgstr "Sekunder, der skal gå mellem hver e-mailbatch."
+
+msgid "Secret guild: visible only to its members"
+msgstr "Hemmelig gilde: kun synligt for dets medlemmer"
 
 msgid "Send a bulk email to event's participants"
 msgstr "Send en masse-e-mail til eventets deltagere"
@@ -7197,6 +7309,9 @@ msgstr "Anmodning om tilmelding modtaget til %(event)s"
 msgid "Select a badge above to manage its members."
 msgstr "Vælg et Badge ovenfor for at administrere dets medlemmer."
 
+msgid "Skip the demo, create your own organization"
+msgstr "Spring demoen over, og opret din egen organisation"
+
 msgid "Tax identification code of the association."
 msgstr "Foreningens skatteidentifikationsnummer."
 
@@ -7359,6 +7474,9 @@ msgstr "Du skal tilmelde dig for at vælge dine præferencer!"
 msgid "You will no longer receive messages from us."
 msgstr "Du vil ikke længere modtage beskeder fra os."
 
+msgid "Address blocked after a bounce or a complaint"
+msgstr "Adresse blokeret efter en afvisning eller en klage"
+
 msgid "Amount must be non-zero for division criteria"
 msgstr "Beløbet må ikke være nul for divisionskriterier"
 
@@ -7367,6 +7485,9 @@ msgstr "Anvend opgraderingen på hele organisationen?"
 
 msgid "Are you sure you want to delete this element?"
 msgstr "Er du sikker på, at du vil slette dette element?"
+
+msgid "Are you sure you want to play this character?"
+msgstr "Er du sikker på, at du vil spille denne karakter?"
 
 msgid "Customize buttons in the event navigation bar"
 msgstr "Tilpas knapper i arrangementets navigationsbjælke"
@@ -7416,6 +7537,10 @@ msgstr "Søg og filtrér eventets karakterer"
 
 msgid "Select the event you wish to pre-register for"
 msgstr "Vælg det event, du vil forhåndstilmelde dig til"
+
+#, python-format
+msgid "The option '%(option)s' requires: %(missing)s"
+msgstr "Indstillingen '%(option)s' kræver: %(missing)s"
 
 msgid "View the list of characters and participants!"
 msgstr "Se listen over karakterer og deltagere!"
@@ -7601,6 +7726,9 @@ msgstr "Navnet på det spørgsmål, denne mulighed hører til"
 msgid "The organization is running the latest version."
 msgstr "Organisationen kører den nyeste version."
 
+msgid "This character cannot be proposed at the moment"
+msgstr "Denne karakter kan ikke sendes til staben lige nu"
+
 msgid "User already has a registration for this event!"
 msgstr "Brugeren har allerede en tilmelding til dette event!"
 
@@ -7673,9 +7801,6 @@ msgstr "Tilmeldingen til dette event er endnu ikke åben"
 msgid "Selected elements will be shown to participants."
 msgstr "Valgte elementer vises for deltagerne."
 
-msgid "Skip the demo, start your adventure from scratch"
-msgstr "Spring demoen over, og start dit eventyr fra bunden"
-
 msgid "The sessions for which the discount is available"
 msgstr "De sessioner, som rabatten er tilgængelig for"
 
@@ -7724,6 +7849,9 @@ msgstr "Baggrundsbillede, der vises på alle eventsider"
 
 msgid "Character not found, or not playing in this event"
 msgstr "Karakter ikke fundet eller spiller ikke i dette event"
+
+msgid "Choose the character you will play in this event!"
+msgstr "Vælg den karakter, du vil spille til dette event!"
 
 msgid "Color used for text backgrounds and content boxes"
 msgstr "Farve, der bruges til tekstbaggrunde og indholdsbokse"
@@ -7782,6 +7910,9 @@ msgstr "Denne side lader dig tilføje eller redigere en inventartype."
 
 msgid "Tolerance exceeded, proceed with the cancellation"
 msgstr "Tolerancen er overskredet, fortsæt med annulleringen"
+
+msgid "You already play the maximum number of characters"
+msgstr "Du spiller allerede det maksimale antal karakterer"
 
 msgid "You are including (at least one of these filters)"
 msgstr "Du inkluderer (mindst ét af disse filtre)"
@@ -8205,6 +8336,9 @@ msgstr "Vælg tabelrækkerne, og vælg den handling, der skal anvendes"
 
 msgid "Switch to the latest interface version for your account"
 msgstr "Skift til den nyeste brugerfladeversion for din konto"
+
+msgid "This character is already played by another participant"
+msgstr "Denne karakter spilles allerede af en anden deltager"
 
 msgid "This page summarizes the types of character inventories"
 msgstr "Denne side opsummerer typerne af karakterinventarer"
@@ -8944,6 +9078,9 @@ msgstr "For at kunne betale skal din medlemsansøgning godkendes."
 msgid "To confirm your spot, please pay %(amount)s as soon as possible."
 msgstr "For at bekræfte din plads skal du betale %(amount)s hurtigst muligt."
 
+msgid "Too many demos created, please wait a little before trying again"
+msgstr "For mange demoer oprettet, vent venligst lidt, før du prøver igen"
+
 msgid "Video or audio file to be streamed (recommended: MP4, WebM, MP3)"
 msgstr "Video- eller lydfil, der skal streames (anbefalet: MP4, WebM, MP3)"
 
@@ -8958,6 +9095,11 @@ msgstr "Du kan også uploade en anden fil med registreringsmulighederne:"
 
 msgid "(Optional) Whether the ability is visible to users: true or false"
 msgstr "(Valgfrit) Om evnen er synlig for brugere: true eller false"
+
+#, python-format
+msgid "Confirm your character %(name)s is ready to propose to the staff!"
+msgstr ""
+"Bekræft, at din karakter %(name)s er klar til at blive sendt til staben!"
 
 msgid "Content of mail reminding participants to pay the membership fee."
 msgstr ""
@@ -9303,6 +9445,9 @@ msgid "If you need to attach a file, indicate it here, otherwise leave blank"
 msgstr ""
 "Hvis du skal vedhæfte en fil, så angiv den her, ellers lad feltet stå tomt"
 
+msgid "Number of characters each participant plays in the event (default=1)."
+msgstr "Antal karakterer, hver deltager spiller til eventet (standard=1)."
+
 msgid "Optional - Maximum number of times it can be selected (0 = unlimited)"
 msgstr "Valgfrit - Maksimalt antal gange det kan vælges (0 = ubegrænset)"
 
@@ -9328,6 +9473,10 @@ msgid "To upload relationships, add a second file with the following columns"
 msgstr ""
 "For at uploade relationer skal du tilføje en anden fil med følgende kolonner"
 
+#, python-format
+msgid "You can review and submit again your data <a href='%(url)s'>here</a>."
+msgstr "Du kan gennemgå og indsende dine data igen <a href='%(url)s'>her</a>."
+
 msgid "You have reached the maximum number of characters that can be created"
 msgstr "Du har nået det maksimale antal karakterer, der kan oprettes"
 
@@ -9340,6 +9489,9 @@ msgid "Assign warehouse items to one or more areas of the event, item by item"
 msgstr ""
 "Tildel lagergenstande til et eller flere områder i eventet, én genstand ad "
 "gangen"
+
+msgid "Assigned automatically when the participant cannot answer the question"
+msgstr "Tildeles automatisk, når deltageren ikke kan besvare spørgsmålet"
 
 msgid "Discount amount applied to a new user signing up with a referral code."
 msgstr ""
@@ -9440,6 +9592,11 @@ msgid ""
 msgstr ""
 "Giver deltagerne mulighed for at skrive deres egen liste over "
 "karakterrelationer"
+
+msgid ""
+"Enter other options that must be selected for this question to be shown"
+msgstr ""
+"Indtast andre valgmuligheder, der skal vælges, for at dette spørgsmål vises"
 
 msgid ""
 "Enter the number or code of the identification document indicated above"
@@ -10236,6 +10393,13 @@ msgstr ""
 "tilføje en beholder."
 
 msgid ""
+"Preparing your demo, this takes a few seconds. Please do not close this "
+"page!"
+msgstr ""
+"Din demo forberedes, det tager et par sekunder. Luk venligst ikke denne "
+"side!"
+
+msgid ""
 "Presentation visible to all participants, when 'show presentation' is "
 "checked"
 msgstr ""
@@ -10835,6 +10999,12 @@ msgstr ""
 "sendes der ingen e-mails)."
 
 msgid ""
+"These addresses opted out of bulk communications, and were not added to the "
+"queue:"
+msgstr ""
+"Disse adresser har fravalgt massekommunikation og blev ikke føjet til køen:"
+
+msgid ""
 "This unsubscribe link is no longer valid. Please use the link from a recent "
 "email."
 msgstr ""
@@ -11137,6 +11307,13 @@ msgid ""
 msgstr ""
 "Jeg bekræfter, at jeg har uploadet et gyldigt dokument udstedt af staten i "
 "mit nationalitetsland"
+
+msgid ""
+"If enabled, characters no longer automatically acquire abilities with a cost"
+" of zero."
+msgstr ""
+"Hvis aktiveret, får karakterer ikke længere automatisk evner med en pris på "
+"nul."
 
 msgid ""
 "If you don't find a user, save the role and then invite them by clicking "
@@ -11588,6 +11765,13 @@ msgstr ""
 "'traits'"
 
 msgid ""
+"Note that existing rules with the same number, will be overwritten with the "
+"uploaded data."
+msgstr ""
+"Bemærk, at eksisterende regler med samme nummer vil blive overskrevet med de"
+" uploadede data."
+
+msgid ""
 "Note that existing tickets with the same name, will be overwritten with the "
 "uploaded data."
 msgstr ""
@@ -11744,11 +11928,25 @@ msgstr ""
 "deltagere"
 
 msgid ""
+"If checked, the guild is not shown in the guild list or the gallery: only "
+"its members see it"
+msgstr ""
+"Hvis markeret, vises lauget ikke i lauglisten eller galleriet: kun dets "
+"medlemmer kan se det"
+
+msgid ""
 "If enabled, allows tracking plots or relationships that are less important "
 "to the character."
 msgstr ""
 "Hvis aktiveret, kan du spore historier eller relationer, der er mindre "
 "vigtige for karakteren."
+
+msgid ""
+"If enabled, the character form of the players will not be saved "
+"automatically while editing."
+msgstr ""
+"Hvis aktiveret, bliver spillernes karakterformular ikke automatisk gemt "
+"under redigering."
 
 msgid ""
 "Multi-event story with player-created characters, experience points, and a "
@@ -11878,6 +12076,13 @@ msgstr ""
 "gennemført en fuld tilmelding"
 
 msgid ""
+"These addresses bounced or reported a complaint in the past, and were not "
+"added to the queue:"
+msgstr ""
+"Disse adresser er tidligere blevet afvist eller har indgivet en klage og "
+"blev ikke føjet til køen:"
+
+msgid ""
 "This page only shows questions from the last 3 months. To view previous "
 "questions click here:"
 msgstr ""
@@ -11959,6 +12164,13 @@ msgid ""
 msgstr ""
 "Administrer alle organisationens events, se deres status og antal "
 "tilmeldinger, og opret nye"
+
+msgid ""
+"Note that existing modifiers with the same number, will be overwritten with "
+"the uploaded data."
+msgstr ""
+"Bemærk, at eksisterende modifikatorer med samme nummer vil blive overskrevet"
+" med de uploadede data."
 
 msgid ""
 "Once your membership is approved, you can proceed with the payment for your "
@@ -12145,6 +12357,13 @@ msgid ""
 msgstr ""
 "Der er endnu ikke oprettet nogen rabatter. Tilføj en rabat for at tilbyde "
 "nedsatte priser eller kampagnekoder til deltagerne."
+
+msgid ""
+"Note that existing ability types with the same name, will be overwritten "
+"with the uploaded data."
+msgstr ""
+"Bemærk, at eksisterende evnetyper med samme navn vil blive overskrevet med "
+"de uploadede data."
 
 msgid ""
 "Optional: upload a photo of yourself associated with your character "
@@ -13027,6 +13246,13 @@ msgstr ""
 "href=\"%(website)s\">eventets hjemmeside</a>."
 
 msgid ""
+"A new demo organization will be created just for you, ready to explore as "
+"you want. This takes a few seconds."
+msgstr ""
+"En ny demoorganisation oprettes kun til dig, klar til at udforske, som du "
+"ønsker. Det tager et par sekunder."
+
+msgid ""
 "Access personal data fields for all registered participants and staff, along"
 " with their character assignments"
 msgstr ""
@@ -13578,6 +13804,14 @@ msgstr ""
 "Giver deltagerne mulighed for at tilpasse bestemte attributter (navn, "
 "pronomen, offentlig information osv.) for de karakterer, de er tildelt"
 
+#, python-format
+msgid ""
+"Hello! You registered for %(event)s but have not created your character yet."
+" <a href='%(url)s'>click here</a> to create it."
+msgstr ""
+"Hej! Du har tilmeldt dig %(event)s, men har endnu ikke oprettet din "
+"karakter. <a href='%(url)s'>klik her</a> for at oprette den."
+
 msgid ""
 "If checked, applying this tag to a relationship also applies it to the other"
 " character's relationship back towards this one"
@@ -13985,6 +14219,13 @@ msgstr ""
 "eksterne links"
 
 msgid ""
+"This character was modified in another window: your changes here have not "
+"been saved. Copy the text you want to keep, then reload the page."
+msgstr ""
+"Denne karakter blev ændret i et andet vindue: dine ændringer her er ikke "
+"blevet gemt. Kopiér den tekst, du vil beholde, og genindlæs derefter siden."
+
+msgid ""
 "If the first name shown on your documents is different from the one you "
 "prefer to use, then write it here; otherwise leave this field empty."
 msgstr ""
@@ -14199,6 +14440,14 @@ msgstr ""
 "deltagere."
 
 msgid ""
+"Click here to confirm that you have completed the character and are ready to"
+" propose it to the staff. Be careful: some fields may no longer be editable."
+msgstr ""
+"Klik her for at bekræfte, at du har færdiggjort karakteren og er klar til at"
+" sende den til staben. Vær opmærksom på, at nogle felter muligvis ikke "
+"længere kan redigeres."
+
+msgid ""
 "Important: after completing the transfer, you must return to this page and "
 "submit the form at the bottom, otherwise your payment will not be "
 "registered!"
@@ -14268,6 +14517,15 @@ msgid ""
 msgstr ""
 "Betalingen af dit kontingent for dette år er IKKE modtaget: den er nødvendig"
 " for at deltage i events og stemme på foreningens generalforsamlinger."
+
+msgid ""
+"Indicate the minimum number of options a form field must have to hide the "
+"unselected ones behind the 'Show other options' link; if empty, the default "
+"of 5 is used."
+msgstr ""
+"Angiv det mindste antal valgmuligheder, et formularfelt skal have for at "
+"skjule de ikke-valgte bag linket 'Vis andre valgmuligheder'; hvis feltet er "
+"tomt, bruges standardværdien 5."
 
 msgid ""
 "By proceeding with your registration for this event, you are giving us your "
@@ -14464,6 +14722,16 @@ msgstr ""
 "behandles med største omhu. Del dem kun, når det er strengt nødvendigt, og "
 "om muligt anonymt."
 
+#, python-format
+msgid ""
+"Hello! You registered for %(event)s and created your character, but it has "
+"not yet been confirmed for submission to the staff for approval. <a "
+"href='%(url)s'>click here</a> to check its status."
+msgstr ""
+"Hej! Du har tilmeldt dig %(event)s og oprettet din karakter, men den er "
+"endnu ikke bekræftet til indsendelse til staben for godkendelse. <a "
+"href='%(url)s'>klik her</a> for at tjekke dens status."
+
 msgid ""
 "On this page you can book tickets for the event; once paid, a special code "
 "will be generated. A friend of yours will be able to receive the "
@@ -14550,6 +14818,16 @@ msgstr ""
 "vurderingen."
 
 msgid ""
+"Indicate whether this option is assigned automatically, when the question "
+"cannot be answered by the participant and no option was chosen; if several "
+"options are marked, the first one whose prerequisites are satisfied is "
+"assigned"
+msgstr ""
+"Angiv, om denne mulighed tildeles automatisk, når spørgsmålet ikke kan "
+"besvares af deltageren, og ingen mulighed blev valgt; hvis flere muligheder "
+"er markeret, tildeles den første, hvis forudsætninger er opfyldt"
+
+msgid ""
 "This character represents the true secret identity of another character. You"
 " can give a preference to play it, as with other characters. If it is "
 "assigned to you, you will automatically be assigned the original character "
@@ -14569,17 +14847,6 @@ msgstr ""
 "Du har indsendt din ansøgning om medlemskab af organisationen. Anmodningen "
 "bliver behandlet på bestyrelsens næste møde. Når den er godkendt, kan du "
 "betale for de events, du har tilmeldt dig!"
-
-msgid ""
-"Click here to confirm that you have completed the character and are ready to"
-" propose it to the staff. Be careful: some fields may no longer be editable."
-" Leave the field blank to save your changes and to be able to continue them "
-"in the future."
-msgstr ""
-"Klik her for at bekræfte, at du har færdiggjort characteren og er klar til "
-"at foreslå den til staff. Vær opmærksom på, at nogle felter muligvis ikke "
-"længere kan redigeres. Lad feltet stå tomt for at gemme dine ændringer og "
-"kunne fortsætte med dem senere."
 
 msgid ""
 "In rich text editors, you can reference other characters directly using "

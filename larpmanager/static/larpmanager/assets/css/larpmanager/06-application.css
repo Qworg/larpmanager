@@ -174,14 +174,20 @@
 .relationships .el {
   text-align: right;
   align-self: center;
-  width: 8em !important;
-  margin: 0 2em;
+  width: 10em !important;
+  margin: 0 0 0 1em;
 }
 
 .relationships .icon {
-  width: 8em;
-  height: 8em;
+  width: 10em;
+  height: 10em;
   padding: 0em;
+}
+
+.relationships .el .info {
+  width: 10em;
+  text-align: left;
+  white-space: normal;
 }
 
 .list .el {
@@ -201,10 +207,14 @@
 .gallery .text {
   width: 100%;
   text-align: left;
-  padding: 0 1em;
+  padding: 0;
 }
 
 /* Character sheet: text column on the left, sticky profile picture on the right */
+
+.sheet {
+  text-align: center;
+}
 
 .gallery.sheet-cols {
   display: flex;
@@ -217,12 +227,17 @@
   flex: 0 0 15em;
   position: sticky;
   top: 1em;
+  margin: 0 0 0 1em;
 }
 
 .gallery.sheet-cols .text {
   order: 1;
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.page_character_view h2 {
+  margin-left: 1em;
 }
 
 /*** plot ***/
@@ -253,8 +268,17 @@ form .plot {
 }
 
 .plot p {
-  margin: 0.5em 0;
+  margin: 0 0 1em 0;
   line-height: 1.3;
+}
+
+.plot p:last-child {
+  margin-bottom: 0;
+}
+
+.rel_teaser {
+  max-height: 12em;
+  margin-bottom: 1em;
 }
 
 .diff-version {
@@ -397,7 +421,6 @@ form .plot {
     margin: 0 !important;
     padding: 0 !important;
     width: 100%;
-    padding-right: 1em;
   }
 
   .gallery .el {
@@ -965,4 +988,10 @@ form .plot {
 .ticket-close-btn,
 .ticket-reopen-btn {
   margin-top: 0.3em;
+}
+/*** character auto save ***/
+
+#form_submit.auto_saved {
+  background-color: rgba(var(--pri-rgb), 0.9);
+  color: white;
 }

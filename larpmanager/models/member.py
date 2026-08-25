@@ -140,28 +140,6 @@ class Member(MediaTokenMixin, UuidMixin, BaseModel):
         blank=True,
     )
 
-    legal_name = models.CharField(
-        max_length=100,
-        verbose_name=_("Legal name"),
-        blank=True,
-        null=True,
-        help_text=_(
-            "If the first name shown on your documents is different from the one you prefer to use, then write "
-            "it here; otherwise leave this field empty.",
-        )
-        + " "
-        + SENSITIVE_DISCLAIMER,
-    )
-
-    gender = models.CharField(
-        max_length=1,
-        choices=GenderChoices.choices,
-        default=None,
-        verbose_name=_("Legal Gender"),
-        null=True,
-        help_text=_("Enter your legal gender as it appears on official documents.") + " " + SENSITIVE_DISCLAIMER,
-    )
-
     pronoun = models.CharField(
         max_length=20,
         verbose_name=_("Pronouns"),
@@ -328,6 +306,28 @@ class Member(MediaTokenMixin, UuidMixin, BaseModel):
         blank=True,
     )
 
+    legal_name = models.CharField(
+        max_length=100,
+        verbose_name=_("Legal name"),
+        blank=True,
+        null=True,
+        help_text=_(
+            "If the first name shown on your documents is different from the one you prefer to use, then write "
+            "it here; otherwise leave this field empty.",
+        )
+        + " "
+        + SENSITIVE_DISCLAIMER,
+    )
+
+    gender = models.CharField(
+        max_length=1,
+        choices=GenderChoices.choices,
+        default=None,
+        verbose_name=_("Legal Gender"),
+        null=True,
+        help_text=_("Enter your legal gender as it appears on official documents.") + " " + SENSITIVE_DISCLAIMER,
+    )
+
     # If the member is delegated, this field will hold the parent member account
     parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True, blank=True, related_name="delegated")
 
@@ -417,9 +417,9 @@ class Member(MediaTokenMixin, UuidMixin, BaseModel):
         """Return the full file path for member request PDF."""
         return str(Path(self.get_member_filepath()) / "request.pdf")
 
-    def join(self, association: Association) -> None:
+    def join(self, association_id: int) -> None:
         """Join an association if not already a member."""
-        membership = get_user_membership(self, association.id)  # type: ignore[arg-type]
+        membership = get_user_membership(self, association_id)
         if membership.status == MembershipStatus.EMPTY:
             membership.status = MembershipStatus.JOINED
             membership.save()

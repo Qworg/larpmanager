@@ -24,7 +24,7 @@ from typing import Any
 
 from axes.signals import user_locked_out
 from django.contrib.auth.models import User
-from django.db.models.signals import m2m_changed, post_save, pre_save
+from django.db.models.signals import m2m_changed, post_delete, post_save, pre_save
 from django.dispatch import receiver
 from paypal.standard.ipn.signals import invalid_ipn_received, valid_ipn_received
 from safedelete.signals import post_softdelete, pre_softdelete
@@ -42,7 +42,6 @@ from larpmanager.accounting.payment import (
     process_refund_request_status_change,
 )
 from larpmanager.accounting.registration import (
-    handle_registration_accounting_updates,
     log_registration_ticket_saved,
     process_accounting_discount_post_save,
     process_registration_option_post_save,
@@ -54,12 +53,19 @@ from larpmanager.accounting.token_credit import (
     update_token_credit_on_payment_save,
 )
 from larpmanager.accounting.vat import calculate_payment_vat
-from larpmanager.cache.accounting import clear_registration_accounting_cache, refresh_member_accounting_cache
+from larpmanager.cache.accounting import refresh_member_accounting_cache
 from larpmanager.cache.association import clear_association_cache
 from larpmanager.cache.association_text import (
     update_association_text_cache_on_save,
 )
 from larpmanager.cache.association_translation import clear_association_translation_cache
+from larpmanager.cache.basic import (
+    get_event_association_id,
+    get_run_basic_cache,
+    reset_association_basic_cache,
+    reset_event_basic_cache,
+    reset_run_basic_cache,
+)
 from larpmanager.cache.bulk import on_bulk_model_changed, on_event_role_deleted, on_event_role_members_changed
 from larpmanager.cache.button import clear_event_button_cache
 from larpmanager.cache.character import (
@@ -74,7 +80,13 @@ from larpmanager.cache.character import (
     reset_character_registration_cache,
     update_member_event_character_cache,
 )
-from larpmanager.cache.config import reset_element_configs
+from larpmanager.cache.config import (
+    reset_association_configs,
+    reset_character_configs,
+    reset_event_configs,
+    reset_member_configs,
+    reset_run_configs,
+)
 from larpmanager.cache.event_text import update_event_text_cache_on_save
 from larpmanager.cache.experience import (
     clear_event_exp_systems_cache,
@@ -113,7 +125,6 @@ from larpmanager.cache.larpmanager import (
 )
 from larpmanager.cache.links import (
     clear_run_event_links_cache,
-    on_registration_post_save_reset_event_links,
     reset_event_links,
 )
 from larpmanager.cache.permission import (
@@ -150,11 +161,14 @@ from larpmanager.cache.rels import (
 )
 from larpmanager.cache.role import remove_association_role_cache, remove_event_role_cache
 from larpmanager.cache.run import (
+    get_event_run_ids,
     on_event_post_save_reset_config_cache,
     on_event_pre_save_invalidate_cache,
     on_run_post_save_reset_config_cache,
     on_run_pre_save_invalidate_cache,
     reset_cache_config_run,
+    reset_cache_config_run_ids,
+    reset_event_run_ids_cache,
     update_visible_factions,
 )
 from larpmanager.cache.skin import clear_skin_cache
@@ -192,6 +206,7 @@ from larpmanager.mail.registration import (
     send_registration_deletion_email,
     send_registration_request_rejected_email,
 )
+from larpmanager.mail.suppression import reset_suppression_cache
 from larpmanager.models.access import AssociationPermission, AssociationRole, EventPermission, EventRole
 from larpmanager.models.accounting import (
     AccountingItem,
@@ -269,6 +284,7 @@ from larpmanager.models.larpmanager import (
 from larpmanager.models.member import Badge, Member, MemberConfig, Membership
 from larpmanager.models.miscellanea import (
     ChatMessage,
+    EmailSuppression,
     HelpQuestion,
     Log,
     PlayerRelationship,
@@ -299,7 +315,7 @@ from larpmanager.models.writing import (
 )
 from larpmanager.utils.auth.permission import auto_assign_event_permission_number
 from larpmanager.utils.core.clone_guard import is_clone_active
-from larpmanager.utils.core.nav import invalidate_user_nav_entries
+from larpmanager.utils.core.guard import is_experience_recalc_deferred
 from larpmanager.utils.io.pdf import (
     cleanup_character_pdfs_on_save,
     cleanup_faction_pdfs_on_save,
@@ -343,7 +359,7 @@ from larpmanager.utils.services.miscellanea import auto_rotate_vertical_photos
 from larpmanager.utils.services.writing import replace_character_names_before_save
 from larpmanager.utils.users.member import create_member_profile_for_user, process_membership_status_updates
 from larpmanager.utils.users.registration import (
-    process_character_ticket_options,
+    apply_registration_post_save_updates,
     process_registration_event_change,
     reset_registration_ticket,
 )
@@ -400,11 +416,10 @@ def pre_save_callback(sender: type, instance: object, *args: Any, **kwargs: Any)
 @receiver(post_save)
 def post_save_callback(sender: type, instance: object, created: bool, **kwargs: Any) -> None:
     """Handle post-save operations for all models."""
+    debug_set_uuid(instance, created=created)
+
     # Update text fields cache after model instance is saved
     update_text_fields_cache(instance)
-
-    # Set simplified uuid for debug
-    debug_set_uuid(instance, created=created)
 
     # Update cache for accounting items
     reset_accountingitem_cache(instance)
@@ -418,8 +433,9 @@ def reset_accountingitem_cache(instance: Any) -> None:
     if not isinstance(instance, AccountingItem):
         return
 
-    if hasattr(instance, "run") and instance.run and instance.member_id:
-        refresh_member_accounting_cache(instance.run, instance.member_id)
+    run_id = getattr(instance, "run_id", None)
+    if run_id and instance.member_id:
+        refresh_member_accounting_cache(run_id, instance.member_id)
 
 
 @receiver(post_save, sender=AbilityExp)
@@ -458,8 +474,8 @@ def post_save_discount_accounting_cache(
     process_accounting_discount_post_save(instance)
 
     # Refresh member's accounting cache if discount is associated with a run and member
-    if instance.run and instance.member_id:
-        refresh_member_accounting_cache(instance.run, instance.member_id)
+    if instance.run_id and instance.member_id:
+        refresh_member_accounting_cache(instance.run_id, instance.member_id)
 
 
 @receiver(pre_save, sender=AccountingItemDonation)
@@ -538,9 +554,10 @@ def post_save_payment_accounting_cache(
     send_payment_confirmation_email(instance)
 
     # Update registration and member accounting cache if payment has associated registration
-    if instance.registration and instance.registration.run:
+    if instance.registration and instance.registration.run_id:
         instance.registration.save()
-        refresh_member_accounting_cache(instance.registration.run, instance.member_id)
+        run_id = instance.registration.run_id
+        refresh_member_accounting_cache(run_id, instance.member_id)
 
     # Update token credits based on payment changes
     update_token_credit_on_payment_save(instance, created=created)
@@ -567,7 +584,7 @@ def post_save_assignment_trait(
     Clears caches, sends notification emails, and manages PDF cleanup.
     """
     # Clear cached data and generated media for the run
-    clear_run_cache_and_media(instance.run)
+    clear_run_cache_and_media(instance.run_id)
 
     # Notify relevant users about trait assignment
     if created and instance.member:
@@ -577,8 +594,9 @@ def post_save_assignment_trait(
 
     # Recompute auto relationships for the character of this member
     if instance.member_id and instance.run_id:
+        run_cache = get_run_basic_cache(instance.run_id)
         char_id = (
-            Character.objects.filter(player_id=instance.member_id, event=instance.run.event, deleted__isnull=True)
+            Character.objects.filter(player_id=instance.member_id, event_id=run_cache["event_id"], deleted__isnull=True)
             .values_list("id", flat=True)
             .first()
         )
@@ -644,6 +662,7 @@ def post_save_association_reset_lm_home(sender: type, instance: object, **kwargs
 
     # Clear association-specific cache
     clear_association_cache(instance.slug)
+    reset_association_basic_cache(instance.id)
 
     # Reset features cache for this association
     on_association_post_save_reset_features_cache(instance)
@@ -659,13 +678,15 @@ def post_save_association_reset_lm_home(sender: type, instance: object, **kwargs
 @receiver(post_save, sender=AssociationConfig)
 def post_save_reset_association_config(sender: type, instance: object, **kwargs: Any) -> None:
     """Clear association config cache after save."""
-    reset_element_configs(instance.association)
+    reset_association_configs(instance.association_id)
 
 
 @receiver(post_save, sender=AssociationSkin)
 def post_save_association_skin_reset_cache(sender: type, instance: Association, **kwargs: Any) -> None:
     """Clear skin cache when association is saved."""
     clear_skin_cache(instance.domain)
+    for association_id in instance.association_set.values_list("id", flat=True):
+        reset_association_basic_cache(association_id)
 
 
 @receiver(post_save, sender=LarpManagerDemoType)
@@ -699,7 +720,7 @@ def pre_save_character_update_status(sender: type, instance: Character, **kwargs
 @receiver(post_save, sender=Character, dispatch_uid="post_character_update_px_v1")
 def post_character_update_exp(sender: type, instance: Character, *args: Any, **kwargs: Any) -> None:
     """Calculate experience points for character after update."""
-    if instance.deleted or is_clone_active():
+    if instance.deleted or is_clone_active() or is_experience_recalc_deferred():
         return
     calculate_character_experience_points(instance)
 
@@ -740,7 +761,7 @@ def post_save_character(sender: type, instance: Character, created: bool, **kwar
     )
 
     # Update visible factions
-    update_visible_factions(instance.event)
+    update_visible_factions(instance.event_id)
 
     # Create a personal inventory for newly created characters
     generate_base_inventories(instance)
@@ -757,14 +778,14 @@ def post_softdelete_character_reset_rels(sender: type, instance: Character, **kw
     """Clear event and relationship caches when a character is soft deleted."""
     if is_clone_active():
         return
-    clear_event_cache_all_runs(instance.event)
+    clear_event_cache_all_runs(instance.event_id)
     clear_event_relationships_cache(instance.event_id)
 
 
 @receiver(post_save, sender=CharacterConfig)
 def post_save_reset_character_config(sender: type, instance: Any, **kwargs: Any) -> None:
     """Reset character configuration cache after save."""
-    reset_element_configs(instance.character)
+    reset_character_configs(instance.character_id)
 
 
 @receiver(pre_save, sender=ChatMessage)
@@ -808,9 +829,14 @@ def post_save_delivery_exp(
 def create_pools_for_inventory(sender: type, instance: Inventory, created: bool, **kwargs: Any) -> None:
     """Create pool balances for newly created character inventories based on event pool types."""
     if created:
-        for pool_type in PoolType.objects.filter(event=instance.event):
+        for pool_type in PoolType.objects.filter(event_id=instance.event_id):
             PoolBalance.objects.create(
-                inventory=instance, event=instance.event, number=1, name=pool_type.name, pool_type=pool_type, amount=0
+                inventory=instance,
+                event_id=instance.event_id,
+                number=1,
+                name=pool_type.name,
+                pool_type=pool_type,
+                amount=0,
             )
 
 
@@ -844,15 +870,17 @@ def post_save_event_update(sender: type, instance: Event, **kwargs: Any) -> None
         return
 
     # Clear event-related caches to ensure fresh data
-    clear_event_cache_all_runs(instance)
+    reset_event_basic_cache(instance.id)
+    clear_event_cache_all_runs(instance.id)
     clear_event_features_cache(instance.id)
 
     # Clear run and registration related caches
-    clear_run_event_links_cache(instance)
+    clear_run_event_links_cache(instance.id)
 
-    # Clear registration counts for all associated runs
-    for run_id in instance.runs.values_list("id", flat=True):
+    # Clear registration counts and basic-info for all associated runs
+    for run_id in get_event_run_ids(instance.id):
         clear_registration_counts_cache(run_id)
+        reset_run_basic_cache(run_id)
 
     # Reset configuration cache and create default setup
     on_event_post_save_reset_config_cache(instance)
@@ -865,6 +893,22 @@ def post_save_event_update(sender: type, instance: Event, **kwargs: Any) -> None
         publish_event(instance.id)
 
 
+@receiver(post_save, sender=EmailSuppression)
+def post_save_email_suppression(sender: type, instance: EmailSuppression, **kwargs: Any) -> None:
+    """Drop the cached suppression flag when a row is edited, added or soft deleted.
+
+    A soft delete goes through save(), so this also covers the deletion done
+    from the admin; a hard delete is caught by the post_delete receiver.
+    """
+    reset_suppression_cache(instance.email)
+
+
+@receiver(post_delete, sender=EmailSuppression)
+def post_delete_email_suppression(sender: type, instance: EmailSuppression, **kwargs: Any) -> None:
+    """Drop the cached suppression flag when a row is deleted for good."""
+    reset_suppression_cache(instance.email)
+
+
 @receiver(post_save, sender=SystemExp)
 def post_save_system_exp(sender: type, instance: Any, **kwargs: Any) -> None:
     """Clear experience systems cache after save."""
@@ -875,22 +919,22 @@ def post_save_system_exp(sender: type, instance: Any, **kwargs: Any) -> None:
 def post_save_event_button(sender: type, instance: object, created: bool, **kwargs: Any) -> None:
     """Clear event button cache after save."""
     clear_event_button_cache(instance.event_id)
-    for run in instance.event.runs.all():
-        reset_cache_config_run(run)
+    reset_cache_config_run_ids(get_event_run_ids(instance.event_id))
 
 
 @receiver(post_save, sender=EventConfig)
 def post_save_reset_event_config(sender: type, instance: Any, **kwargs: Any) -> None:
     """Reset event configuration cache after model save, including child events of a campaign."""
-    reset_element_configs(instance.event)
-    for run in instance.event.runs.all():
-        reset_cache_config_run(run)
+    reset_event_configs(instance.event_id)
+    # some features are derived from configs, so the features cache must be rebuilt too
+    clear_event_features_cache(instance.event_id)
+    reset_cache_config_run_ids(get_event_run_ids(instance.event_id))
 
     # child events inherit the parent configs, so their caches must be reset too
     for child in Event.objects.filter(parent_id=instance.event_id):
-        reset_element_configs(child)
-        for run in child.runs.all():
-            reset_cache_config_run(run)
+        reset_event_configs(child.id)
+        clear_event_features_cache(child.id)
+        reset_cache_config_run_ids(get_event_run_ids(child.id))
 
     # If a publication config has been changed, trigger event publication
     if instance.name.startswith("pub_"):
@@ -921,8 +965,9 @@ def post_save_event_role_reset(sender: type, instance: EventRole, **kwargs: Any)
     remove_event_role_cache(instance.pk)
 
     # Reset event links cache for all members assigned to this role
+    association_id = get_event_association_id(instance.event_id)
     for member in instance.members.all():
-        reset_event_links(member.id, instance.event.association_id)
+        reset_event_links(member.id, association_id)
 
     # Schedule publication crew sync (soft deletes are handled by post_softdelete)
     if instance.deleted is None:
@@ -985,7 +1030,7 @@ def post_save_faction_reset_rels(sender: type, instance: Faction, **kwargs: Any)
     cleanup_faction_pdfs_on_save(instance)
 
     # Update visible factions config
-    update_visible_factions(instance.event)
+    update_visible_factions(instance.event_id)
 
 
 @receiver(post_softdelete, sender=Faction)
@@ -993,7 +1038,7 @@ def post_softdelete_faction_reset_rels(sender: type, instance: Faction, **kwargs
     """Clear event cache and drop a soft deleted faction from the relationship cache."""
     if is_clone_active():
         return
-    clear_event_cache_all_runs(instance.event)
+    clear_event_cache_all_runs(instance.event_id)
     remove_item_from_cache_section(instance.event_id, "factions", instance.id)
 
 
@@ -1120,7 +1165,7 @@ def post_save_member_reset(sender: type, instance: Member, **kwargs: dict) -> No
 @receiver(post_save, sender=MemberConfig)
 def post_save_reset_member_config(sender: type, instance: Any, **kwargs: Any) -> None:
     """Reset member configuration cache after save."""
-    reset_element_configs(instance.member)
+    reset_member_configs(instance.member_id)
 
 
 @receiver(pre_save, sender=Membership)
@@ -1256,7 +1301,7 @@ def post_softdelete_quest_reset_rels(sender: type, instance: Quest, **kwargs: An
     """Clear caches and drop a soft deleted quest from the event relationship cache."""
     if is_clone_active():
         return
-    clear_event_cache_all_runs(instance.event)
+    clear_event_cache_all_runs(instance.event_id)
     remove_item_from_cache_section(instance.event_id, "quests", instance.id)
 
 
@@ -1286,7 +1331,7 @@ def post_softdelete_questtype_reset_rels(sender: type, instance: QuestType, **kw
     """Clear caches and drop a soft deleted quest type from the event relationship cache."""
     if is_clone_active():
         return
-    clear_event_cache_all_runs(instance.event)
+    clear_event_cache_all_runs(instance.event_id)
     remove_item_from_cache_section(instance.event_id, "questtypes", instance.id)
 
 
@@ -1337,33 +1382,12 @@ def post_save_registration_cache(sender: type, instance: Registration, created: 
     if instance.pending:
         return
 
-    # Soft deleted registrations only need their caches dropped, not their data recomputed
+    # Assign character from previous campaign if applicable
     if not instance.deleted:
-        # Assign character from previous campaign if applicable
         assign_previous_campaign_character(instance)
 
-        # Process ticket options and character-related data
-        process_character_ticket_options(instance)
-
-        # Update accounting records and balances
-        handle_registration_accounting_updates(instance)
-
-    # Clear cached accounting data for this run
-    clear_registration_accounting_cache(instance.run_id)
-
-    # Reset event navigation links cache
-    on_registration_post_save_reset_event_links(instance)
-
-    # Invalidate user nav entries cache
-    if instance.member_id:
-        invalidate_user_nav_entries(instance.member_id)
-
-    # Update registration count caches for this run
-    clear_registration_counts_cache(instance.run_id)
-
-    # Sync published data on this registration (soft deletes are handled by post_softdelete, which knows the run)
-    if not instance.deleted:
-        publish_registration(instance.id)
+    # Process ticket options, accounting, and caches shared with other registration-save paths
+    apply_registration_post_save_updates(instance)
 
 
 @receiver(pre_softdelete, sender=Registration)
@@ -1528,6 +1552,10 @@ def post_save_run_links(sender: type, instance: Run, **kwargs: Any) -> None:
     if is_clone_active():
         return
 
+    # Invalidate cached run ids for the event (covers run creation/soft-deletion)
+    reset_event_run_ids_cache(instance.event_id)
+    reset_run_basic_cache(instance.id)
+
     # Clear registration-related caches for this run
     clear_registration_counts_cache(instance.id)
 
@@ -1538,12 +1566,12 @@ def post_save_run_links(sender: type, instance: Run, **kwargs: Any) -> None:
     update_run_plan_on_event_change(instance)
 
     # Clear run-specific cache and media files
-    clear_run_cache_and_media(instance)
+    clear_run_cache_and_media(instance.id)
 
-    clear_run_event_links_cache(instance.event)
+    clear_run_event_links_cache(instance.event_id)
 
     # Clear association cache to update onboarding status
-    clear_association_cache(instance.event.association.slug)
+    clear_association_cache(get_run_basic_cache(instance.id)["association_slug"])
 
     # Schedule publication for this run's event
     publish_event(instance.event_id)
@@ -1552,8 +1580,8 @@ def post_save_run_links(sender: type, instance: Run, **kwargs: Any) -> None:
 @receiver(post_save, sender=RunConfig)
 def post_save_reset_run_config(sender: type, instance: Any, **kwargs: Any) -> None:
     """Reset run config cache when related instance is saved."""
-    reset_element_configs(instance.run)
-    reset_cache_config_run(instance.run)
+    reset_run_configs(instance.run_id)
+    reset_cache_config_run(instance.run_id)
 
 
 @receiver(pre_save, sender=SpeedLarp)
@@ -1603,7 +1631,7 @@ def post_softdelete_trait_reset(sender: type, instance: Trait, **kwargs: Any) ->
     """Clear event cache when a trait is soft deleted."""
     if is_clone_active():
         return
-    clear_event_cache_all_runs(instance.event)
+    clear_event_cache_all_runs(instance.event_id)
 
 
 @receiver(post_save, sender=User)
@@ -1630,18 +1658,30 @@ def post_save_writing_answer_refs(sender: type, instance: WritingAnswer, **kwarg
 def post_save_writing_option_reset(sender: type, instance: Any, **kwargs: Any) -> None:
     """Clear caches when WritingOption is saved."""
     clear_event_fields_cache(instance.question.event_id)
-    clear_event_cache_all_runs(instance.question.event)
+    clear_event_cache_all_runs(instance.question.event_id)
     clear_writing_questions_cache(instance.event_id)
 
     # Refresh ability caches that show this option in their requirement_rels
     on_writing_option_saved(instance, instance.question.event_id)
 
 
+def on_requirements_m2m_changed(
+    sender: type,
+    instance: Any,
+    action: str,
+    **kwargs: Any,
+) -> None:
+    """Clear the requirements cache when the prerequisites of an option or question change."""
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+    clear_writing_questions_cache(instance.event_id)
+
+
 @receiver(post_save, sender=WritingQuestion)
 def post_save_writing_question_reset(sender: type, instance: Any, **kwargs: Any) -> None:
     """Clear cache for event fields and all runs when writing question changes."""
     clear_event_fields_cache(instance.event_id)
-    clear_event_cache_all_runs(instance.event)
+    clear_event_cache_all_runs(instance.event_id)
     clear_writing_questions_cache(instance.event_id)
     modifier_ids = list(
         ModifierExp.objects.filter(requirements__question=instance).values_list("id", flat=True).distinct()
@@ -1726,6 +1766,10 @@ m2m_changed.connect(on_criterion_requirements_m2m_changed, sender=CriterionExp.r
 m2m_changed.connect(on_criterion_factions_m2m_changed, sender=CriterionExp.factions.through)
 
 m2m_changed.connect(on_event_features_m2m_changed, sender=Event.features.through)
+
+# The requirements are written after the element is saved, so post_save alone would leave a stale cache
+m2m_changed.connect(on_requirements_m2m_changed, sender=WritingOption.requirements.through)
+m2m_changed.connect(on_requirements_m2m_changed, sender=WritingQuestion.requirements.through)
 
 
 # Bulk options cache invalidation: one receiver per model, one for EventRole m2m

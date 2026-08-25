@@ -19,6 +19,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later OR Proprietary
 from __future__ import annotations
 
+import json
 import random
 import re
 from datetime import date, timedelta
@@ -31,6 +32,7 @@ from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.core.exceptions import ObjectDoesNotExist
+from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
 from django.db.models import Avg, Count, Min, Sum
 from django.http import (
     Http404,
@@ -45,11 +47,16 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.translation import gettext_lazy as _, override
 from django.views.decorators.cache import cache_page
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+from django_ratelimit.core import is_ratelimited
 from django_ratelimit.decorators import ratelimit
 
 from larpmanager.cache.association_text import get_association_text
+from larpmanager.cache.basic import get_run_association_id
 from larpmanager.cache.config import save_single_config
 from larpmanager.cache.feature import get_association_features, get_event_features
 from larpmanager.cache.larpmanager import (
@@ -65,6 +72,8 @@ from larpmanager.forms.utils import RedirectForm
 from larpmanager.mail.base import join_email
 from larpmanager.mail.digest import send_daily_organizer_summaries
 from larpmanager.mail.remind import remember_membership, remember_membership_fee, remember_pay, remember_profile
+from larpmanager.mail.sns import handle_sns_payload, verify_sns_signature
+from larpmanager.mail.suppression import suppress_email
 from larpmanager.models.access import AssociationRole, EventRole
 from larpmanager.models.association import Association, AssociationPlan, AssociationTextType
 from larpmanager.models.base import Feature
@@ -83,6 +92,7 @@ from larpmanager.models.larpmanager import (
     NewsletterStatus,
 )
 from larpmanager.models.member import Member, Membership, MembershipStatus, get_user_membership
+from larpmanager.models.miscellanea import EmailSuppression, SuppressionReason
 from larpmanager.models.registration import Registration, TicketTier
 from larpmanager.models.utils import my_uuid_short
 from larpmanager.utils.auth.admin import check_lm_admin
@@ -90,11 +100,26 @@ from larpmanager.utils.auth.permission import has_association_permission, has_ev
 from larpmanager.utils.core.base import get_context, get_event_context
 from larpmanager.utils.core.exceptions import UserPermissionError
 from larpmanager.utils.larpmanager.chat import get_chat_answer
-from larpmanager.utils.larpmanager.tasks import delete_association_task, delete_run_task, my_send_mail, send_mail_exec
+from larpmanager.utils.larpmanager.tasks import (
+    delete_association_task,
+    delete_run_task,
+    my_send_mail,
+    release_suppressed_emails,
+    send_mail_exec,
+)
 from larpmanager.utils.services.association import _reset_all_association
 from larpmanager.utils.services.demo import clone_association, schedule_demo_cleanup
 from larpmanager.views.user.event import build_registration_list, get_member_registrations
 from larpmanager.views.user.member import get_user_backend
+
+# Refuse oversized SNS bodies before parsing them
+MAX_SNS_PAYLOAD_SIZE = 256 * 1024
+
+# Suppressed addresses shown per page in the admin listing
+SUPPRESSIONS_PER_PAGE = 100
+
+# Window in which re-submitting the same demo type reuses the demo already created
+DEMO_SESSION_REUSE_SECONDS = 300
 
 
 def lm_home(request: HttpRequest) -> Any:
@@ -582,8 +607,65 @@ def discord(request: HttpRequest) -> Any:
     return render(request, "larpmanager/landing/discord.html", context)
 
 
-@ratelimit(key="ip", rate="5/m", method="POST", block=False, group="demo_clone_burst")
-@ratelimit(key="ip", rate="10/d", method="POST", block=False, group="demo_clone")
+def _demo_rate_limited(request: HttpRequest) -> bool:
+    """Check (and increment) the per-IP demo creation quotas.
+
+    Counted only for requests that actually reach demo creation.
+    """
+    burst = is_ratelimited(request=request, group="demo_clone_burst", key="ip", rate="5/m", increment=True)
+    daily = is_ratelimited(request=request, group="demo_clone", key="ip", rate="10/d", increment=True)
+    return burst or daily
+
+
+def _recent_session_demo(request: HttpRequest) -> tuple[str, str] | None:
+    """Return (slug, path) of the demo this session just created, if still valid.
+
+    Used to make repeated submits of the same demo type idempotent: a double
+    click, or a back button re-post, lands on the demo already created instead
+    of building a second one.
+    """
+    recent = request.session.get("demo_recent")
+    if not recent or recent.get("uuid") != request.POST.get("demo_uuid"):
+        return None
+
+    created = parse_datetime(recent.get("created", "") or "")
+    if not created or (timezone.now() - created).total_seconds() > DEMO_SESSION_REUSE_SECONDS:
+        return None
+
+    if not Association.objects.filter(slug=recent["slug"]).exists():
+        return None
+
+    return recent["slug"], recent["path"]
+
+
+def _launch_demo(request: HttpRequest) -> Any:
+    """Handle a demo launch post: reuse the session demo, or build a new one.
+
+    Args:
+        request: Django HTTP request object carrying the demo type uuid.
+
+    Returns:
+        HttpResponse: Redirect to the demo dashboard, or back to the funnel
+            when the per-IP quota is exhausted.
+
+    """
+    user_agent = request.META.get("HTTP_USER_AGENT", "")
+    if is_suspicious_user_agent(user_agent):
+        return HttpResponseForbidden("Bots not allowed.")
+
+    # A demo just created in this session is reused, instead of building another one
+    recent_demo = _recent_session_demo(request)
+    if recent_demo:
+        return redirect("after_login", subdomain=recent_demo[0], path=recent_demo[1])
+
+    if _demo_rate_limited(request):
+        messages.error(request, _("Too many demos created, please wait a little before trying again"))
+        return redirect("get_started")
+
+    demo_type = get_object_or_404(LarpManagerDemoType, uuid=request.POST["demo_uuid"], active=True)
+    return _create_demo(request, demo_type)
+
+
 def get_started(request: HttpRequest) -> Any:
     """Show the entry funnel: start a pre-populated demo or create a real association.
 
@@ -604,14 +686,7 @@ def get_started(request: HttpRequest) -> Any:
 
     # Primary path: launch a demo instance of the chosen type
     if request.method == "POST" and request.POST.get("demo_uuid"):
-        if getattr(request, "limited", False):
-            messages.error(request, "whoah, whoah, slow down buddy")
-            return redirect("get_started")
-        user_agent = request.META.get("HTTP_USER_AGENT", "")
-        if is_suspicious_user_agent(user_agent):
-            return HttpResponseForbidden("Bots not allowed.")
-        demo_type = get_object_or_404(LarpManagerDemoType, uuid=request.POST["demo_uuid"], active=True)
-        return _create_demo(request, demo_type)
+        return _launch_demo(request)
 
     # Secondary path: create a real empty association (requires login)
     if request.user.is_authenticated:
@@ -895,7 +970,7 @@ def get_personal_area(context: dict) -> None:
     all_regs = get_member_registrations(member).order_by("-run__start")
     regs_by_assoc: dict = {}
     for reg in all_regs:
-        regs_by_assoc.setdefault(reg.run.event.association_id, []).append(reg)
+        regs_by_assoc.setdefault(get_run_association_id(reg.run_id, context=context), []).append(reg)
 
     registration_list = []
     for association_id, regs in regs_by_assoc.items():
@@ -988,6 +1063,72 @@ def lm_newsletter(request: HttpRequest) -> Any:
     return render(request, "larpmanager/larpmanager/newsletter.html", context)
 
 
+@csrf_exempt
+@require_POST
+def ses_notification(request: HttpRequest) -> HttpResponse:
+    """Handle an SNS notification carrying SES bounce and complaint events.
+
+    The payload signature is verified before any processing: unsigned or
+    forged notifications are discarded, since they would otherwise let anyone
+    poison the suppression list.
+    """
+    if len(request.body) > MAX_SNS_PAYLOAD_SIZE:
+        return JsonResponse({"res": "too large"}, status=413)
+
+    try:
+        payload = json.loads(request.body.decode())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"res": "invalid"}, status=400)
+
+    if not isinstance(payload, dict):
+        return JsonResponse({"res": "invalid"}, status=400)
+
+    if not verify_sns_signature(payload):
+        return JsonResponse({"res": "forbidden"}, status=403)
+
+    handle_sns_payload(payload)
+    return JsonResponse({"res": "ok"})
+
+
+@login_required
+def lm_suppressions(request: HttpRequest) -> Any:
+    """Show suppressed email addresses, allowing manual add and removal."""
+    context = check_lm_admin(request)
+
+    if request.method == "POST":
+        emails = re.split(r"[\s,;|]+", request.POST.get("emails", ""))
+        release = "release" in request.POST
+        cleaned = [email.strip().lower() for email in emails if email.strip() and "@" in email]
+        if release:
+            # Each release hits SES, so a bulk one is handed over to a background task
+            release_suppressed_emails(cleaned)
+        else:
+            for email in cleaned:
+                suppress_email(email, SuppressionReason.MANUAL)
+        messages.success(request, f"{len(cleaned)} emails updated")
+        return redirect(request.path_info)
+
+    show_inactive = request.GET.get("inactive", "0") == "1"
+    query = EmailSuppression.objects.all()
+    if not show_inactive:
+        query = query.filter(active=True)
+
+    # The table grows one row per bouncing address and is never pruned, so the listing
+    # is paginated instead of rendering the whole suppression history in one response
+    paginator = Paginator(query.order_by("-last_event"), SUPPRESSIONS_PER_PAGE)
+    try:
+        page = paginator.page(request.GET.get("page"))
+    except PageNotAnInteger:
+        page = paginator.page(1)
+    except EmptyPage:
+        page = paginator.page(paginator.num_pages)
+
+    context["suppression_list"] = page
+    context["page"] = page
+    context["show_inactive"] = show_inactive
+    return render(request, "larpmanager/larpmanager/suppressions.html", context)
+
+
 @login_required
 def lm_payments(request: HttpRequest) -> HttpResponse:
     """Display payment management page for admin users.
@@ -1063,7 +1204,7 @@ def get_run_lm_payment(run: Any) -> None:
         Modifies run object with features, active_registrations, and total attributes
 
     """
-    run.features = len(get_association_features(run.event.association_id)) + len(get_event_features(run.event_id))
+    run.features = len(get_association_features(get_run_association_id(run.id))) + len(get_event_features(run.event_id))
     run.active_registrations = (
         Registration.objects.filter(run__id=run.id, cancellation_date__isnull=True)
         .exclude(ticket__tier__in=[TicketTier.STAFF, TicketTier.WAITING, TicketTier.NPC])
@@ -1399,6 +1540,16 @@ def _create_demo(request: HttpRequest, demo_type: LarpManagerDemoType | None = N
     # Non-campaign demo types land the user directly on their event's dashboard;
     # empty demos and campaign demo types (multiple events) land on the assoc dashboard
     redirect_path = f"{first_event.slug}/manage" if first_event else "manage"
+
+    # Remember the demo just built, so an immediate re-post reuses it
+    if demo_type:
+        request.session["demo_recent"] = {
+            "uuid": str(demo_type.uuid),
+            "slug": demo_association.slug,
+            "path": redirect_path,
+            "created": timezone.now().isoformat(),
+        }
+
     return redirect("after_login", subdomain=demo_association.slug, path=redirect_path)
 
 
