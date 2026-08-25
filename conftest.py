@@ -22,7 +22,6 @@
 
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -323,47 +322,6 @@ def _database_has_tables() -> bool:
     return True
 
 
-def _get_dump_schema_version() -> str | None:
-    """Get schema version from test_db.sql dump file marker.
-
-    Returns the migration name from the LARPMANAGER_SCHEMA_VERSION comment
-    at the end of the SQL dump, or None if not found.
-    """
-    sql_path = Path(__file__).parent / "larpmanager" / "tests" / "test_db.sql"
-    if not sql_path.exists():
-        return None
-
-    try:
-        # Read last 500 bytes to find the version marker
-        with sql_path.open("rb") as f:
-            f.seek(max(0, sql_path.stat().st_size - 500))
-            tail = f.read().decode("utf-8", errors="ignore")
-
-        # Look for version marker
-        match = re.search(r"-- LARPMANAGER_SCHEMA_VERSION:\s*(\S+)", tail)
-        if match:
-            return match.group(1)
-    except (OSError, UnicodeDecodeError) as e:
-        logger = logging.getLogger(__name__)
-        logger.debug("Failed to read schema version from dump: %s", e)
-
-    return None
-
-
-def _get_latest_migration() -> str | None:
-    """Get the name of the latest migration file."""
-    migrations_dir = Path(__file__).parent / "larpmanager" / "migrations"
-    if not migrations_dir.exists():
-        return None
-
-    # Get all numbered migration files and sort them
-    migration_files = sorted(migrations_dir.glob("[0-9]*.py"))
-    if migration_files:
-        return migration_files[-1].stem
-
-    return None
-
-
 def _get_expected_migrations() -> set[str]:
     """Get list of all migration files that should be applied."""
     migrations_dir = Path(__file__).parent / "larpmanager" / "migrations"
@@ -400,23 +358,14 @@ def _get_applied_migrations() -> set[str]:
 def _database_has_correct_schema() -> bool:
     """Check if database has all required migrations applied.
 
-    Uses two-tier check:
-    1. Fast check: Compare dump schema version marker with latest migration
-    2. Full check: Compare all migration files with django_migrations table
-
-    Returns True if all migration files in larpmanager/migrations/ are present
-    in the database's django_migrations table.
+    Compares every migration file in larpmanager/migrations/ against the
+    django_migrations table, and returns True only when the database has them
+    all. The answer must come from the database: comparing the dump file's
+    version marker against the migration filenames only shows that the dump is
+    current, not that this database was ever loaded from it, so a stale
+    database whose marker happens to match would be wrongly reused.
     """
-    # FAST PATH: Check if dump version marker matches latest migration
-    # This avoids DB queries if the dump is already up-to-date
-    dump_version = _get_dump_schema_version()
-    latest_migration = _get_latest_migration()
-
-    if dump_version and latest_migration and dump_version == latest_migration:
-        # Dump is up-to-date, assume DB is correct
-        return True
-
-    # FULL CHECK: Query database to verify all migrations are applied
+    # Query database to verify all migrations are applied
     expected_migrations = _get_expected_migrations()
     applied_migrations = _get_applied_migrations()
 

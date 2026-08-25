@@ -86,18 +86,34 @@ cleanup_test_environment() {
   pkill -9 -f "playwright" 2>/dev/null || true
   sleep 1
 
+  # Connect over TCP: without -h psql uses the unix socket, which is peer
+  # authenticated and fails for the database user, and every failure below used
+  # to be discarded. A skipped drop leaves a stale test database that the next
+  # run reuses, so these must be loud rather than silent.
+  psql_admin() {
+    PGPASSWORD="${PGPASSWORD:-larpmanager}" psql -U "${PGUSER:-larpmanager}" \
+      -h "${PGHOST:-localhost}" -p "${PGPORT:-5432}" "$@"
+  }
+
   # Terminate all connections to test databases (including worker databases)
-  PGPASSWORD="${PGPASSWORD:-larpmanager}" psql -U "${PGUSER:-larpmanager}" -c "
+  psql_admin -q -c "
     SELECT pg_terminate_backend(pid)
     FROM pg_stat_activity
     WHERE (datname LIKE 'test_%' OR datname LIKE 'larp_test%')
       AND pid <> pg_backend_pid();
-  " 2>/dev/null || true
+  " >/dev/null || true
 
   # Drop all test databases (including worker databases from previous runs)
   echo "Dropping all test databases..."
-  for db in $(PGPASSWORD="${PGPASSWORD:-larpmanager}" psql -U "${PGUSER:-larpmanager}" -t -c "SELECT datname FROM pg_database WHERE datname LIKE 'test_%' OR datname LIKE 'larp_test%';" 2>/dev/null); do
-    PGPASSWORD="${PGPASSWORD:-larpmanager}" psql -U "${PGUSER:-larpmanager}" -c "DROP DATABASE IF EXISTS \"$db\";" 2>/dev/null || true
+  if ! test_databases=$(psql_admin -t -A -c "SELECT datname FROM pg_database WHERE datname LIKE 'test_%' OR datname LIKE 'larp_test%';"); then
+    echo "ERROR: could not list test databases; check PGHOST/PGPORT/PGUSER/PGPASSWORD" >&2
+    exit 1
+  fi
+  for db in $test_databases; do
+    if ! psql_admin -q -c "DROP DATABASE IF EXISTS \"$db\";" >/dev/null; then
+      echo "ERROR: failed to drop test database $db (is something still connected?)" >&2
+      exit 1
+    fi
   done
 
   # Clean pytest cache
