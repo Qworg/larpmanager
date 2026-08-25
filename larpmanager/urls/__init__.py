@@ -31,6 +31,7 @@ from larpmanager.views.api_discord import (
     discord_link_complete,
     discord_member_check,
     discord_oauth_callback,
+    discord_oauth_start,
     discord_oauth_url,
     discord_unlink,
 )
@@ -94,6 +95,11 @@ urlpatterns = (
             "api/v1/discord/unlink/",
             discord_unlink,
             name="api_discord_unlink",
+        ),
+        path(
+            "discord/link/start/",
+            discord_oauth_start,
+            name="discord_oauth_start",
         ),
         path(
             "discord/callback/",

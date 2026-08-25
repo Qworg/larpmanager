@@ -9,7 +9,7 @@
 {% block content %}
     {% include "larpmanager/member/profile_nav.html" %}
     <div class="user_resize platform"
-         data-ticket-poller
+         {% if ticket.status != 'done' %}data-ticket-poller{% endif %}
          data-ticket-uuid="{{ ticket.uuid }}"
          data-state-url="{% url 'ticket_state' ticket.uuid %}"
          data-messages-url="{% url 'ticket_messages' ticket.uuid %}">

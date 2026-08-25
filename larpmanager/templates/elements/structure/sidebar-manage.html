@@ -53,7 +53,10 @@
                             <a class="sidebar-link" href="{% url 'exe_preferences' %}">{% trans "Preferences" %}</a>
                             <a href="#" class="explain-icon" tog="exe_preferences"><i class="fas fa-question-circle"></i></a>
                         </span>
-                        {% if is_admin %}
+                        {% if is_admin and lite_mode or is_admin and skin_managed and not is_staff %}
+                            {# The exe_tickets permission below is a placeholder feature hidden from lite/managed
+                               skins (docs/01, LITE_PERMISSIONS / get_allowed_managed), so admins in those modes
+                               need this explicit fallback link; everyone else gets it from association_pms. #}
                             <span class="sidebar-link-wrap"
                                   descr="{% trans "View support tickets" %}">
                                 <a class="sidebar-link" href="{% url 'tickets' %}">{% trans "Tickets" %}</a>
@@ -165,7 +168,9 @@
                                     </a>
                                 </span>
                             {% endif %}
-                            {% if is_admin %}
+                            {% if is_admin and lite_mode or is_admin and skin_managed and not is_staff %}
+                                {# See the matching comment above: fallback for lite/managed skins where the
+                                   exe_tickets placeholder permission is filtered out of association_pms. #}
                                 <span class="sidebar-link-wrap">
                                     <a class="sidebar-link" href="{% url 'tickets' %}">
                                         <i class="fa-solid fa-ticket"></i>

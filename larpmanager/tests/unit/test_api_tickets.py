@@ -21,9 +21,12 @@
 
 import json
 from datetime import UTC, datetime
+from unittest import mock
 
 import pytest
 from django.core.cache import cache
+from django.db.models import F
+from django.db.models.query import QuerySet
 from django.test import Client, override_settings
 
 from larpmanager.models.association import Association
@@ -215,6 +218,26 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(data["ticket"]["discord_channel_id"], 987654321)
         self.assertEqual(data["ticket"]["priority"], "medium")
 
+    def test_ticket_notification_email_fires_only_on_create(self):
+        """The "new ticket" notification email is sent once, on creation, and
+        never again on a later save -- including the version bump the ticket
+        gets on close/reopen/merge (a plain ``.save()``, not the PATCH CAS
+        update, which bypasses signals entirely via ``QuerySet.update()``).
+
+        Regression test for API-2: ``save_larpmanager_ticket`` had no
+        ``if created:`` guard, so before the CAS rewrite every API PATCH
+        (which used ``ticket.save()``) silently re-sent this email on every
+        edit. The guard makes the one-time-on-create behaviour deliberate.
+        """
+        with mock.patch("larpmanager.models.signals.send_support_ticket_email") as mock_send:
+            ticket = self.create_larpmanager_ticket(discord_channel_id=321)
+            self.assertEqual(mock_send.call_count, 1)
+            mock_send.assert_called_once_with(ticket)
+
+            ticket.subject = "updated subject"
+            ticket.save(update_fields=["subject"])
+            self.assertEqual(mock_send.call_count, 1)
+
     def test_create_ticket_public_type(self):
         """POST accepts a ticket_type and defaults to private."""
         association = self.get_association()
@@ -279,6 +302,32 @@ class TestTicketAPI(BaseTestCase):
         self.assertTrue(TicketMessage.objects.filter(ticket=target, content="hello").exists())
         self.assertEqual(TicketMessage.objects.filter(ticket=source).count(), 0)
         self.assertTrue(TicketEvent.objects.filter(ticket=source, event_type=TicketEvent.EventType.MERGED).exists())
+
+    def test_merge_cross_association_rejected_even_when_auth_unscoped(self):
+        """ticket_merge rejects a cross-association merge even with an unscoped key.
+
+        ``_association_mismatch`` alone always no-ops when the authenticating
+        key is unscoped (association=None), like a bot key. Regression test
+        for API-2.
+        """
+        assoc_a = self.create_association(name="Merge Org A", slug="merge-org-a")
+        assoc_b = self.create_association(name="Merge Org B", slug="merge-org-b")
+        source = self.create_larpmanager_ticket(association=assoc_a, discord_channel_id=741001)
+        target = self.create_larpmanager_ticket(association=assoc_b, discord_channel_id=741002)
+        TicketMessage.objects.create(ticket=source, discord_message_id=741003, author_name="A", content="hello")
+
+        response = self.client.post(
+            f"/api/v1/tickets/{source.uuid}/merge/",
+            data=json.dumps({"merge_into": str(target.uuid)}),
+            content_type="application/json",
+            **self.headers,  # self.api_key has no association -> unscoped, like a bot key
+        )
+
+        self.assertEqual(response.status_code, 403)
+        source.refresh_from_db()
+        self.assertIsNone(source.merged_into_id)
+        self.assertEqual(TicketMessage.objects.filter(ticket=source).count(), 1)
+        self.assertEqual(TicketMessage.objects.filter(ticket=target).count(), 0)
 
     def test_strand_ticket(self):
         """Strand clears the Discord link and marks the ticket stranded."""
@@ -474,6 +523,29 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["ticket"]["version"], 1)
 
+    def test_patch_advances_updated_at(self):
+        """PATCH must advance ``updated_at`` even though the CAS write goes
+        through ``QuerySet.update()``, which silently skips ``auto_now`` fields
+        unless they are passed explicitly. Regression test for API-1: after the
+        CAS rewrite, both the response and the DB row kept reporting the
+        pre-PATCH timestamp.
+        """
+        ticket = self.create_larpmanager_ticket(discord_channel_id=123)
+        original_updated = ticket.updated
+
+        response = self.client.patch(
+            f"/api/v1/tickets/{ticket.uuid}/",
+            data=json.dumps({"version": 0, "status": "working"}),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.json()["ticket"]["updated_at"], original_updated.isoformat())
+
+        ticket.refresh_from_db()
+        self.assertGreater(ticket.updated, original_updated)
+
     def test_patch_version_required(self):
         """PATCH without a version returns 400."""
         ticket = self.create_larpmanager_ticket(discord_channel_id=123)
@@ -503,6 +575,126 @@ class TestTicketAPI(BaseTestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["current_version"], 3)
+
+    def _run_racing_patches(self, ticket: LarpManagerTicket, first_payload: dict, second_payload: dict):
+        """Drive two PATCHes against the real endpoint that genuinely overlap.
+
+        Sequential PATCHes cannot distinguish the CAS fix from the pre-fix
+        check-then-save code: each request re-fetches the ticket fresh, so even
+        the old code would notice a version mismatch made by an earlier,
+        already-committed request. A real repro needs the *second* request to
+        read and commit while the *first* is still holding the ticket it read
+        at the same pre-write version -- i.e. a genuine interleaving of the two
+        reads, not just of the two writes.
+
+        This is forced deterministically (no threads/timing) by monkeypatching
+        the view's initial ``LarpManagerTicket.objects...get(...)`` fetch: the
+        first time it is called for this ticket, the *result is captured first*
+        (this is the outer request's own, soon-to-be-stale, read) and only then
+        is a second, fully independent PATCH request run to completion, which
+        commits its own change and bumps the version. The outer request then
+        continues holding its earlier snapshot, exactly as it would if the two
+        requests had truly run concurrently.
+
+        Returns (first_response, second_response).
+        """
+        nested: dict = {}
+        triggered = {"done": False}
+        original_get = QuerySet.get
+
+        def racing_get(qs_self, *args, **kwargs):
+            result = original_get(qs_self, *args, **kwargs)
+            if (
+                not triggered["done"]
+                and qs_self.model is LarpManagerTicket
+                and kwargs.get("uuid") == str(ticket.uuid)
+                and "deleted__isnull" in kwargs
+            ):
+                triggered["done"] = True
+                nested["response"] = self.client.patch(
+                    f"/api/v1/tickets/{ticket.uuid}/",
+                    data=json.dumps(second_payload),
+                    content_type="application/json",
+                    **self.headers,
+                )
+            return result
+
+        with mock.patch.object(QuerySet, "get", racing_get):
+            first_response = self.client.patch(
+                f"/api/v1/tickets/{ticket.uuid}/",
+                data=json.dumps(first_payload),
+                content_type="application/json",
+                **self.headers,
+            )
+
+        self.assertTrue(triggered["done"], "race harness never armed; fetch hook did not match")
+        return first_response, nested["response"]
+
+    def test_patch_stale_version_rejected_does_not_clobber(self):
+        """A PATCH holding a pre-write version is rejected by the CAS update
+        rather than silently overwriting a change genuinely committed by an
+        overlapping PATCH, and it neither emits an event nor changes any field.
+
+        Regression test for API-1: the version check used to happen outside the
+        transaction against a possibly-stale in-memory ticket, then an
+        unconditional ``ticket.save()`` rewrote every column, so a request
+        racing another that committed in between could clobber that write. The
+        fix folds the check into the UPDATE's WHERE clause, so it is evaluated
+        against the row's live version and reports 409, touching nothing.
+        """
+        ticket = self.create_larpmanager_ticket(
+            status=TicketStatus.OPEN, priority=TicketPriority.LOW, discord_channel_id=123
+        )
+
+        first, second = self._run_racing_patches(
+            ticket,
+            first_payload={"version": 0, "status": "working"},
+            second_payload={"version": 0, "priority": "high"},
+        )
+
+        # The genuinely concurrent write commits first and wins.
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["ticket"]["priority"], "high")
+
+        # The request holding the now-stale pre-write version is rejected, not
+        # applied on top of the winner's write.
+        self.assertEqual(first.status_code, 409)
+        self.assertEqual(first.json()["current_version"], 1)
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.priority, TicketPriority.HIGH)
+        self.assertEqual(ticket.version, 1)
+        self.assertFalse(
+            TicketEvent.objects.filter(ticket=ticket, event_type=TicketEvent.EventType.STATUS_CHANGED).exists()
+        )
+
+    def test_patch_cas_update_is_atomic_on_version(self):
+        """Two PATCHes racing on the *same* field, via the real endpoint, with
+        genuinely overlapping reads: exactly one write lands and ``version``
+        advances by exactly one, never two (no double-apply, no merge).
+
+        Regression test for API-1/D8: proves the CAS update's row-affected
+        count actually gates which write is treated as applied, rather than
+        both requests' fetched objects independently believing their write
+        succeeded.
+        """
+        ticket = self.create_larpmanager_ticket(
+            status=TicketStatus.OPEN, priority=TicketPriority.LOW, discord_channel_id=124
+        )
+
+        first, second = self._run_racing_patches(
+            ticket,
+            first_payload={"version": 0, "status": "working"},
+            second_payload={"version": 0, "status": "done"},
+        )
+
+        # Exactly one of the two racing writes is ever accepted.
+        self.assertEqual({first.status_code, second.status_code}, {200, 409})
+
+        ticket.refresh_from_db()
+        self.assertIn(ticket.status, {TicketStatus.WORKING, TicketStatus.DONE})
+        self.assertEqual(ticket.version, 1, "version must advance exactly once, not once per racing request")
 
     def test_update_ticket_invalid_status(self):
         """Test that PATCH returns 400 for invalid status."""
@@ -550,6 +742,26 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["ticket"]["transcript"], transcript)
+
+    def test_close_already_closed_ticket_rejected_no_duplicate_event(self):
+        """A second close on an already-closed ticket is rejected (400) instead of
+        emitting a duplicate CLOSED event, mirroring ticket_reopen's existing guard.
+
+        Regression test for API-5.
+        """
+        ticket = self.create_larpmanager_ticket(status=TicketStatus.OPEN, discord_channel_id=850)
+
+        first = self.client.post(
+            f"/api/v1/tickets/{ticket.uuid}/close/", content_type="application/json", **self.headers
+        )
+        self.assertEqual(first.status_code, 200)
+
+        second = self.client.post(
+            f"/api/v1/tickets/{ticket.uuid}/close/", content_type="application/json", **self.headers
+        )
+        self.assertEqual(second.status_code, 400)
+
+        self.assertEqual(TicketEvent.objects.filter(ticket=ticket, event_type=TicketEvent.EventType.CLOSED).count(), 1)
 
     def test_reopen_ticket_success(self):
         """Test that POST /reopen/ sets status=open."""
@@ -892,6 +1104,66 @@ class TestTicketAPI(BaseTestCase):
         self.assertEqual(third.json()["ticket"]["uuid"], first.json()["ticket"]["uuid"])
 
         self.assertEqual(LarpManagerTicket.objects.filter(discord_channel_id=998877665).count(), 1)
+
+    def test_create_duplicate_idempotency_key_soft_deleted_reports_truthfully(self):
+        """A create colliding with a soft-deleted ticket's idempotency_key gets a
+        truthful, actionable 409 identifying the dead ticket, instead of either a
+        misleading resurrection of its stale data or a bare 500.
+
+        Regression test for MINE-4b: idempotency_key is a plain DB-unique column
+        that soft-delete does not clear, so the pre-check and the old
+        IntegrityError recovery (both on the default, DELETED_INVISIBLE manager)
+        could never find or report the soft-deleted row.
+        """
+        association = self.get_association()
+        payload = {
+            "association_uuid": str(association.uuid),
+            "discord_creator_id": 555111,
+            "discord_channel_id": 700111,
+            "subject": "Mine4b",
+            "client_uuid": "mine4b-key",
+        }
+        created = self.client.post(
+            "/api/v1/tickets/", data=json.dumps(payload), content_type="application/json", **self.headers
+        )
+        self.assertEqual(created.status_code, 201)
+        ticket_uuid = created.json()["ticket"]["uuid"]
+
+        delete_response = self.client.delete(f"/api/v1/tickets/{ticket_uuid}/", **self.headers)
+        self.assertEqual(delete_response.status_code, 200)
+
+        # Same idempotency key, different channel so the channel-based idempotent
+        # lookup does not short-circuit before the idempotency_key path is hit.
+        retried = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({**payload, "discord_channel_id": 700222}),
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(retried.status_code, 409)
+        self.assertEqual(retried.json()["ticket_uuid"], ticket_uuid)
+
+    def test_create_duplicate_channel_soft_deleted_reports_truthfully(self):
+        """Same soft-delete-vs-unique trap for discord_channel_id (MINE-4b)."""
+        association = self.get_association()
+        existing = self.create_larpmanager_ticket(association=association, discord_channel_id=700333)
+        self.client.delete(f"/api/v1/tickets/{existing.uuid}/", **self.headers)
+
+        response = self.client.post(
+            "/api/v1/tickets/",
+            data=json.dumps({
+                "association_uuid": str(association.uuid),
+                "discord_creator_id": 555222,
+                "discord_channel_id": 700333,
+                "subject": "Mine4b channel",
+                "client_uuid": "mine4b-channel-key",
+            }),
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["ticket_uuid"], str(existing.uuid))
 
     def test_create_201_poll_contract(self):
         """Create without discord_channel_id returns 201, null channel, and a channel_create event."""
@@ -1463,6 +1735,55 @@ class TestTicketEventsAPI(BaseTestCase):
             **self.bot_headers,
         )
         self.assertEqual(response.status_code, 404)
+
+    def test_outbound_repost_after_soft_delete_revives_message(self):
+        """Reposting a message after it was soft-deleted revives the row instead of
+        a permanent 500.
+
+        Regression test for MINE-4: discord_message_id is a plain DB-unique column
+        that soft-delete does not clear. The upsert's get_or_create used the
+        default (DELETED_INVISIBLE) manager, so it could not see the soft-deleted
+        row, tried to INSERT, hit the unique violation, and its IntegrityError
+        fallback ALSO used the default manager and raised an uncaught
+        TicketMessage.DoesNotExist -> uncaught 500. Proven executed traceback in
+        the adjudicated fix list.
+        """
+        self.create_larpmanager_ticket(discord_channel_id=930)
+        payload = {
+            "discord_channel_id": 930,
+            "discord_message_id": 5001,
+            "author_name": "Alice",
+            "content": "hello",
+            "attachments": [],
+            "is_bot": False,
+        }
+        first = self.client.post(
+            "/api/v1/tickets/outbound/", data=json.dumps(payload), content_type="application/json", **self.bot_headers
+        )
+        self.assertEqual(first.status_code, 200)
+
+        delete_response = self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({"discord_channel_id": 930, "discord_message_id": 5001, "deleted": True}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertIsNotNone(TicketMessage.all_objects.get(discord_message_id=5001).deleted)
+
+        # Re-posting the same discord_message_id must revive the row, not 500.
+        second = self.client.post(
+            "/api/v1/tickets/outbound/",
+            data=json.dumps({**payload, "content": "hello again"}),
+            content_type="application/json",
+            **self.bot_headers,
+        )
+        self.assertEqual(second.status_code, 200)
+
+        revived = TicketMessage.all_objects.get(discord_message_id=5001)
+        self.assertIsNone(revived.deleted)
+        self.assertEqual(revived.content, "hello again")
+        self.assertEqual(TicketMessage.objects.filter(discord_message_id=5001).count(), 1)
 
     def test_transcript_endpoint(self):
         """GET /tickets/<uuid>/transcript/ returns transcript and rows oldest-first."""

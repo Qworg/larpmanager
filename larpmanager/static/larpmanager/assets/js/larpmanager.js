@@ -23,6 +23,22 @@ function stop_spinner() {
 var TICKET_STATUS_LABELS = {open: 'Open', working: 'Working', done: 'Done'};
 var TICKET_PRIORITY_LABELS = {low: 'Low', medium: 'Medium', high: 'High'};
 
+// Statuses that stop the poller for a given root once reached.
+var TICKET_TERMINAL_STATUSES = ['done'];
+
+// Polling cadence: starts at the base interval and doubles (capped) on each
+// request that errors or is rate-limited, resetting to base on success.
+var TICKET_POLL_BASE_INTERVAL = 5000;
+var TICKET_POLL_MAX_INTERVAL = 80000;
+
+// Single shared poll loop: one timer drives every active root instead of one
+// setInterval per root, so the request rate no longer scales with row count.
+var ticketPoller = {
+    roots: [],
+    timer: null,
+    delay: TICKET_POLL_BASE_INTERVAL
+};
+
 // Append a single transcript message row to the transcript container.
 function appendTicketMessage(transcript, message) {
     var wrap = document.createElement('div');
@@ -41,27 +57,82 @@ function appendTicketMessage(transcript, message) {
     transcript.appendChild(wrap);
 }
 
+// Return the status code of a poller root, from the live state if already
+// refreshed, otherwise from the server-rendered attribute.
+function ticketPollStatus(root) {
+    var statusEl = root.querySelector('[data-ticket-status]');
+    return (statusEl || root).getAttribute('data-ticket-status');
+}
+
+function ticketPollIsTerminal(root) {
+    // A list-poller root (the staff dashboard table) covers many tickets at
+    // once and is never itself "terminal" - dropping it on the first row
+    // that happens to be done would silently stop the whole page's refresh.
+    if (root.hasAttribute('data-ticket-list-poller')) return false;
+    return TICKET_TERMINAL_STATUSES.indexOf(ticketPollStatus(root)) !== -1;
+}
+
+// Patch one row/root's status+priority display cells from a state payload.
+function applyTicketStateToRoot(root, state) {
+    var statusEl = root.querySelector('[data-ticket-status]');
+    if (statusEl) {
+        statusEl.textContent = state.status_display || TICKET_STATUS_LABELS[state.status] || state.status;
+        statusEl.setAttribute('data-ticket-status', state.status);
+    }
+    var priorityEl = root.querySelector('[data-ticket-priority]');
+    if (priorityEl) {
+        priorityEl.textContent = state.priority_display || TICKET_PRIORITY_LABELS[state.priority] || state.priority;
+        priorityEl.setAttribute('data-ticket-priority', state.priority);
+    }
+}
+
+// Poll the staff dashboard's ticket list: fetch the states of every row
+// currently on the page in ONE batched request (instead of one poller per
+// row, which was the original per-row fan-out bug), then patch each row's
+// status/priority cells in place.
+function lmTicketListPoll(root) {
+    var batchUrl = root.getAttribute('data-batch-state-url');
+    var rows = root.querySelectorAll('[data-ticket-row-uuid]');
+    if (!batchUrl || !rows.length) return Promise.resolve();
+
+    var uuids = Array.prototype.map.call(rows, function(row) {
+        return row.getAttribute('data-ticket-row-uuid');
+    });
+    var url = batchUrl + '?uuids=' + encodeURIComponent(uuids.join(','));
+
+    return fetch(url, {headers: {'X-Requested-With': 'XMLHttpRequest'}, credentials: 'same-origin'})
+        .then(function(resp) {
+            if (!resp.ok) throw new Error('ticket batch state request failed: ' + resp.status);
+            return resp.json();
+        })
+        .then(function(data) {
+            var states = (data && data.tickets) || {};
+            rows.forEach(function(row) {
+                var state = states[row.getAttribute('data-ticket-row-uuid')];
+                if (state) applyTicketStateToRoot(row, state);
+            });
+        });
+}
+
 // Poll a single ticket root: refresh status/priority and, on a detail page,
 // fetch any transcript messages that arrived after the last seen id.
+// Returns a promise that rejects on a failed/rate-limited request so the
+// caller can back off.
 window.lmTicketPoll = function(root) {
-    var stateUrl = root.getAttribute('data-state-url');
-    if (!stateUrl) return;
+    if (root.hasAttribute('data-ticket-list-poller')) return lmTicketListPoll(root);
 
-    fetch(stateUrl, {headers: {'X-Requested-With': 'XMLHttpRequest'}, credentials: 'same-origin'})
-        .then(function(resp) { return resp.ok ? resp.json() : null; })
+    var stateUrl = root.getAttribute('data-state-url');
+    if (!stateUrl) return Promise.resolve();
+
+    return fetch(stateUrl, {headers: {'X-Requested-With': 'XMLHttpRequest'}, credentials: 'same-origin'})
+        .then(function(resp) {
+            if (!resp.ok) throw new Error('ticket state request failed: ' + resp.status);
+            return resp.json();
+        })
         .then(function(state) {
             if (!state) return;
 
-            var statusEl = root.querySelector('[data-ticket-status]');
-            if (statusEl) {
-                statusEl.textContent = state.status_display || TICKET_STATUS_LABELS[state.status] || state.status;
-                statusEl.setAttribute('data-ticket-status', state.status);
-            }
-            var priorityEl = root.querySelector('[data-ticket-priority]');
-            if (priorityEl) {
-                priorityEl.textContent = state.priority_display || TICKET_PRIORITY_LABELS[state.priority] || state.priority;
-                priorityEl.setAttribute('data-ticket-priority', state.priority);
-            }
+            applyTicketStateToRoot(root, state);
             var versionEl = root.querySelector('[data-ticket-version]');
             if (versionEl) versionEl.textContent = state.version;
 
@@ -88,16 +159,74 @@ window.lmTicketPoll = function(root) {
         });
 };
 
+// Schedule the next shared tick, unless there is nothing to poll or the tab
+// is hidden (resumed by the visibilitychange listener below).
+function ticketPollSchedule() {
+    if (ticketPoller.timer || !ticketPoller.roots.length || document.hidden) return;
+    ticketPoller.timer = setTimeout(ticketPollTick, ticketPoller.delay);
+}
+
+function ticketPollStop() {
+    if (ticketPoller.timer) {
+        clearTimeout(ticketPoller.timer);
+        ticketPoller.timer = null;
+    }
+}
+
+// One tick polls every active root in parallel, drops roots that reached a
+// terminal status, and adjusts the shared delay: doubled (capped) on any
+// error/rate-limit, reset to base once every root succeeds.
+function ticketPollTick() {
+    ticketPoller.timer = null;
+    if (!ticketPoller.roots.length) return;
+
+    var hadError = false;
+    var pending = ticketPoller.roots.map(function(root) {
+        return window.lmTicketPoll(root).then(
+            function() { return root; },
+            function() { hadError = true; return root; }
+        );
+    });
+
+    Promise.all(pending).then(function(polledRoots) {
+        polledRoots.forEach(function(root) {
+            if (ticketPollIsTerminal(root)) {
+                var idx = ticketPoller.roots.indexOf(root);
+                if (idx !== -1) ticketPoller.roots.splice(idx, 1);
+            }
+        });
+        ticketPoller.delay = hadError
+            ? Math.min(ticketPoller.delay * 2, TICKET_POLL_MAX_INTERVAL)
+            : TICKET_POLL_BASE_INTERVAL;
+        ticketPollSchedule();
+    });
+}
+
+// Pause the shared loop while the tab is hidden; resume (with an immediate
+// tick) when it becomes visible again.
+document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+        ticketPollStop();
+    } else if (ticketPoller.roots.length) {
+        ticketPollTick();
+    }
+});
+
 function startTicketPollers() {
-    var roots = document.querySelectorAll('[data-ticket-poller]');
+    var roots = document.querySelectorAll('[data-ticket-poller], [data-ticket-list-poller]');
     if (!roots.length) return;
 
+    var newlyActive = [];
     roots.forEach(function(root) {
         if (root.getAttribute('data-ticket-polling') === '1') return;
         root.setAttribute('data-ticket-polling', '1');
-        window.lmTicketPoll(root);
-        setInterval(function() { window.lmTicketPoll(root); }, 5000);
+        if (ticketPollIsTerminal(root)) return;
+        newlyActive.push(root);
     });
+    if (!newlyActive.length) return;
+
+    ticketPoller.roots = ticketPoller.roots.concat(newlyActive);
+    if (!document.hidden) ticketPollTick();
 }
 
 window.addEventListener('DOMContentLoaded', function() {
